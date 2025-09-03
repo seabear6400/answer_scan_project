@@ -3,57 +3,86 @@ import argparse
 import subprocess
 from detector_pipeline import detect_pipeline, DetectorConfig
 
-
 def parse_args():
-    p = argparse.ArgumentParser(description="Answer Sheet QA — run pipeline & dashboard")
-    p.add_argument("--input_dir", default="input_images", help="Input images directory")
-    p.add_argument("--output_dir", default="output", help="Output directory")
-    p.add_argument("--use_faiss", action="store_true", help="Force FAISS if installed")
-    p.add_argument("--k", type=int, default=20, help="KNN candidate neighbors per image")
-    p.add_argument("--phash_thresh", type=int, default=10, help="Max Hamming distance for pHash prefilter")
-    p.add_argument("--density_diff", type=float, default=0.15, help="Max absolute density difference prefilter")
-    p.add_argument("--cnn_thresh", type=float, default=0.99, help="Similarity threshold for grouping")
-    p.add_argument("--suspect_low", type=float, default=0.95, help="Similarity for suspect pairs")
-    p.add_argument("--blank_thresh", type=float, default=0.02, help="Ink density <= this → blank answer")
-    p.add_argument("--batch", type=int, default=64, help="Embedding batch size")
-    p.add_argument("--num_workers", type=int, default=0, help="DataLoader workers (0=disable multiproc)")
-    p.add_argument("--roi", type=float, nargs=4, default=[0.15, 0.15, 0.85, 0.85],
-                   help="ROI as ratios: left, top, right, bottom")
-    return p.parse_args()
+    p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
+    p.add_argument("--input_dir", default="input_images")
+    p.add_argument("--output_dir", default="output")
 
+    # Backends
+    p.add_argument("--embed_backend", choices=["resnet18", "dinov2"], default="dinov2")
+    p.add_argument("--ann_backend", choices=["auto", "brute", "faiss", "hnsw"], default="auto")
+
+    # ANN params
+    p.add_argument("--k", type=int, default=20)
+    p.add_argument("--hnsw_M", type=int, default=32)
+    p.add_argument("--hnsw_efC", type=int, default=200)
+    p.add_argument("--hnsw_efS", type=int, default=64)
+
+    # Prefilters
+    p.add_argument("--prefilter", choices=["phash", "pdq", "both"], default="phash")
+    p.add_argument("--phash_thresh", type=int, default=10)
+    p.add_argument("--pdq_thresh", type=int, default=80)
+    p.add_argument("--density_diff", type=float, default=0.15)
+
+    # Similarity thresholds
+    p.add_argument("--cnn_thresh", type=float, default=0.99)
+    p.add_argument("--suspect_low", type=float, default=0.95)
+
+    # Blank detection
+    p.add_argument("--blank_method", choices=["otsu", "sauvola"], default="sauvola")
+    p.add_argument("--blank_thresh", type=float, default=0.02)
+
+    # Re-ranking / OCR (optional)
+    p.add_argument("--use_lpips", action="store_true")
+    p.add_argument("--lpips_thresh", type=float, default=0.2)
+    p.add_argument("--use_ocr", action="store_true")
+    p.add_argument("--text_sim_thresh", type=float, default=0.85)
+
+    # Alignment
+    p.add_argument("--use_alignment", action="store_true")
+
+    # Embedding
+    p.add_argument("--batch", type=int, default=64)
+    p.add_argument("--num_workers", type=int, default=0)
+    p.add_argument("--roi", type=float, nargs=4, default=[0.15, 0.15, 0.85, 0.85])
+    return p.parse_args()
 
 def main():
     args = parse_args()
-
-    # Ensure output subdirectories exist
-    output_dir = args.output_dir
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        os.makedirs(os.path.join(output_dir, sub), exist_ok=True)
+        os.makedirs(os.path.join(args.output_dir, sub), exist_ok=True)
 
-    print("🔍 탐지 실행 중... (pHash → FAISS/KNN → CNN)")
-    config = DetectorConfig(
-        use_faiss=args.use_faiss,
+    print("🔍 탐지 실행…")
+    cfg = DetectorConfig(
+        embed_backend=args.embed_backend,
+        ann_backend=args.ann_backend,
         k=args.k,
+        hnsw_M=args.hnsw_M,
+        hnsw_efC=args.hnsw_efC,
+        hnsw_efS=args.hnsw_efS,
+        prefilter=args.prefilter,
         phash_thresh=args.phash_thresh,
+        pdq_thresh=args.pdq_thresh,
         density_diff_thresh=args.density_diff,
         cnn_thresh=args.cnn_thresh,
         suspect_low=args.suspect_low,
+        blank_method=args.blank_method,
         blank_density_thresh=args.blank_thresh,
+        use_lpips=args.use_lpips,
+        lpips_thresh=args.lpips_thresh,
+        use_ocr=args.use_ocr,
+        text_sim_thresh=args.text_sim_thresh,
+        use_alignment=args.use_alignment,
         batch_size=args.batch,
         num_workers=args.num_workers,
         roi_ratio=tuple(args.roi),
     )
 
-    results, groups = detect_pipeline(args.input_dir, args.output_dir, config=config)
-    print("✅ 탐지 완료 → report.csv, report.parquet 생성됨.")
+    detect_pipeline(args.input_dir, args.output_dir, config=cfg)
+    print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
-    # 자동 대시보드 실행
-    print("🌐 대시보드를 실행합니다... 브라우저에서 자동으로 열립니다.")
-    subprocess.run([
-        "python", "-m", "streamlit", "run", "src/dashboard.py", "--",
-        f"--output_dir={args.output_dir}"
-    ])
-
+    print("🌐 대시보드 실행…")
+    subprocess.run(["python", "-m", "streamlit", "run", "src/dashboard.py", "--", f"--output_dir={args.output_dir}"])
 
 if __name__ == "__main__":
     main()

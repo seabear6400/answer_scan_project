@@ -7,14 +7,25 @@ import polars as pl
 from PIL import Image
 import numpy as np
 import pandas as pd
-
-# Diff & metrics
 import cv2
+import torch  # LPIPS 계산에 필요
+
+# 돋보기 컴포넌트
+from components.magnifier import magnifier
+
+# Optional metrics
 try:
     from skimage.metrics import structural_similarity as ssim
     _HAS_SKIMAGE = True
 except Exception:
     _HAS_SKIMAGE = False
+
+# Optional LPIPS
+try:
+    import lpips
+    _HAS_LPIPS = True
+except Exception:
+    _HAS_LPIPS = False
 
 # Optional components
 _HAS_IMG_CMP = False
@@ -31,11 +42,9 @@ try:
 except Exception:
     pass
 
-# ---------------- Args ----------------
-# streamlit run src/dashboard.py -- --output_dir=output
+# --------- Args ---------
 import argparse
 import sys
-
 
 def parse_streamlit_args():
     if '--' in sys.argv:
@@ -53,7 +62,6 @@ def parse_streamlit_args():
         ns = X()
     return ns
 
-
 ns = parse_streamlit_args()
 OUTPUT_DIR = ns.output_dir
 REPORT_PARQUET = os.path.join(OUTPUT_DIR, "report.parquet")
@@ -61,9 +69,9 @@ REPORT_CSV = os.path.join(OUTPUT_DIR, "report.csv")
 IMG_SUMMARY = os.path.join(OUTPUT_DIR, "images_summary.csv")
 
 st.set_page_config(page_title="답안지 검수 대시보드", layout="wide")
-st.title("📋 답안지 스캔 검수 대시보드")
+st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized + Magnifier)")
 
-# ---------------- 데이터 로딩 ----------------
+# --------- Load data ---------
 @st.cache_data(show_spinner=False)
 def load_report():
     if os.path.exists(REPORT_PARQUET):
@@ -81,14 +89,12 @@ def load_img_summary():
         return pd.read_csv(IMG_SUMMARY)
     return pd.DataFrame(columns=["파일", "밀도", "빈칸여부"])
 
-
 df = load_report()
 img_df = load_img_summary()
 
-# ---------------- 세션 상태 ----------------
+# --------- Session ---------
 if "compare_list" not in st.session_state:
     st.session_state.compare_list = []
-
 
 def toggle_compare(img_path: str):
     if img_path not in st.session_state.compare_list:
@@ -96,28 +102,29 @@ def toggle_compare(img_path: str):
     if len(st.session_state.compare_list) > 2:
         st.session_state.compare_list = st.session_state.compare_list[-2:]
 
-
-# ---------------- Sidebar Filters ----------------
+# --------- Sidebar ---------
 st.sidebar.header("필터 & 설정")
 min_sim = st.sidebar.slider("최소 유사도 필터", 0.0, 1.0, 0.95, 0.001)
 show_suspects = st.sidebar.checkbox("유사 후보 포함", value=True)
+use_alignment_view = st.sidebar.checkbox("비교 시 정렬(ECC) 적용", value=True)
+show_absdiff = st.sidebar.checkbox("AbsDiff Heatmap 보기", value=True)
+show_ssim = st.sidebar.checkbox("SSIM 맵 보기", value=True)
+show_lpips = st.sidebar.checkbox("LPIPS 점수/맵 보기(가능 시)", value=False)
 
 def _status_ok(s):
     if s == "중복/그룹":
         return True
     return show_suspects and (s == "유사 후보")
 
+# --------- Tabs ---------
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["리포트 요약", "유사 그룹", "정상/공백 답안", "전체 보기", "돋보기 모드"]
+)
 
-# ---------------- Tabs ----------------
-tab1, tab2, tab3, tab4 = st.tabs(["리포트 요약", "유사 그룹", "정상/공백 답안", "전체 보기"])
-
-# 📊 리포트 요약
+# 📊 Report
 with tab1:
     st.header("리포트 요약")
-    if len(df):
-        df_view = df[(df["유사도"] >= min_sim) & (df["상태"].apply(_status_ok))]
-    else:
-        df_view = df
+    df_view = df[(df["유사도"] >= min_sim) & (df["상태"].apply(_status_ok))] if len(df) else df
     st.dataframe(df_view, use_container_width=True)
     st.download_button("⬇ CSV 다운로드", df.to_csv(index=False).encode("utf-8-sig"), "report.csv", "text/csv")
     try:
@@ -126,7 +133,7 @@ with tab1:
         n_groups = 0
     st.write(f"총 그룹 수: {n_groups}")
 
-# 🖼️ 유사 그룹
+# 🖼️ Groups
 with tab2:
     st.header("유사 그룹 보기")
     grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
@@ -150,51 +157,28 @@ with tab2:
                     else:
                         st.image(Image.open(img_path), caption=f, use_container_width=True)
 
-        # 선택된 이미지가 2개면 즉시 좌우 비교
+        # Compare view
         if len(st.session_state.compare_list) == 2:
             img1, img2 = st.session_state.compare_list
             st.markdown("### 🔍 선택한 이미지 비교")
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**왼쪽**")
-                if _HAS_IMG_ZOOM:
-                    image_zoom(img1)
-                else:
-                    st.image(Image.open(img1), caption=os.path.basename(img1), use_container_width=True)
+                st.image(Image.open(img1), caption=os.path.basename(img1), use_container_width=True)
             with col2:
                 st.markdown("**오른쪽**")
-                if _HAS_IMG_ZOOM:
-                    image_zoom(img2)
-                else:
-                    st.image(Image.open(img2), caption=os.path.basename(img2), use_container_width=True)
+                st.image(Image.open(img2), caption=os.path.basename(img2), use_container_width=True)
 
-            # Slider comparison (있으면 사용)
             if _HAS_IMG_CMP:
                 st.markdown("#### Slider 비교")
-                image_comparison(
-                    img1, img2,
-                    label1=os.path.basename(img1), label2=os.path.basename(img2),
-                    width=700
-                )
+                image_comparison(img1, img2, label1=os.path.basename(img1), label2=os.path.basename(img2), width=700)
 
-            # Diff/SSIM heatmaps — 공백/연한 획도 잘 보이도록 강조
-            st.markdown("#### 차이(AbsDiff) & SSIM 맵")
-            diff_col1, diff_col2 = st.columns(2)
-            with diff_col1:
-                st.image(_absdiff_heatmap(img1, img2), caption="차이 강조(AbsDiff Heatmap)", use_container_width=True)
-            with diff_col2:
-                if _HAS_SKIMAGE:
-                    ssim_img, ssim_score = _ssim_map(img1, img2)
-                    st.image(ssim_img, caption=f"SSIM 맵 (mean={ssim_score:.4f})", use_container_width=True)
-                else:
-                    st.info("scikit-image 미설치로 SSIM 맵 생략")
-
-            # 비교 후 초기화 (유지하고 싶으면 주석 처리)
+            # reset
             st.session_state.compare_list = []
     else:
         st.info("그룹 결과 폴더가 없습니다. 먼저 파이프라인을 실행하세요.")
 
-# ✅ 정상/공백
+# ✅ Ok / Blank
 with tab3:
     st.header("정상 / 공백 답안 보기")
     ok_dir = os.path.join(OUTPUT_DIR, "ok")
@@ -219,18 +203,37 @@ with tab3:
             with cols[idx % 5]:
                 st.image(Image.open(img_path), caption=f, use_container_width=True)
 
-# 🌐 전체 보기
+# 🌐 All gallery
 with tab4:
     st.header("전체 이미지 보기")
     all_imgs = glob.glob(os.path.join(OUTPUT_DIR, "**", "*.jpg"), recursive=True)
     all_imgs += glob.glob(os.path.join(OUTPUT_DIR, "**", "*.png"), recursive=True)
+
+    # 썸네일 보여주기
     cols = st.columns(5)
     for idx, path in enumerate(sorted(all_imgs)):
         with cols[idx % 5]:
+            if st.button(f"🔍 {os.path.basename(path)}", key=f"view_{idx}"):
+                st.session_state["selected_image"] = path
             st.image(Image.open(path), caption=os.path.basename(path), use_container_width=True)
 
+    # 선택된 이미지가 있으면 크게 보기 + 돋보기
+    if "selected_image" in st.session_state:
+        big_path = st.session_state["selected_image"]
+        st.subheader(f"선택된 이미지: {os.path.basename(big_path)}")
+        # 돋보기 기능 (렌즈 확대)
+        magnifier(big_path, zoom=2, size=200)
 
-# ---------------- Utilities ----------------
+
+# 🔍 Magnifier mode
+with tab5:
+    st.header("돋보기 모드 (마우스 따라 확대)")
+    all_imgs = glob.glob(os.path.join(OUTPUT_DIR, "**", "*.jpg"), recursive=True)
+    for idx, path in enumerate(sorted(all_imgs)):
+        st.subheader(os.path.basename(path))
+        magnifier(path, zoom=2, size=200)
+
+# --------- Utils ---------
 def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:
     a = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
     b = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
@@ -242,21 +245,38 @@ def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarr
     b = cv2.resize(b, (w, h), interpolation=cv2.INTER_AREA)
     return a, b
 
-
-def _absdiff_heatmap(a_path: str, b_path: str) -> np.ndarray:
-    a, b = _read_gray_same_size(a_path, b_path)
+def _absdiff_heatmap(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     diff = cv2.absdiff(a, b)
-    # 미세한 간극(띄어쓰기/엷은 획) 강조: 살짝 블러 → 정규화 → 컬러맵
     diff = cv2.GaussianBlur(diff, (3, 3), 0)
     diff = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
     heat = cv2.applyColorMap(diff, cv2.COLORMAP_JET)
-    return heat[:, :, ::-1]  # BGR→RGB
+    return heat[:, :, ::-1]
 
-
-def _ssim_map(a_path: str, b_path: str):
-    a, b = _read_gray_same_size(a_path, b_path)
+def _ssim_map(a: np.ndarray, b: np.ndarray):
     score, ssim_img = ssim(a, b, full=True, data_range=255)
-    ssim_img = (1.0 - ssim_img)  # 차이를 밝게
+    ssim_img = (1.0 - ssim_img)
     ssim_img = (255 * (ssim_img / (ssim_img.max() + 1e-6))).astype(np.uint8)
     heat = cv2.applyColorMap(ssim_img, cv2.COLORMAP_INFERNO)
     return heat[:, :, ::-1], float(score)
+
+_lpips_model = None
+def _lpips_score(a_path: str, b_path: str):
+    global _lpips_model
+    if not _HAS_LPIPS:
+        return None
+    if _lpips_model is None:
+        _lpips_model = lpips.LPIPS(net='vgg').eval()
+    import torchvision.transforms as T
+    tf = T.Compose([T.ToTensor()])
+    A = cv2.cvtColor(cv2.imread(a_path), cv2.COLOR_BGR2RGB)
+    B = cv2.cvtColor(cv2.imread(b_path), cv2.COLOR_BGR2RGB)
+    h = min(A.shape[0], B.shape[0]); w = min(A.shape[1], B.shape[1])
+    A = cv2.resize(A, (w, h)); B = cv2.resize(B, (w, h))
+    a = tf(Image.fromarray(A)).unsqueeze(0)
+    b = tf(Image.fromarray(B)).unsqueeze(0)
+    with torch.no_grad():
+        d = _lpips_model(a, b).item()
+    return float(d)
+
+def _lpips_map(a_path: str, b_path: str):
+    return None
