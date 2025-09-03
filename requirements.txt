@@ -1,23 +1,17 @@
-# Core
 numpy
 pillow
 opencv-python
 pandas
 polars
 imagehash
-
-# Torch
 torch
 torchvision
-
-# FAISS (optional; 설치 실패해도 파이프라인은 자동으로 sklearn KNN으로 동작)
+timm
 faiss-cpu
-
-# ML utils
+hnswlib
 scikit-learn
 scikit-image
-
-# App
+lpips
+paddleocr
+rapidfuzz
 streamlit
-streamlit-image-comparison
-streamlit-image-zoom
