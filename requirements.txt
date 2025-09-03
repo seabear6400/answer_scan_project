@@ -1,0 +1,9 @@
+opencv-python
+numpy
+scikit-image
+pillow
+rapidfuzz
+pyyaml
+torch
+torchvision
+scikit-learn

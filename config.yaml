@@ -1,0 +1,8 @@
+paths:
+  input_dir: "input_images"
+  output_dir: "output"
+
+similarity:
+  threshold: 0.90   # 유사도 0.9 이상이면 중복으로 판정
+  resize_width: 800
+  resize_height: 1100
