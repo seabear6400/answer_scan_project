@@ -1,28 +1,21 @@
 import os
-import csv
 from detector_pipeline import detect_pipeline
-
-def save_report(results, output_csv):
-    with open(output_csv, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(["파일1", "파일2", "유사도", "상태", "그룹ID"])
-        writer.writerows(results)
 
 def main():
     input_dir = "input_images"
     output_dir = "output"
 
-    for sub in ["grouped", "ok"]:
+    for sub in ["grouped", "ok", "blank_answers"]:
         os.makedirs(os.path.join(output_dir, sub), exist_ok=True)
 
-    print("🔍 2단계 파이프라인 기반 중복/유사 그룹 탐지 시작...")
-
+    print("🔍 탐지 실행 중... (pHash → CNN)")
     results, groups = detect_pipeline(input_dir, output_dir)
+    print("✅ 탐지 완료 → report.csv, report.parquet 생성됨.")
 
-    report_path = os.path.join(output_dir, "report.csv")
-    save_report(results, report_path)
-
-    print("✅ 완료! 결과는 report.csv 확인")
+    # 자동으로 대시보드 열기
+    import subprocess
+    print("🌐 대시보드를 실행합니다... 브라우저에서 자동으로 열립니다.")
+    subprocess.run(["python", "-m", "streamlit", "run", "src/dashboard.py"])
 
 if __name__ == "__main__":
     main()
