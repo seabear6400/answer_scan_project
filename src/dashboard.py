@@ -10,9 +10,6 @@ import pandas as pd
 import cv2
 import torch  # LPIPS 계산에 필요
 
-# 돋보기 컴포넌트
-from components.magnifier import magnifier
-
 # Optional metrics
 try:
     from skimage.metrics import structural_similarity as ssim
@@ -32,13 +29,6 @@ _HAS_IMG_CMP = False
 try:
     from streamlit_image_comparison import image_comparison
     _HAS_IMG_CMP = True
-except Exception:
-    pass
-
-_HAS_IMG_ZOOM = False
-try:
-    from streamlit_image_zoom import image_zoom
-    _HAS_IMG_ZOOM = True
 except Exception:
     pass
 
@@ -69,7 +59,7 @@ REPORT_CSV = os.path.join(OUTPUT_DIR, "report.csv")
 IMG_SUMMARY = os.path.join(OUTPUT_DIR, "images_summary.csv")
 
 st.set_page_config(page_title="답안지 검수 대시보드", layout="wide")
-st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized + Magnifier)")
+st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized)")
 
 # --------- Load data ---------
 @st.cache_data(show_spinner=False)
@@ -117,8 +107,8 @@ def _status_ok(s):
     return show_suspects and (s == "유사 후보")
 
 # --------- Tabs ---------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["리포트 요약", "유사 그룹", "정상/공백 답안", "전체 보기", "돋보기 모드"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["리포트 요약", "유사 그룹", "정상/공백 답안", "전체 보기"]
 )
 
 # 📊 Report
@@ -152,10 +142,7 @@ with tab2:
                 with cols[idx % 4]:
                     if st.button(f"선택 {f}", key=f"select_{gid}_{idx}"):
                         toggle_compare(img_path)
-                    if _HAS_IMG_ZOOM:
-                        image_zoom(img_path, width=300)
-                    else:
-                        st.image(Image.open(img_path), caption=f, use_container_width=True)
+                    st.image(Image.open(img_path), caption=f, use_container_width=True)
 
         # Compare view
         if len(st.session_state.compare_list) == 2:
@@ -217,21 +204,11 @@ with tab4:
                 st.session_state["selected_image"] = path
             st.image(Image.open(path), caption=os.path.basename(path), use_container_width=True)
 
-    # 선택된 이미지가 있으면 크게 보기 + 돋보기
+    # 선택된 이미지가 있으면 크게 보기
     if "selected_image" in st.session_state:
         big_path = st.session_state["selected_image"]
         st.subheader(f"선택된 이미지: {os.path.basename(big_path)}")
-        # 돋보기 기능 (렌즈 확대)
-        magnifier(big_path, zoom=2, size=200)
-
-
-# 🔍 Magnifier mode
-with tab5:
-    st.header("돋보기 모드 (마우스 따라 확대)")
-    all_imgs = glob.glob(os.path.join(OUTPUT_DIR, "**", "*.jpg"), recursive=True)
-    for idx, path in enumerate(sorted(all_imgs)):
-        st.subheader(os.path.basename(path))
-        magnifier(path, zoom=2, size=200)
+        st.image(Image.open(big_path), caption=os.path.basename(big_path), use_container_width=True)
 
 # --------- Utils ---------
 def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:

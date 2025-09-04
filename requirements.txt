@@ -1,17 +1,24 @@
+opencv-python
 numpy
 pillow
-opencv-python
-pandas
-polars
-imagehash
 torch
 torchvision
-timm
-faiss-cpu
-hnswlib
 scikit-learn
-scikit-image
+imagehash
+polars
+streamlit
+networkx>=3.2
+
+# 대시보드 확장
+git+https://github.com/vgilabert94/streamlit-image-zoom.git
+streamlit-image-comparison
+
+# 고급 기능 (옵션)
 lpips
+scikit-image
 paddleocr
 rapidfuzz
-streamlit
+
+# ANN 검색 (옵션)
+# faiss-cpu
+# hnswlib
