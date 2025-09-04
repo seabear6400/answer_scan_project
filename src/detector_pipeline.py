@@ -4,7 +4,6 @@ import itertools
 import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
-from components.magnifier import magnifier
 
 import numpy as np
 from PIL import Image
@@ -13,6 +12,7 @@ import cv2
 import pandas as pd
 import polars as pl
 
+import stat
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -74,6 +74,13 @@ try:
 except Exception:
     _HAS_SAUVOLA = False
 
+# Optional: NetworkX (Blossom matching)
+try:
+    import networkx as nx
+    _HAS_NX = True
+except Exception:
+    _HAS_NX = False
+
 from sklearn.neighbors import NearestNeighbors
 
 
@@ -109,7 +116,7 @@ class DetectorConfig:
     use_ocr: bool = False
     text_sim_thresh: float = 0.85
 
-    # Alignment
+    # Alignment(현재 그룹핑엔 미사용, main.py 호환용)
     use_alignment: bool = False
 
     # Embedding
@@ -146,17 +153,15 @@ def pdq_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> Optional[
     img = Image.open(path).convert("RGB")
     img = crop_roi(img, roi_ratio)
     arr = np.array(img)
-    hash_vec, _ = pdqhash.compute_pdq_hash(arr)  # returns 256-d bits (np.array of 0/1)
+    hash_vec, _ = pdqhash.compute_pdq_hash(arr)  # 256-d bits (0/1)
     return hash_vec.astype(np.uint8)
 
 
 def hamming_distance_bits(a_bits: np.ndarray, b_bits: np.ndarray) -> int:
-    # expects uint8 {0,1}
     return int(np.sum(a_bits ^ b_bits))
 
 
 def ink_density(path: str, roi_ratio: Tuple[float, float, float, float], method: str = "sauvola") -> float:
-    """Return foreground ratio in ROI using binarization."""
     gray = read_gray(path)
     h, w = gray.shape[:2]
     l, t, r, b = roi_ratio
@@ -166,7 +171,6 @@ def ink_density(path: str, roi_ratio: Tuple[float, float, float, float], method:
         th = threshold_sauvola(roi, window_size=25, k=0.2)
         binary = (roi < th).astype(np.uint8)
     else:
-        # Otsu fallback
         _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         binary = (binary > 0).astype(np.uint8)
     return float(np.count_nonzero(binary)) / binary.size
@@ -179,7 +183,6 @@ class ImgDataset(Dataset):
         self.roi = roi_ratio
         self.backend = backend
         if backend == "dinov2":
-            # DINOv2 추천 전처리
             self.tf = transforms.Compose([
                 transforms.Resize(256),
                 transforms.CenterCrop(224),
@@ -187,7 +190,6 @@ class ImgDataset(Dataset):
                 transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
             ])
         else:
-            # ResNet18
             self.tf = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
@@ -210,7 +212,6 @@ def load_model(device: torch.device, backend: str) -> nn.Module:
         model = timm.create_model("vit_base_patch14_dinov2.lvd142m", pretrained=True, num_classes=0)
         model.eval().to(device)
         return model
-    # fallback: resnet18
     model = resnet18(weights=ResNet18_Weights.DEFAULT)
     model.fc = nn.Identity()
     model.eval().to(device)
@@ -234,7 +235,8 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
             out = model(x).detach().cpu().numpy().astype(np.float32)
             embs.append(out)
             ordered_paths.extend(list(pths))
-    embs = np.vstack(embs) if len(embs) else np.zeros((0, 768 if backend == "dinov2" and _HAS_TIMM else 512), dtype=np.float32)
+    D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
+    embs = np.vstack(embs) if len(embs) else np.zeros((0, D_out), dtype=np.float32)
     return embs, ordered_paths
 
 
@@ -254,7 +256,6 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
     if N == 0:
         return np.empty((0, 0), dtype=int), np.empty((0, 0), dtype=np.float32), "none"
 
-    # auto choose
     backend = ann_backend
     if ann_backend == "auto":
         if _HAS_HNSW and N >= 1000:
@@ -280,7 +281,6 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
         sims = 1.0 - dists
         return labels, sims, "hnsw"
 
-    # brute (sklearn)
     nn = NearestNeighbors(n_neighbors=min(k + 1, N), metric="cosine", algorithm="brute")
     nn.fit(embs)
     dists, idxs = nn.kneighbors(embs, return_distance=True)
@@ -288,7 +288,7 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
     return idxs, sims, "brute"
 
 
-# -------------------------- LPIPS / OCR / Alignment -------------------
+# -------------------------- LPIPS / OCR -------------------
 _lpips_model = None
 def lpips_distance(a_path: str, b_path: str) -> Optional[float]:
     global _lpips_model
@@ -315,7 +315,7 @@ def ocr_text(path: str) -> str:
     if not (_HAS_OCR and _HAS_RAPIDFUZZ):
         return ""
     if _ocr is None:
-        # 한국어 손글씨 스캔: 'korean' 또는 'korean+english' 선택
+        # 한국어 손글씨 스캔
         _ocr = PaddleOCR(lang='korean', use_angle_cls=True, show_log=False)
     res = _ocr.ocr(path, cls=True)
     texts = []
@@ -330,32 +330,20 @@ def ocr_text(path: str) -> str:
 def text_similarity(a: str, b: str) -> float:
     if not _HAS_RAPIDFUZZ:
         return 0.0
-    # token_set_ratio → 0..100
     return token_set_ratio(a, b) / 100.0
 
 
-def align_pair(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:
-    """ECC 정렬(affine). 실패 시 동일 크기로 리사이즈만."""
-    A = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
-    B = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
-    if A is None or B is None:
-        raise RuntimeError("이미지 로딩 실패")
-    h = min(A.shape[0], B.shape[0]); w = min(A.shape[1], B.shape[1])
-    A = cv2.resize(A, (w, h), interpolation=cv2.INTER_AREA)
-    B = cv2.resize(B, (w, h), interpolation=cv2.INTER_AREA)
+# -------------------------- Utils -------------------
+def _handle_remove_readonly(func, path, exc_info):
+    # 읽기 전용 파일도 강제 삭제
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
-    # ECC requires float32, normalized
-    A_f = A.astype(np.float32) / 255.0
-    B_f = B.astype(np.float32) / 255.0
-    warp = np.eye(2, 3, dtype=np.float32)
-    try:
-        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 1000, 1e-6)
-        cc, warp = cv2.findTransformECC(A_f, B_f, warp, cv2.MOTION_AFFINE, criteria, None, 5)
-        B_aligned = cv2.warpAffine(B, warp, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
-        return A, B_aligned
-    except Exception:
-        # fallback: no alignment, just resized
-        return A, B
+def _recreate_clean_dir(path: str):
+    """폴더를 완전 초기화(삭제 후 재생성, 권한 문제 강제 해제)"""
+    if os.path.isdir(path):
+        shutil.rmtree(path, onerror=_handle_remove_readonly)
+    os.makedirs(path, exist_ok=True)
 
 
 # -------------------------- Main pipeline ------------------------------
@@ -365,8 +353,10 @@ def detect_pipeline(input_dir: str, output_dir: str,
     cfg = config or DetectorConfig()
 
     os.makedirs(output_dir, exist_ok=True)
-    for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        os.makedirs(os.path.join(output_dir, sub), exist_ok=True)
+    # ✅ 누적 방지: 매 실행마다 핵심 서브폴더 초기화
+    for sub in ["grouped", "ok", "blank_answers"]:
+        _recreate_clean_dir(os.path.join(output_dir, sub))
+    os.makedirs(os.path.join(output_dir, "artifacts"), exist_ok=True)
 
     # 1) Collect image files
     exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
@@ -411,45 +401,25 @@ def detect_pipeline(input_dir: str, output_dir: str,
     # 4) ANN candidates
     print("[3/5] Candidate neighbors via ANN …")
     idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
-    # 5) Pairwise scoring + optional re-ranking + grouping
-    print("[4/5] Pair scoring + (optional) re-ranking + grouping …")
-    # Union-Find
-    class DSU:
-        def __init__(self, n: int):
-            self.p = list(range(n))
-            self.sz = [1] * n
-        def find(self, x: int) -> int:
-            while self.p[x] != x:
-                self.p[x] = self.p[self.p[x]]
-                x = self.p[x]
-            return x
-        def union(self, a: int, b: int):
-            ra, rb = self.find(a), self.find(b)
-            if ra == rb:
-                return
-            if self.sz[ra] < self.sz[rb]:
-                ra, rb = rb, ra
-            self.p[rb] = ra
-            self.sz[ra] += self.sz[rb]
 
-    dsu = DSU(n)
-    pair_rows: List[List] = []
+    # 5) Pairwise scoring → "확정 유사" 에지 만들기 → (Blossom) 최대가중치매칭으로 2장 그룹화
+    print("[4/5] Pair scoring + pairing (max-weight matching) …")
 
     def prefilter_ok(fi: str, fj: str) -> bool:
-        ok = True
         if cfg.prefilter in ("phash", "both"):
             if abs(phashes.get(fi, imagehash.hex_to_hash("0"*16)) - phashes.get(fj, imagehash.hex_to_hash("0"*16))) > cfg.phash_thresh:
                 return False
         if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
             a = pdqs.get(fi, None); b = pdqs.get(fj, None)
-            if a is None or b is None:
-                pass
-            else:
+            if a is not None and b is not None:
                 if hamming_distance_bits(a, b) > cfg.pdq_thresh:
                     return False
         if abs(densities.get(fi, 0.0) - densities.get(fj, 0.0)) > cfg.density_diff_thresh:
             return False
-        return ok
+        return True
+
+    all_pair_records: List[Tuple[str, str, float]] = []
+    confirmed_edges: List[Tuple[int, int, float]] = []
 
     for i in range(n):
         if idxs.shape[1] == 0:
@@ -460,69 +430,75 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 continue
             fi, fj = name_by_row[i], name_by_row[j]
 
-            # Prefilter
             if not prefilter_ok(fi, fj):
                 continue
 
             sim = float(sims[i, col])
-            status = "다름"
-            gid = "-"
+            all_pair_records.append((fi, fj, sim))
 
             confirmed = False
             if sim >= cfg.cnn_thresh:
                 confirmed = True
             elif sim >= cfg.suspect_low:
-                # Re-ranking (optional)
-                rank_votes = 0
-                votes_need = 1  # 단일 기준으로도 업그레이드 가능
+                votes = 0
                 if cfg.use_lpips and _HAS_LPIPS:
                     d = lpips_distance(os.path.join(input_dir, fi), os.path.join(input_dir, fj))
                     if d is not None and d <= cfg.lpips_thresh:
-                        rank_votes += 1
+                        votes += 1
                 if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
                     ta = texts.get(fi, "") or ocr_text(os.path.join(input_dir, fi))
                     tb = texts.get(fj, "") or ocr_text(os.path.join(input_dir, fj))
-                    ts = text_similarity(ta, tb)
-                    if ts >= cfg.text_sim_thresh:
-                        rank_votes += 1
-                if rank_votes >= votes_need:
+                    if text_similarity(ta, tb) >= cfg.text_sim_thresh:
+                        votes += 1
+                if votes > 0:
                     confirmed = True
-                    status = "중복/그룹"
-                else:
-                    status = "유사 후보"
 
             if confirmed:
-                dsu.union(i, j)
-                status = "중복/그룹" if status != "유사 후보" else "중복/그룹"
+                confirmed_edges.append((i, j, sim))
 
-            pair_rows.append([fi, fj, round(sim, 4), status, gid])
+    # --- 최대 가중치 매칭(Blossom) or Greedy fallback ---
+    matched_pairs: List[Tuple[int, int]] = []
+    if confirmed_edges:
+        if _HAS_NX:
+            G = nx.Graph()
+            for u, v, w in confirmed_edges:
+                G.add_edge(u, v, weight=float(w))
+            matching = nx.algorithms.matching.max_weight_matching(G, maxcardinality=False)
+            matched_pairs = [(u, v) for u, v in matching]  # vertex-disjoint
+        else:
+            confirmed_edges.sort(key=lambda x: x[2], reverse=True)
+            used = set()
+            for u, v, _w in confirmed_edges:
+                if u in used or v in used:
+                    continue
+                matched_pairs.append((u, v))
+                used.add(u); used.add(v)
 
-    # Finalize groups
+    # 그룹ID 생성 (각 그룹은 항상 2장만)
     groups: Dict[str, List[str]] = {}
-    root_to_members: Dict[int, List[str]] = {}
-    for i in range(n):
-        r = dsu.find(i)
-        root_to_members.setdefault(r, []).append(name_by_row[i])
-
     gid_counter = 1
-    for r, members in root_to_members.items():
-        if len(members) >= 2:
-            gid = f"group_{gid_counter:03d}"
-            groups[gid] = sorted(members)
-            gid_counter += 1
+    for u, v in matched_pairs:
+        fi, fj = name_by_row[u], name_by_row[v]
+        gid = f"group_{gid_counter:03d}"
+        groups[gid] = [fi, fj]
+        gid_counter += 1
 
-    # Update group ids in pair_rows
-    group_of = {}
-    for gid, members in groups.items():
-        for m in members:
-            group_of[m] = gid
-    for row in pair_rows:
-        if row[3] == "중복/그룹":
-            fi, fj = row[0], row[1]
-            gid = group_of.get(fi) or group_of.get(fj) or "-"
-            row[4] = gid
+    # 리포트 테이블
+    grouped_pairs_set = {tuple(sorted((name_by_row[u], name_by_row[v]))) for u, v in matched_pairs}
+    pair_rows: List[List] = []
+    for fi, fj, sim in all_pair_records:
+        key = tuple(sorted((fi, fj)))
+        if key in grouped_pairs_set:
+            gid = "-"
+            for g, members in groups.items():
+                if set(members) == set([fi, fj]):
+                    gid = g; break
+            pair_rows.append([fi, fj, round(sim, 4), "중복/그룹", gid])
+        else:
+            status = "유사 후보" if sim >= cfg.suspect_low else "다름"
+            pair_rows.append([fi, fj, round(sim, 4), status, "-"])
 
-    # 6) Write outputs + copy images by class
+    # 6) Save reports / organize outputs
     print("[5/5] Save reports / organize outputs …")
     csv_path = os.path.join(output_dir, "report.csv")
     parquet_path = os.path.join(output_dir, "report.parquet")
@@ -538,7 +514,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     })
     img_df.to_csv(os.path.join(output_dir, "images_summary.csv"), index=False, encoding="utf-8-sig")
 
-    # Copy
+    # Copy grouped
     for gid, members in groups.items():
         gdir = os.path.join(output_dir, "grouped", gid)
         os.makedirs(gdir, exist_ok=True)
@@ -558,7 +534,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
         elif f not in grouped_set:
             shutil.copy2(src, os.path.join(okdir, f))
 
-    # Artifacts
+    # Artifacts (덮어쓰기)
     try:
         np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
         with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
@@ -567,5 +543,3 @@ def detect_pipeline(input_dir: str, output_dir: str,
         pass
 
     return pair_rows, groups
-
-    
