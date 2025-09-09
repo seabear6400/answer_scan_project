@@ -238,37 +238,30 @@ c2.metric("그룹 수", f"{kpis['그룹 수']:,}")
 c3.metric("공백 수", f"{kpis['공백 수']:,}")
 c4.metric("유사 후보 쌍", f"{kpis['유사 후보 쌍']:,}")
 
-# ===== 사이드바 (글로벌 필터/옵션) =====
-st.sidebar.header("필터 & 설정")
-min_sim = st.sidebar.slider("최소 유사도", 0.0, 1.0, 0.90, 0.001)
-status_options_all = ["중복/그룹", "유사 후보", "다름"]
-status_sel = st.sidebar.multiselect("상태 선택", status_options_all,
-                                    default=["중복/그룹", "유사 후보"])
+
+# ===== 사이드바: 꼭 필요한 옵션만 노출 =====
+st.sidebar.header("주요 필터/설정")
+min_sim = st.sidebar.slider("최소 유사도", 0.0, 1.0, 0.90, 0.01, help="유사도 임계값을 조정하세요.")
+name_query = st.sidebar.text_input("파일명 검색", value="", help="특정 파일명을 빠르게 찾고 싶을 때 입력")
 group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
 group_filter = st.sidebar.selectbox("특정 그룹만 보기", ["전체"] + group_list)
-name_query = st.sidebar.text_input("파일명 검색", value="")
-sort_by = st.sidebar.selectbox("정렬 기준", ["유사도↓", "유사도↑", "파일명", "그룹ID"])
 
-# 🔧 화질/레이아웃(전역) 설정
-st.sidebar.markdown("---")
-st.sidebar.markdown("**표시 화질/레이아웃**")
-grid_cols = st.sidebar.slider("그리드 열 개수(갤러리/그룹 그리드)", 2, 8, 5)
-grid_target_px = st.sidebar.slider("그리드 표시 해상도(px, 긴 변)", 384, 1024, 768, 32)
-disp_fmt = st.sidebar.selectbox("표시 포맷", ["WEBP", "JPEG", "PNG"], index=0)
-disp_quality = st.sidebar.slider("표시 품질(압축)", 80, 100, 95)
+# 그리드 열 개수만 노출 (화질/포맷/품질 등은 고정)
+grid_cols = st.sidebar.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
 
-# 유사 그룹 대형 비교 모드
-st.sidebar.markdown("---")
-st.sidebar.markdown("**유사 그룹 대형 비교**")
-group_view_mode = st.sidebar.radio("뷰 모드", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=False, index=0)
-group_large_px = st.sidebar.slider("대형 비교 해상도(px, 긴 변)", 800, 2000, 1400, 50)
-group_page_size = st.sidebar.slider("대형 비교: 페이지당 그룹 수", 2, 20, 6)
-group_page = st.sidebar.number_input("대형 비교: 페이지 번호(1부터)", min_value=1, value=1, step=1)
+# 유사 그룹 뷰 모드(대형/그리드)만 노출
+group_view_mode = st.sidebar.radio("유사 그룹 보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=0)
 
-# 비교 분석 옵션
-show_absdiff = st.sidebar.checkbox("비교 시 AbsDiff Heatmap", value=False)
-show_ssim = st.sidebar.checkbox("비교 시 SSIM 맵", value=False)
-show_lpips = st.sidebar.checkbox("비교 시 LPIPS 점수", value=False)
+# 고급 옵션(화질, 포맷, 품질, 분석 등)은 숨김/제거
+grid_target_px = 768  # 고정값
+disp_fmt = "WEBP"    # 고정값
+disp_quality = 95     # 고정값
+group_large_px = 1400 # 고정값
+group_page_size = 6   # 고정값
+group_page = 1        # 고정값(페이지네이션은 필요시만)
+show_absdiff = False
+show_ssim = False
+show_lpips = False
 
 # ===== 유틸: 비교용 도구 =====
 def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -328,8 +321,6 @@ def filter_sort_report(_df: pd.DataFrame) -> pd.DataFrame:
     view = _df.copy()
     if "유사도" in view.columns:
         view = view[view["유사도"] >= min_sim]
-    if "상태" in view.columns and status_sel:
-        view = view[view["상태"].isin(status_sel)]
     if group_filter != "전체" and "그룹ID" in view.columns:
         view = view[view["그룹ID"] == group_filter]
     if name_query:
@@ -339,15 +330,11 @@ def filter_sort_report(_df: pd.DataFrame) -> pd.DataFrame:
             b = str(row.get("파일2", "")).lower()
             return (q in a) or (q in b)
         view = view[view.apply(_hit, axis=1)]
-    if sort_by == "유사도↓" and "유사도" in view.columns:
-        view = view.sort_values("유사도", ascending=False)
-    elif sort_by == "유사도↑" and "유사도" in view.columns:
-        view = view.sort_values("유사도", ascending=True)
-    elif sort_by == "파일명":
+    # 기본 정렬: 유사도 내림차순, 그 다음 파일명
+    if "유사도" in view.columns:
+        view = view.sort_values(["유사도", "파일1", "파일2"], ascending=[False, True, True])
+    else:
         view = view.sort_values(["파일1", "파일2"])
-    elif sort_by == "그룹ID" and "그룹ID" in view.columns:
-        view["_gid_sort"] = view["그룹ID"].replace('-', 'zzz')
-        view = view.sort_values(["_gid_sort", "유사도"], ascending=[True, False]).drop(columns=["_gid_sort"])
     return view
 
 # ===== 세션: 비교 큐 =====
@@ -434,6 +421,9 @@ with tab2:
         if group_filter != "전체":
             groups = [g for g in groups if g == group_filter]
 
+        def is_2file(filename):
+            return filename.lower().endswith('.jpg') and filename[-5] == '2'
+
         # --- 대형 비교 모드: 페이지네이션 + 두 장을 크게 나란히 ---
         if group_view_mode.startswith("대형"):
             total_groups = len(groups)
@@ -443,9 +433,9 @@ with tab2:
 
             for gid in groups[start:end]:
                 st.subheader(f"그룹: {gid}")
-                files = sorted(os.listdir(os.path.join(grouped_dir, gid)))
+                files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
                 if len(files) == 0:
-                    st.info("이 그룹에 이미지가 없습니다."); continue
+                    st.info("이 그룹에 (2로 끝나는) 이미지가 없습니다."); continue
                 # 대형 표시(긴 변 group_large_px)
                 disp_paths = []
                 for f in files[:2]:  # 보통 2장이므로 2장만
@@ -469,7 +459,7 @@ with tab2:
             targets = groups if sel == "전체 그룹 보기" else [sel]
             for gid in targets:
                 st.subheader(f"그룹: {gid}")
-                files = sorted(os.listdir(os.path.join(grouped_dir, gid)))
+                files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
                 cols = st.columns(grid_cols)
                 for idx, f in enumerate(files):
                     img_path = os.path.join(grouped_dir, gid, f)
@@ -489,9 +479,12 @@ with tab3:
     blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
     sel = st.radio("보기 옵션", ["모두 보기", "정상만", "공백만"], horizontal=True)
 
+    def is_2file(filename):
+        return filename.lower().endswith('.jpg') and filename[-5] == '2'
+
     if sel in ["모두 보기", "정상만"] and os.path.isdir(ok_dir):
         st.subheader("✅ 정상 답안")
-        files = sorted(os.listdir(ok_dir))
+        files = [f for f in sorted(os.listdir(ok_dir)) if is_2file(f)]
         cols = st.columns(grid_cols)
         for idx, f in enumerate(files):
             img_path = os.path.join(ok_dir, f)
@@ -503,7 +496,7 @@ with tab3:
 
     if sel in ["모두 보기", "공백만"] and os.path.isdir(blank_dir):
         st.subheader("⭕ 공백 답안")
-        files = sorted(os.listdir(blank_dir))
+        files = [f for f in sorted(os.listdir(blank_dir)) if is_2file(f)]
         cols = st.columns(grid_cols)
         for idx, f in enumerate(files):
             img_path = os.path.join(blank_dir, f)

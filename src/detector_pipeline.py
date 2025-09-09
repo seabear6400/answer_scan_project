@@ -349,21 +349,29 @@ def _recreate_clean_dir(path: str):
 # -------------------------- Main pipeline ------------------------------
 def detect_pipeline(input_dir: str, output_dir: str,
                     config: Optional[DetectorConfig] = None,
+                    filter_func: Optional[callable] = None,
                     **_deprecated_kwargs):
     cfg = config or DetectorConfig()
 
+    # ✅ output 폴더 전체를 완전히 삭제 후 재생성 (모든 하위 폴더/파일 초기화)
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir, onerror=_handle_remove_readonly)
     os.makedirs(output_dir, exist_ok=True)
-    # ✅ 누적 방지: 매 실행마다 핵심 서브폴더 초기화
-    for sub in ["grouped", "ok", "blank_answers"]:
-        _recreate_clean_dir(os.path.join(output_dir, sub))
-    os.makedirs(os.path.join(output_dir, "artifacts"), exist_ok=True)
+    # 하위 폴더도 재생성
+    for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
+        os.makedirs(os.path.join(output_dir, sub), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "artifacts", "thumbnails"), exist_ok=True)
 
     # 1) Collect image files
     exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
-    files = [f for f in sorted(os.listdir(input_dir)) if f.lower().endswith(exts)]
+    all_files = [f for f in sorted(os.listdir(input_dir)) if f.lower().endswith(exts)]
+    if filter_func is not None:
+        files = [f for f in all_files if filter_func(f)]
+    else:
+        files = all_files
     paths = [os.path.join(input_dir, f) for f in files]
     if not files:
-        raise FileNotFoundError(f"No images under {input_dir}")
+        raise FileNotFoundError(f"No images under {input_dir} (필터 적용됨)")
 
     # 2) Metadata: prefilters + density + (optional) OCR text
     print(f"[1/5] Metadata (pHash/PDQ + density)")
