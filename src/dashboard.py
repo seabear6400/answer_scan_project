@@ -219,17 +219,6 @@ def compute_kpis(df: pd.DataFrame, img_df: pd.DataFrame) -> Dict[str, int]:
 df = load_report(REPORT_PARQUET, REPORT_CSV)
 img_df = load_img_summary(IMG_SUMMARY)
 
-# ===== 상단 도움말 =====
-with st.expander("ℹ️ 빠른 사용법 / 용어 설명", expanded=False):
-    st.markdown(
-        """
-        - **리포트 요약**: 유사도 검출 결과(파일 쌍)를 테이블로 확인하고 필터/정렬할 수 있습니다.  
-        - **유사 그룹**: 파이프라인이 **2장씩 매칭**한 그룹을 '대형 비교' 또는 '그리드'로 확인합니다.  
-        - **정상/공백**: 공백 감지된 답안과 정상 답안을 각각 훑어봅니다.  
-        - **전체 보기**: `output/` 하위의 모든 이미지를 고화질 썸네일로 훑어봅니다.  
-        """
-    )
-
 # ===== KPI 카드 =====
 kpis = compute_kpis(df, img_df)
 c1, c2, c3, c4 = st.columns(4)
@@ -347,73 +336,56 @@ def toggle_compare(img_path: str):
         st.session_state.compare_list = st.session_state.compare_list[-2:]
 
 # ===== 탭 구성 =====
-tab1, tab2, tab3, tab4 = st.tabs(["리포트 요약", "유사 그룹", "정상/공백 답안", "전체 보기"])
+tab1, tab2, tab3, tab4 = st.tabs(["리포트 요약", "재스캔 필요", "정상/공백 답안", "전체 보기"])
+
 
 # === Tab1: 리포트 요약 ===
 with tab1:
-    with st.expander("이 탭은 무엇을 하나요?", expanded=False):
-        st.write("유사도 검출 결과(쌍)를 표로 보고, 필터와 정렬을 적용합니다. 필요시 CSV로 다운로드하세요.")
 
     df_view = filter_sort_report(df) if len(df) else df
     st.dataframe(df_view, use_container_width=True, height=480)
     st.download_button("⬇ CSV 다운로드", df_view.to_csv(index=False).encode("utf-8-sig"),
                        "filtered_report.csv", "text/csv")
 
-    # 비교/분석 위젯
-    st.markdown("### 🔍 두 파일 선택해 비교")
-    names_union = sorted(set(df_view.get("파일1", [])) | set(df_view.get("파일2", [])))
-    colA, colB = st.columns(2)
-    with colA:
-        a = st.selectbox("파일1", names_union, key="cmp_a")
-    with colB:
-        b = st.selectbox("파일2", names_union, key="cmp_b")
+    # 비교 선택 UI 제거 — 리포트 요약은 표/다운로드 중심으로 단순화
 
-    if a and b:
-        path_a = resolve_image_path(a)
-        path_b = resolve_image_path(b)
-        if not path_a or not os.path.isfile(path_a):
-            st.error(f"파일을 찾지 못했습니다: {a} (OUTPUT_DIR 하위에서 검색 실패)")
-        if not path_b or not os.path.isfile(path_b):
-            st.error(f"파일을 찾지 못했습니다: {b} (OUTPUT_DIR 하위에서 검색 실패)")
-        if path_a and path_b and os.path.isfile(path_a) and os.path.isfile(path_b):
-            c1, c2 = st.columns(2)
-            with c1:
-                st.image(_safe_image_open(path_a), caption=os.path.basename(path_a), use_container_width=True)
-            with c2:
-                st.image(_safe_image_open(path_b), caption=os.path.basename(path_b), use_container_width=True)
-
-            if _HAS_IMG_CMP:
-                st.markdown("#### Slider 비교")
-                try:
-                    image_comparison(Image.open(path_a), Image.open(path_b),
-                                     label1=os.path.basename(path_a), label2=os.path.basename(path_b), width=700)
-                except Exception:
-                    pass
-
-            if show_absdiff or show_ssim or show_lpips:
-                st.markdown("#### 차이 분석")
-                try:
-                    ga, gb = _read_gray_same_size(path_a, path_b)
-                    if show_absdiff:
-                        st.image(_absdiff_heatmap(ga, gb), caption="AbsDiff Heatmap", use_container_width=True)
-                    if show_ssim and _HAS_SKIMAGE:
-                        score, ssim_img = ssim(ga, gb, full=True, data_range=255)
-                        ssim_img = (1.0 - ssim_img)
-                        ssim_img = (255 * (ssim_img / (ssim_img.max() + 1e-6))).astype(np.uint8)
-                        heat = cv2.applyColorMap(ssim_img, cv2.COLORMAP_INFERNO)
-                        st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB),
-                                 caption=f"SSIM Map (score={score:.4f})", use_container_width=True)
-                    if show_lpips and _HAS_LPIPS:
-                        d = _lpips_score(path_a, path_b)
-                        if d is not None:
-                            st.write(f"LPIPS distance: **{d:.4f}** (낮을수록 유사)")
-                except Exception as e:
-                    st.info(f"분석 맵 생성 실패: {e}")
 
 # === Tab2: 유사 그룹 ===
 with tab2:
-    with st.expander("이 탭은 무엇을 하나요?", expanded=False):
-        st.write("유사한 두 장으로 묶인 그룹을 '대형 비교' 또는 '그리드'로 확인합니다.")
+    # ---- Rescan(재스캔) 감지: 입력 폴더의 이미지 해시(pHash)로 거의 동일한 이미지 쌍 탐지 ----
+    input_dir = OUTPUT_DIR.replace("output", "input_images") if "output" in OUTPUT_DIR else "input_images"
+    exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+    try:
+        scan_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(exts)])
+    except Exception:
+        scan_files = []
+
+    try:
+        import imagehash
+        dup_pairs = []
+        hashes = {}
+        for f in scan_files:
+            p = os.path.join(input_dir, f)
+            try:
+                h = imagehash.phash(Image.open(p).convert('L'))
+                hashes[f] = h
+            except Exception:
+                continue
+        fl = list(hashes.keys())
+        for i in range(len(fl)):
+            for j in range(i+1, len(fl)):
+                a, b = fl[i], fl[j]
+                d = abs(hashes[a] - hashes[b])
+                # 매우 작은 해시 차이면 동일한 뒷면이 두 번 스캔된 것일 가능성 높음
+                if d <= 1:
+                    dup_pairs.append((a, b, int(d)))
+        if dup_pairs:
+            st.error("스캔 오류 가능성: 다음 파일 쌍이 거의 동일합니다. 해당 쌍의 인접 장(앞/뒷면)을 다시 스캔하세요:")
+            for a, b, d in dup_pairs:
+                st.write(f"- {a}  ⟷  {b}   (해시차: {d})")
+    except Exception:
+        # imagehash가 없거나 처리 실패 시 무시
+        pass
 
     grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
     if os.path.isdir(grouped_dir):
@@ -435,7 +407,12 @@ with tab2:
                 st.subheader(f"그룹: {gid}")
                 files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
                 if len(files) == 0:
-                    st.info("이 그룹에 (2로 끝나는) 이미지가 없습니다."); continue
+                    # 파일이 없으면 조용히 다음으로
+                    continue
+                # 명확한 재스캔 안내 — 그룹의 첫 두 장을 지목하여 재스캔 권고
+                if len(files) >= 2:
+                    a_name, b_name = files[0], files[1]
+                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 두 장을 확인한 뒤 A와 B를 다시 스캔해주세요.")
                 # 대형 표시(긴 변 group_large_px)
                 disp_paths = []
                 for f in files[:2]:  # 보통 2장이므로 2장만
@@ -460,6 +437,11 @@ with tab2:
             for gid in targets:
                 st.subheader(f"그룹: {gid}")
                 files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
+                if len(files) == 0:
+                    continue
+                if len(files) >= 2:
+                    a_name, b_name = files[0], files[1]
+                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 두 장을 확인한 뒤 A와 B를 다시 스캔해주세요.")
                 cols = st.columns(grid_cols)
                 for idx, f in enumerate(files):
                     img_path = os.path.join(grouped_dir, gid, f)
@@ -473,8 +455,6 @@ with tab2:
 
 # === Tab3: 정상/공백 ===
 with tab3:
-    with st.expander("이 탭은 무엇을 하나요?", expanded=False):
-        st.write("공백 감지된 답안과 정상 답안을 각각 훑어봅니다.")
     ok_dir = os.path.join(OUTPUT_DIR, "ok")
     blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
     sel = st.radio("보기 옵션", ["모두 보기", "정상만", "공백만"], horizontal=True)
@@ -508,10 +488,6 @@ with tab3:
 
 # === Tab4: 전체 보기 ===
 with tab4:
-    # 상단 안내는 간결하게
-    with st.expander("이 탭은 무엇을 하나요?", expanded=False):
-        st.write("`output/` 전체 이미지를 고화질로 훑어보고, 2장을 바로 선택해서 크게 비교할 수 있습니다.")
-
     # ---------- 쉬운 화질/레이아웃 컨트롤(탭 로컬) ----------
     st.markdown("#### 표시 설정")
     colq1, colq2, colq3 = st.columns([1.3, 1.1, 1.6])
