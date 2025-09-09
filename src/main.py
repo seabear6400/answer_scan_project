@@ -45,6 +45,7 @@ def parse_args():
     p.add_argument("--batch", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--roi", type=float, nargs=4, default=[0.15, 0.15, 0.85, 0.85])
+    p.add_argument("--detach", action="store_true", help="윈도우에서 Streamlit을 새 창으로 분리 실행합니다 (비차단).")
     return p.parse_args()
 
 def main():
@@ -56,7 +57,7 @@ def main():
     cfg = DetectorConfig(
         embed_backend=args.embed_backend,
         ann_backend=args.ann_backend,
-        k=args.k,
+        k=args.k,   
         hnsw_M=args.hnsw_M,
         hnsw_efC=args.hnsw_efC,
         hnsw_efS=args.hnsw_efS,
@@ -82,7 +83,17 @@ def main():
     print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
     print("🌐 대시보드 실행…")
-    subprocess.run(["python", "-m", "streamlit", "run", "src/dashboard.py", "--", f"--output_dir={args.output_dir}"])
+    cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--", f"--output_dir={args.output_dir}"]
+    try:
+        if args.detach and os.name == 'nt':
+            # Windows: start a new cmd window to run Streamlit so main process isn't blocked
+            subprocess.Popen(["cmd", "/c", "start"] + cmd)
+        else:
+            subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print("중단: 사용자가 실행을 취소했습니다.")
+    except Exception as e:
+        print(f"대시보드 실행 중 오류가 발생했습니다: {e}")
 
 if __name__ == "__main__":
     main()
