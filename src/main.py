@@ -85,8 +85,7 @@ def main():
     print("🌐 대시보드 실행…")
     cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--", f"--output_dir={args.output_dir}"]
     try:
-        if args.detach and os.name == 'nt':
-            # Windows: start a new cmd window to run Streamlit so main process isn't blocked
+        if args.detach and os.name == 'nt':   
             subprocess.Popen(["cmd", "/c", "start"] + cmd)
         else:
             subprocess.run(cmd)

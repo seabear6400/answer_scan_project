@@ -238,7 +238,7 @@ group_filter = st.sidebar.selectbox("특정 그룹만 보기", ["전체"] + grou
 # 그리드 열 개수만 노출 (화질/포맷/품질 등은 고정)
 grid_cols = st.sidebar.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
 
-# 유사 그룹 뷰 모드(대형/그리드)만 노출
+# 유사 그룹 뷰 모드(대형/그리드) — 이 컨트롤이 없으면 later code에서 NameError 발생
 group_view_mode = st.sidebar.radio("유사 그룹 보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=0)
 
 # 고급 옵션(화질, 포맷, 품질, 분석 등)은 숨김/제거
@@ -379,10 +379,6 @@ with tab2:
                 # 매우 작은 해시 차이면 동일한 뒷면이 두 번 스캔된 것일 가능성 높음
                 if d <= 1:
                     dup_pairs.append((a, b, int(d)))
-        if dup_pairs:
-            st.error("스캔 오류 가능성: 다음 파일 쌍이 거의 동일합니다. 해당 쌍의 인접 장(앞/뒷면)을 다시 스캔하세요:")
-            for a, b, d in dup_pairs:
-                st.write(f"- {a}  ⟷  {b}   (해시차: {d})")
     except Exception:
         # imagehash가 없거나 처리 실패 시 무시
         pass
@@ -404,6 +400,7 @@ with tab2:
             st.caption(f"그룹 {start+1}–{end} / 총 {total_groups} (페이지 {group_page})")
 
             for gid in groups[start:end]:
+                # 그룹 텍스트/캡션은 모두 표시하도록 변경 (특정 그룹 숨김 제거)
                 st.subheader(f"그룹: {gid}")
                 files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
                 if len(files) == 0:
@@ -412,7 +409,7 @@ with tab2:
                 # 명확한 재스캔 안내 — 그룹의 첫 두 장을 지목하여 재스캔 권고
                 if len(files) >= 2:
                     a_name, b_name = files[0], files[1]
-                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 두 장을 확인한 뒤 A와 B를 다시 스캔해주세요.")
+                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 두 장을 확인한 앞장 A와 B를 다시 스캔해주세요.")
                 # 대형 표시(긴 변 group_large_px)
                 disp_paths = []
                 for f in files[:2]:  # 보통 2장이므로 2장만
@@ -422,19 +419,15 @@ with tab2:
                 cols = st.columns(2)
                 for i in range(min(2, len(disp_paths))):
                     with cols[i]:
-                        st.image(_safe_image_open(disp_paths[i]), caption=files[i], use_container_width=True)
-                # 바로 미리보기 띄우기 버튼
-                open_cols = st.columns(2)
-                for i in range(min(2, len(files))):
-                    with open_cols[i]:
-                        if st.button(f"🔎 크게 보기 — {files[i]}", key=f"pv_large_{gid}_{i}"):
-                            open_preview(os.path.join(grouped_dir, gid, files[i]), caption=files[i])
+                        cap = files[i]
+                        st.image(_safe_image_open(disp_paths[i]), caption=cap, use_container_width=True)
 
         # --- 그리드 모드: 여러 썸네일(해상도 설정 반영) ---
         else:
             sel = st.selectbox("그룹 선택", ["전체 그룹 보기"] + groups)
             targets = groups if sel == "전체 그룹 보기" else [sel]
             for gid in targets:
+                # 그룹 텍스트/캡션은 모두 표시하도록 변경 (특정 그룹 숨김 제거)
                 st.subheader(f"그룹: {gid}")
                 files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
                 if len(files) == 0:
@@ -447,7 +440,8 @@ with tab2:
                     img_path = os.path.join(grouped_dir, gid, f)
                     disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
                     with cols[idx % grid_cols]:
-                        if st.button(f"🔎 {f}", key=f"pv_{gid}_{idx}"):
+                        btn_label = f"🔎 {f}"
+                        if st.button(btn_label, key=f"pv_{gid}_{idx}"):
                             open_preview(img_path, caption=f)
                         st.image(_safe_image_open(disp), caption=f, use_container_width=True)
     else:
@@ -532,7 +526,7 @@ with tab4:
     with row1[1]:
         ext_sel = st.multiselect("확장자", [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"], default=[])
     with row1[2]:
-        sort_key = st.selectbox("정렬", ["파일명", "수정시각(최신순)", "수정시각(오래된순)"], index=1)
+        sort_key = st.selectbox("정렬", ["파일명", "수정시각(최신순)", "수정시각(오래된순)"], index=0)
 
     # ---------- 데이터 준비 ----------
     all_imgs = list_all_images(OUTPUT_DIR)
