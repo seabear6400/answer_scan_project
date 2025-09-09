@@ -438,6 +438,15 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 continue
             fi, fj = name_by_row[i], name_by_row[j]
 
+            # 사용자 요청: 그룹핑은 파일명(확장자 제거) 끝이 '2'인 파일들끼리만 수행
+            # 예: 1000652.JPG 와 1000662.JPG 처럼 뒤에 '2'로 끝나는 페어만 그룹화 대상
+            if not (os.path.splitext(fi)[0].endswith('2') and os.path.splitext(fj)[0].endswith('2')):
+                continue
+
+            # 빈(공백) 이미지는 그룹 대상으로 삼지 않음
+            if densities.get(fi, 0.0) <= cfg.blank_density_thresh or densities.get(fj, 0.0) <= cfg.blank_density_thresh:
+                continue
+
             if not prefilter_ok(fi, fj):
                 continue
 
