@@ -1,7 +1,27 @@
 import os
 import argparse
 import subprocess
+import threading
+from typing import Optional, Tuple
 from detector_pipeline import detect_pipeline, DetectorConfig
+
+# Pre-warm tkinter in a background thread so the folder dialog opens faster on demand.
+# This reduces perceived startup latency when the user is prompted for a folder.
+_tk_warmed: bool = False
+_tk_mods: Optional[Tuple[object, object]] = None
+def _warm_tk():
+    global _tk_warmed, _tk_mods
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        # Keep references to modules so main() can use them immediately.
+        _tk_mods = (tk, filedialog)
+        _tk_warmed = True
+    except Exception:
+        _tk_warmed = False
+
+_tk_thread = threading.Thread(target=_warm_tk, daemon=True)
+_tk_thread.start()
 
 def parse_args():
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
@@ -51,14 +71,24 @@ def parse_args():
 def main():
     args = parse_args()
     # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다. 취소하면 기존 args.input_dir 사용.
+    # Attempt to use warmed tkinter modules for faster dialog display. Fall back to on-demand import.
     try:
-        import tkinter as tk
-        from tkinter import filedialog
+        if _tk_warmed and _tk_mods:
+            tk, filedialog = _tk_mods
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
+
+        # Create a short-lived root for the dialog and ensure it's on top.
         root = tk.Tk()
+        root.attributes('-topmost', True)
         root.withdraw()
         print("[*] 폴더 선택 대화상자를 엽니다 — 분석할 폴더를 선택하세요 (취소하면 기본값 사용).")
         sel = filedialog.askdirectory(title="분석할 폴더 선택")
-        root.destroy()
+        try:
+            root.destroy()
+        except Exception:
+            pass
         if sel:
             args.input_dir = sel
             print(f"선택된 입력 폴더: {args.input_dir}")
@@ -100,7 +130,9 @@ def main():
     print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
     print("🌐 대시보드 실행…")
-    cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--", f"--output_dir={args.output_dir}"]
+    # input_dir 인자도 함께 전달하여 사용자가 선택한 입력 폴더가 대시보드에서 인식되도록 함
+    cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--",
+           f"--output_dir={args.output_dir}", f"--input_dir={args.input_dir}"]
     try:
         if args.detach and os.name == 'nt':   
             subprocess.Popen(["cmd", "/c", "start"] + cmd)
