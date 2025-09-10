@@ -50,6 +50,23 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다. 취소하면 기존 args.input_dir 사용.
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        print("[*] 폴더 선택 대화상자를 엽니다 — 분석할 폴더를 선택하세요 (취소하면 기본값 사용).")
+        sel = filedialog.askdirectory(title="분석할 폴더 선택")
+        root.destroy()
+        if sel:
+            args.input_dir = sel
+            print(f"선택된 입력 폴더: {args.input_dir}")
+        else:
+            print(f"폴더 선택 취소 — 기본 입력 폴더 사용: {args.input_dir}")
+    except Exception as e:
+        # GUI 사용 불가한 환경이면 기존 args.input_dir 사용
+        print(f"GUI 폴더 선택을 사용할 수 없음, 기본 입력 폴더 사용: {args.input_dir} ({e})")
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
         os.makedirs(os.path.join(args.output_dir, sub), exist_ok=True)
 

@@ -7,6 +7,8 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 from PIL import Image
+import io
+from PIL import UnidentifiedImageError
 import imagehash
 import cv2
 import pandas as pd
@@ -133,15 +135,29 @@ def crop_roi(img: Image.Image, roi_ratio: Tuple[float, float, float, float]):
 
 
 def read_gray(path: str):
+    # 우선 OpenCV로 시도
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise RuntimeError(f"이미지 로딩 실패: {path}")
-    return img
+    if img is not None:
+        return img
+    # 실패하면 Pillow로 바이트 기반 로드 시도 (경로 인코딩/OneDrive placeholder 문제 완화)
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        pil = Image.open(io.BytesIO(data)).convert('L')
+        arr = np.array(pil)
+        return arr
+    except Exception as e:
+        raise RuntimeError(f"이미지 로딩 실패: {path} ({e})")
 
 
 # -------------------------- Prefilters ------------------------------
 def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> imagehash.ImageHash:
-    img = Image.open(path).convert("L")
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        img = Image.open(io.BytesIO(data)).convert("L")
+    except Exception:
+        img = Image.open(path).convert("L")
     img = crop_roi(img, roi_ratio)
     img = img.resize((64, 64))
     return imagehash.phash(img)
@@ -150,7 +166,12 @@ def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> imageha
 def pdq_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> Optional[np.ndarray]:
     if not _HAS_PDQ:
         return None
-    img = Image.open(path).convert("RGB")
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        img = Image.open(path).convert("RGB")
     img = crop_roi(img, roi_ratio)
     arr = np.array(img)
     hash_vec, _ = pdqhash.compute_pdq_hash(arr)  # 256-d bits (0/1)
@@ -202,7 +223,12 @@ class ImgDataset(Dataset):
 
     def __getitem__(self, idx):
         p = self.paths[idx]
-        img = Image.open(p).convert("RGB")
+        try:
+            with open(p, 'rb') as f:
+                data = f.read()
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+        except Exception:
+            img = Image.open(p).convert("RGB")
         img = crop_roi(img, self.roi)
         return self.tf(img), p
 
