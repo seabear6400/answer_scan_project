@@ -18,7 +18,6 @@ from PIL import Image
 import numpy as np
 import pandas as pd
 import cv2
-import torch  # (옵션) LPIPS 계산 등에 필요
 
 # ===== Optional metrics/components (존재하면 사용) =====
 try:
@@ -32,13 +31,6 @@ try:
     _HAS_LPIPS = True
 except Exception:
     _HAS_LPIPS = False
-
-_HAS_IMG_CMP = False
-try:
-    from streamlit_image_comparison import image_comparison
-    _HAS_IMG_CMP = True
-except Exception:
-    pass
 
 # Pillow resample 상수 호환
 try:
@@ -185,6 +177,17 @@ def corresponding_front_filename(fname: str) -> str:
     front_ns = str(front_n).zfill(len(ns))
     return fname[:sidx] + front_ns + fname[eidx:]
 
+
+# 안전한 2파일(뒷장) 판별기: 파일명이 충분히 길지 않거나 예상 포맷이 아닐 때 False 반환
+def is_2file(filename: str) -> bool:
+    try:
+        if not filename or not isinstance(filename, str):
+            return False
+        # 확장자 포함 길이가 최소 5 이상이어야(예: 1.jpg) 뒤에서 5번째 문자가 존재
+        return filename.lower().endswith('.jpg') and len(filename) >= 5 and filename[-5] == '2'
+    except Exception:
+        return False
+
 # ===== 캐싱: 표시용(썸네일/대형) 이미지 생성 =====
 @st.cache_data(show_spinner=False)
 def _disp_key(src_path: str, size: int, fmt: str, quality: int) -> str:
@@ -256,6 +259,20 @@ c4.metric("유사 후보 쌍", f"{kpis['유사 후보 쌍']:,}")
 
 # ===== 사이드바: 꼭 필요한 옵션만 노출 =====
 st.sidebar.header("주요 필터/설정")
+# 캐시 새로고침: 파일/폴더 변경이 반영되지 않을 때 사용
+try:
+    if st.sidebar.button("새로고침 (캐시 재생성)"):
+        # Clear streamlit data cache and rerun
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+except Exception:
+    pass
 min_sim = st.sidebar.slider("최소 유사도", 0.0, 1.0, 0.90, 0.01, help="유사도 임계값을 조정하세요.")
 name_query = st.sidebar.text_input("파일명 검색", value="", help="특정 파일명을 빠르게 찾고 싶을 때 입력")
 group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
@@ -265,7 +282,7 @@ group_filter = st.sidebar.selectbox("특정 그룹만 보기", ["전체"] + grou
 grid_cols = st.sidebar.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
 
 # 유사 그룹 뷰 모드(대형/그리드) — 이 컨트롤이 없으면 later code에서 NameError 발생
-group_view_mode = st.sidebar.radio("유사 그룹 보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=0)
+group_view_mode = st.sidebar.radio("유사 그룹 보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=1)
 
 # 고급 옵션(화질, 포맷, 품질, 분석 등)은 숨김/제거
 grid_target_px = 768  # 고정값
@@ -276,7 +293,6 @@ group_page_size = 6   # 고정값
 group_page = 1        # 고정값(페이지네이션은 필요시만)
 show_absdiff = False
 show_ssim = False
-show_lpips = False
 
 # ===== 유틸: 비교용 도구 =====
 def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -296,40 +312,134 @@ def _absdiff_heatmap(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     heat = cv2.applyColorMap(diff, cv2.COLORMAP_JET)
     return cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
 
-_lpips_model = None
-def _lpips_score(a_path: str, b_path: str) -> Optional[float]:
-    global _lpips_model
-    if not _HAS_LPIPS:
+
+def _blend_images_rgb(a_path: str, b_path: str, alpha: float = 0.5) -> np.ndarray:
+    """Read two images, resize to same smallest dims, return RGB blended numpy array.
+    alpha: weight for a (0..1)."""
+    a = cv2.imread(a_path, cv2.IMREAD_COLOR)
+    b = cv2.imread(b_path, cv2.IMREAD_COLOR)
+    if a is None or b is None:
+        raise RuntimeError("이미지 로드 실패")
+    # resize to minimum common size
+    h = min(a.shape[0], b.shape[0]); w = min(a.shape[1], b.shape[1])
+    a = cv2.resize(a, (w, h), interpolation=cv2.INTER_AREA)
+    b = cv2.resize(b, (w, h), interpolation=cv2.INTER_AREA)
+    out = cv2.addWeighted(a.astype('float32'), alpha, b.astype('float32'), 1.0 - alpha, 0.0)
+    out = out.astype('uint8')
+    return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+
+
+def _highlight_differences_rgb(a_path: str, b_path: str, color: Tuple[int, int, int] = (0, 255, 255), thresh: int = 20) -> np.ndarray:
+    """Highlight differences by overlaying a colored mask where absdiff > thresh.
+    color is in BGR order for OpenCV but returned image is RGB."""
+    a = cv2.imread(a_path, cv2.IMREAD_COLOR)
+    b = cv2.imread(b_path, cv2.IMREAD_COLOR)
+    if a is None or b is None:
+        raise RuntimeError("이미지 로드 실패")
+    h = min(a.shape[0], b.shape[0]); w = min(a.shape[1], b.shape[1])
+    a = cv2.resize(a, (w, h), interpolation=cv2.INTER_AREA)
+    b = cv2.resize(b, (w, h), interpolation=cv2.INTER_AREA)
+    gray_a = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+    gray_b = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+    diff = cv2.absdiff(gray_a, gray_b)
+    # slight blur to reduce noise
+    diff = cv2.GaussianBlur(diff, (3, 3), 0)
+    _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
+    mask3 = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    # color is expected in BGR
+    overlay = (mask3.astype('float32') / 255.0) * np.array(color, dtype='float32')
+    base = cv2.cvtColor(b, cv2.COLOR_BGR2RGB).astype('float32')
+    # combine: where mask, mix overlay color with base
+    alpha = 0.6
+    combined = base * (1.0 - (mask3.astype('float32') / 255.0) * alpha) + overlay * alpha
+    combined = np.clip(combined, 0, 255).astype('uint8')
+    return combined
+
+
+def _comp_cache_key(a_path: str, b_path: str, mode: str, params: Dict) -> str:
+    s = f"{a_path}|{_file_mtime(a_path)}|{b_path}|{_file_mtime(b_path)}|{mode}|{sorted(params.items())}"
+    return hashlib.md5(s.encode('utf-8')).hexdigest()
+
+
+def _write_cached_image(arr_rgb: np.ndarray, dst: str, fmt: str = 'PNG') -> str:
+    try:
+        img = Image.fromarray(arr_rgb)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        img.save(dst, fmt)
+        return dst
+    except Exception:
         return None
-    if _lpips_model is None:
-        _lpips_model = lpips.LPIPS(net='vgg').eval()
-    import torchvision.transforms as T
-    tf = T.Compose([T.ToTensor()])
-    A = cv2.cvtColor(cv2.imread(a_path), cv2.COLOR_BGR2RGB)
-    B = cv2.cvtColor(cv2.imread(b_path), cv2.COLOR_BGR2RGB)
-    h = min(A.shape[0], B.shape[0]); w = min(A.shape[1], B.shape[1])
-    A = cv2.resize(A, (w, h)); B = cv2.resize(B, (w, h))
-    a = tf(Image.fromarray(A)).unsqueeze(0)
-    b = tf(Image.fromarray(B)).unsqueeze(0)
-    with torch.no_grad():
-        d = _lpips_model(a, b).item()
-    return float(d)
+
+
+def _cached_blend_path(a_path: str, b_path: str, alpha: float = 0.5) -> Optional[str]:
+    key = _comp_cache_key(a_path, b_path, 'fade', {'alpha': alpha})
+    dst = os.path.join(THUMB_DIR, f"cmp_fade_{key}.png")
+    if os.path.exists(dst) and _file_mtime(dst) >= max(_file_mtime(a_path), _file_mtime(b_path)):
+        return dst
+    arr = _blend_images_rgb(a_path, b_path, alpha=alpha)
+    return _write_cached_image(arr, dst, fmt='PNG')
+
+
+def _cached_diff_path(a_path: str, b_path: str, blur: int = 3, thresh: int = 10) -> Optional[str]:
+    key = _comp_cache_key(a_path, b_path, 'diff', {'blur': blur, 'thresh': thresh})
+    dst = os.path.join(THUMB_DIR, f"cmp_diff_{key}.png")
+    if os.path.exists(dst) and _file_mtime(dst) >= max(_file_mtime(a_path), _file_mtime(b_path)):
+        return dst
+    # produce diff heatmap
+    ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
+    gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
+    if ga is None or gb is None:
+        return None
+    h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
+    ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
+    gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
+    diff = cv2.absdiff(ga, gb)
+    diff = cv2.GaussianBlur(diff, (blur, blur), 0)
+    _, diff_mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_TOZERO)
+    diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
+    heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
+    rgb = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
+    return _write_cached_image(rgb, dst, fmt='PNG')
+
+
+def _cached_highlight_path(a_path: str, b_path: str, color: Tuple[int, int, int] = (0, 255, 255), thresh: int = 20) -> Optional[str]:
+    key = _comp_cache_key(a_path, b_path, 'hl', {'color': color, 'thresh': thresh})
+    dst = os.path.join(THUMB_DIR, f"cmp_hl_{key}.png")
+    if os.path.exists(dst) and _file_mtime(dst) >= max(_file_mtime(a_path), _file_mtime(b_path)):
+        return dst
+    arr = _highlight_differences_rgb(a_path, b_path, color=color, thresh=thresh)
+    return _write_cached_image(arr, dst, fmt='PNG')
+
+
+def _create_fade_gif(a_path: str, b_path: str, steps: int = 20, duration_ms: int = 50) -> Optional[str]:
+    key = _comp_cache_key(a_path, b_path, 'fade_gif', {'steps': steps, 'dur': duration_ms})
+    dst = os.path.join(THUMB_DIR, f"cmp_fade_anim_{key}.gif")
+    if os.path.exists(dst) and _file_mtime(dst) >= max(_file_mtime(a_path), _file_mtime(b_path)):
+        return dst
+    try:
+        frames = []
+        for i in range(steps + 1):
+            alpha = i / steps
+            arr = _blend_images_rgb(a_path, b_path, alpha=alpha)
+            frames.append(Image.fromarray(arr))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        frames[0].save(dst, format='GIF', save_all=True, append_images=frames[1:], duration=duration_ms, loop=0)
+        return dst
+    except Exception:
+        return None
 
 # ===== 모달(미리보기) 지원: Streamlit 1.34+ =====
 _HAS_DIALOG = hasattr(st, "dialog")
-if _HAS_DIALOG:
-    @st.dialog("미리보기")
-    def preview_dialog(img_path: str, caption: str = ""):
-        st.image(_safe_image_open(img_path), caption=caption, use_container_width=True)
-else:
-    st.session_state.setdefault("legacy_preview_path", None)
-
 def open_preview(img_path: str, caption: str = ""):
+    """Open a preview using dialog if available, otherwise show inline fallback."""
     if _HAS_DIALOG:
-        preview_dialog(img_path, caption)
+        @st.dialog("미리보기")
+        def _d(img_path_inner: str, caption_inner: str = ""):
+            st.image(_safe_image_open(img_path_inner), caption=caption_inner, use_container_width=True)
+        _d(img_path, caption)
     else:
-        st.session_state["legacy_preview_path"] = (img_path, caption)
-        st.experimental_rerun()
+        # Fallback: show inline immediately
+        st.image(_safe_image_open(img_path), caption=caption, use_container_width=True)
 
 # ===== 공통: 리포트 필터링 =====
 def filter_sort_report(_df: pd.DataFrame) -> pd.DataFrame:
@@ -364,30 +474,125 @@ def toggle_compare(img_path: str):
 # ===== 탭 구성 =====
 tab1, tab2, tab3, tab4 = st.tabs(["리포트 요약", "재스캔 필요", "정상/공백 답안", "전체 보기"])
 
+# ===== Global: 탭 어디에서든 2장 선택 시 상단에 즉시 비교 패널 표시 =====
+def _render_global_compare():
+    # 우선 gallery_selected(탭3/4)와 rescan_selected(탭2)에서 우선순위로 2장 경로 복원
+    sel_names = []
+    if st.session_state.get('rescan_selected'):
+        sel_paths = [p for p in st.session_state.get('rescan_selected', []) if p and os.path.isfile(p)]
+        if len(sel_paths) >= 2:
+            return sel_paths[:2]
+    if st.session_state.get('gallery_selected'):
+        sel_names = st.session_state.get('gallery_selected', [])
+        sel_paths = [BASENAME_MAP.get(n.lower(), None) for n in sel_names]
+        sel_paths = [p for p in sel_paths if p and os.path.isfile(p)]
+        if len(sel_paths) >= 2:
+            return sel_paths[:2]
+    return None
+
+
+cmp_pair = _render_global_compare()
+if cmp_pair:
+    a_path, b_path = cmp_pair
+    st.markdown("---")
+    st.markdown("### 🔀 선택한 두 이미지 즉시 비교")
+    c1g, c2g = st.columns(2)
+    with c1g:
+        big_a = make_display_image(a_path, size=max(1200, group_large_px), fmt=disp_fmt, quality=disp_quality)
+        st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
+    with c2g:
+        big_b = make_display_image(b_path, size=max(1200, group_large_px), fmt=disp_fmt, quality=disp_quality)
+        st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
+    st.markdown("_두 장이 선택되면 여기에서 바로 비교 모드를 사용해 분석할 수 있습니다._")
+
+
 
 # === Tab1: 리포트 요약 ===
 with tab1:
 
-    df_view = filter_sort_report(df) if len(df) else df
-    st.dataframe(df_view, use_container_width=True, height=480)
-    st.download_button("⬇ CSV 다운로드", df_view.to_csv(index=False).encode("utf-8-sig"),
-                       "filtered_report.csv", "text/csv")
+    # 안전한 처리: 리포트가 비어있으면 안내
+    if df is None or (hasattr(df, '__len__') and len(df) == 0):
+        st.info("⚠️ 보고서가 비어 있습니다. 먼저 파이프라인을 실행하세요.")
+    else:
+        # 필터/정렬 적용된 뷰
+        df_view = filter_sort_report(df)
 
-    # 비교 선택 UI 제거 — 리포트 요약은 표/다운로드 중심으로 단순화
+        # 상단: 간단한 요약 카드/테이블
+        st.subheader("요약")
+        sc1, sc2, sc3 = st.columns([1.2, 1.2, 1.0])
+        with sc1:
+            st.write("**상태별 분포**")
+            if "상태" in df_view.columns:
+                st.table(df_view["상태"].value_counts().rename_axis('상태').reset_index(name='건수'))
+            else:
+                st.write("상태 정보 없음")
+        with sc2:
+            st.write("**그룹별 상위(최대 10)**")
+            if "그룹ID" in df_view.columns:
+                grp = df_view['그룹ID'].replace('-', pd.NA).dropna()
+                if len(grp):
+                    st.table(grp.value_counts().head(10).rename_axis('그룹ID').reset_index(name='건수'))
+                else:
+                    st.write("그룹 정보 없음")
+            else:
+                st.write("그룹 정보 없음")
+        with sc3:
+            st.write("**이미지 요약(빈칸)**")
+            if isinstance(img_df, pd.DataFrame) and '빈칸여부' in img_df.columns:
+                total_imgs = len(img_df)
+                blank_cnt = int(img_df['빈칸여부'].sum()) if total_imgs else 0
+                st.metric("공백 수", f"{blank_cnt}", delta=f"{(blank_cnt/total_imgs*100):.1f}%" if total_imgs else "")
+            else:
+                st.write("이미지 요약 파일이 없습니다")
+
+        st.markdown("---")
+
+        # 중간: 필터된 리포트 표와 다운로드
+        st.subheader("필터된 리포트")
+        st.dataframe(df_view, use_container_width=True, height=300)
+        st.download_button("⬇ CSV 다운로드", df_view.to_csv(index=False).encode("utf-8-sig"),
+                           "filtered_report.csv", "text/csv")
+
+        # 하단: 리포트에 등장하는 파일들의 이미지 메타(밀도/빈칸여부) 병합 테이블
+        st.markdown("---")
+        st.subheader("파일별 메타 (리포트 연동)")
+        # 파일1/파일2 컬럼을 합쳐 고유 파일 목록 생성
+        files = []
+        if '파일1' in df_view.columns:
+            files += list(df_view['파일1'].dropna().astype(str).tolist())
+        if '파일2' in df_view.columns:
+            files += list(df_view['파일2'].dropna().astype(str).tolist())
+        files = list(dict.fromkeys(files))
+        meta_df = pd.DataFrame({'파일': files})
+        if isinstance(img_df, pd.DataFrame) and '파일' in img_df.columns:
+            meta_df = meta_df.merge(img_df, on='파일', how='left')
+        # 기본 컬럼 정리(존재하지 않더라도 에러 방지)
+        for col in ['밀도', '빈칸여부']:
+            if col not in meta_df.columns:
+                meta_df[col] = pd.NA
+        st.dataframe(meta_df, use_container_width=True, height=240)
+        # 추가 다운로드: meta
+        st.download_button("⬇ 파일 메타 다운로드", meta_df.to_csv(index=False).encode("utf-8-sig"),
+                           "report_files_meta.csv", "text/csv")
 
 
 # === Tab2: 유사 그룹 ===
 with tab2:
     # ---- Rescan(재스캔) 감지: 입력 폴더의 이미지 해시(pHash)로 거의 동일한 이미지 쌍 탐지 ----
     # 우선 CLI/streamlit 인자로 전달된 INPUT_DIR 사용, 없으면 output 경로를 기반으로 유추
+    # 입력 폴더는 선택적(없는 경우에도 정상 동작)
     if os.path.isdir(INPUT_DIR):
         input_dir = INPUT_DIR
     else:
         input_dir = OUTPUT_DIR.replace("output", "input_images") if "output" in OUTPUT_DIR else "input_images"
     exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
-    try:
-        scan_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(exts)])
-    except Exception:
+    # input_dir가 없으면 빈 리스트로 처리
+    if os.path.isdir(input_dir):
+        try:
+            scan_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(exts)])
+        except Exception:
+            scan_files = []
+    else:
         scan_files = []
 
     try:
@@ -403,19 +608,137 @@ with tab2:
                     h = imagehash.phash(img)
                 hashes[f] = h
             except Exception:
-                # 읽기 실패 파일은 로그로 남기고 무시
-                # st.write(f"파일 로드 실패: {f}")
+                # 읽기 실패 파일은 무시
                 continue
         fl = list(hashes.keys())
         for i in range(len(fl)):
             for j in range(i+1, len(fl)):
                 a, b = fl[i], fl[j]
-                d = abs(hashes[a] - hashes[b])
+                try:
+                    d = abs(hashes[a] - hashes[b])
+                except Exception:
+                    continue
                 # 매우 작은 해시 차이면 동일한 뒷장이 두 번 스캔된 것일 가능성 높음
                 if d <= 1:
                     dup_pairs.append((a, b, int(d)))
     except Exception:
         dup_pairs = []
+
+    # Build rescan candidates: combine pHash dup_pairs (input folder) and report '유사 후보' pairs
+    report_dups = []
+    try:
+        # df에는 파일명(리포트상)이 들어있음; 복원 가능한 경로로 변환
+        if '상태' in df.columns:
+            rpt = df[df['상태'] == '유사 후보'] if isinstance(df, pd.DataFrame) else pd.DataFrame()
+            for _, row in rpt.iterrows():
+                a, b = str(row.get('파일1', '')), str(row.get('파일2', ''))
+                pa = resolve_image_path(a) or os.path.join(OUTPUT_DIR, a)
+                pb = resolve_image_path(b) or os.path.join(OUTPUT_DIR, b)
+                report_dups.append((pa, pb, float(row.get('유사도', 0.0))))
+    except Exception:
+        report_dups = []
+
+    # ----- 즉시 비교 패널: 사용자가 아래 그리드에서 '↔ 비교 선택' 버튼을 클릭하면
+    # rescan 탭의 상단에 바로 비교 옵션과 결과가 표시되도록 함
+    if "rescan_selected" not in st.session_state:
+        st.session_state["rescan_selected"] = []
+
+    sel_paths_top = st.session_state.get("rescan_selected", [])
+    sel_exist_top = [p for p in sel_paths_top if p and os.path.isfile(p)]
+    if sel_exist_top:
+        st.markdown("---")
+        st.markdown("### 🔍 즉시 비교 (재스캔 탭)")
+        # 공통: 모드 선택 + 도움말 옆 배치
+        colm1, colm2 = st.columns([3, 7])
+        with colm1:
+            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["Fade", "Difference", "Highlighter"], index=0, horizontal=True, key="cmp_mode_top")
+        with colm2:
+            st.markdown(
+                "**모드 설명 (요약 & 권장 설정)**\n"
+                "- **Fade**: 두 이미지를 위아래로 겹쳐 보여줍니다. 앞(A) 이미지의 투명도(alpha)를 조절해 미세한 변화가 어느 위치에서 발생하는지 문맥과 함께 확인할 수 있습니다.\n"
+                "  - 추천: A alpha = 0.4–0.6\n"
+                "  - 장점: 전체 레이아웃 맥락을 유지하면서 변화 관찰 가능\n"
+                "  - 단점: 색 대비가 약하거나 스캔 노이즈가 많으면 차이를 식별하기 어려울 수 있음\n"
+                "- **Difference**: 그레이스케일 절대 차이를 계산해 heatmap으로 표시합니다. 픽셀 단위 변경을 강조합니다.\n"
+                "  - 추천: Blur = 3, Threshold = 10\n"
+                "  - 장점: 아주 작은 픽셀 변화까지 시각화 가능\n"
+                "  - 단점: 스캔 노이즈(먼지, 압력 자국 등)에 민감함 — Blur/Threshold로 노이즈 제어 필요\n"
+                "- **Highlighter**: Difference 마스크를 색상으로 원본 이미지에 오버레이합니다. 문서의 글자 추가/삭제 등 의미 있는 변경을 컬러로 빠르게 파악할 때 유용합니다.\n"
+                "  - 추천: Threshold = 15, 색상 = Yellow\n"
+                "  - 장점: 변경 영역이 직관적으로 눈에 띔\n"
+                "  - 단점: 임계값과 색상 조절이 필요할 수 있음\n\n"
+                "사용법: 아래 그리드에서 두 장을 선택하면 이 상단 패널에서 선택한 모드로 즉시 결과를 확인할 수 있습니다.\n"
+                "- Fade 애니메이션: 'Play fade animation'을 체크하면 자동으로 alpha를 변화시키는 GIF를 재생합니다 (캐시 사용).\n"
+                "- 성능: 비교 이미지는 `artifacts/thumbnails/`에 캐시되어 다음 조회 시 빠르게 로드됩니다."
+            )
+
+        if cmp_mode_top == "Fade":
+            alpha_top = st.slider("Fade: 앞쪽 이미지 투명도 (A)", 0.0, 1.0, 0.5, 0.01, key="alpha_top")
+            play_anim = st.checkbox("Play fade animation", key="play_fade_anim")
+        elif cmp_mode_top == "Difference":
+            diff_blur_top = st.slider("Difference: Blur 강도(odd kernel)", 1, 11, 3, 2, key="diff_blur_top")
+            diff_thresh_top = st.slider("Difference: 강조 임계값", 0, 255, 10, 1, key="diff_thresh_top")
+        else:
+            hl_color_top = st.selectbox("Highlighter 색상", ["Yellow", "Red", "Lime", "Cyan"], index=0, key="hl_color_top")
+            hl_thresh_top = st.slider("Highlighter: 임계값", 1, 100, 20, 1, key="hl_thresh_top")
+
+        if len(sel_exist_top) == 1:
+            bigp = make_display_image(sel_exist_top[0], size=max(1400, group_large_px), fmt=disp_fmt, quality=disp_quality)
+            st.image(_safe_image_open(bigp), caption=os.path.basename(sel_exist_top[0]), use_container_width=True)
+        else:
+            a_path, b_path = sel_exist_top[:2]
+            big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+            big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+            c1t, c2t = st.columns(2)
+            with c1t:
+                st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
+            with c2t:
+                try:
+                    if cmp_mode_top == "Fade":
+                        # use cached path if available
+                        cached = _cached_blend_path(a_path, b_path, alpha=alpha_top)
+                        if play_anim:
+                            gif = _create_fade_gif(a_path, b_path, steps=24, duration_ms=40)
+                            if gif and os.path.exists(gif):
+                                st.image(gif, caption=f"Fade animation — {os.path.basename(b_path)}", use_column_width=True)
+                            elif cached:
+                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                            else:
+                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
+                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                        else:
+                            if cached:
+                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                            else:
+                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
+                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                    elif cmp_mode_top == "Difference":
+                        cached = _cached_diff_path(a_path, b_path, blur=diff_blur_top, thresh=diff_thresh_top)
+                        if cached:
+                            st.image(cached, caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
+                        else:
+                            ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
+                            gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
+                            h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
+                            ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
+                            gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
+                            diff = cv2.absdiff(ga, gb)
+                            diff = cv2.GaussianBlur(diff, (diff_blur_top, diff_blur_top), 0)
+                            _, diff_mask = cv2.threshold(diff, diff_thresh_top, 255, cv2.THRESH_TOZERO)
+                            diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
+                            heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
+                            st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
+                    else:
+                        color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
+                        col_bgr = color_map.get(hl_color_top, (0, 255, 255))
+                        cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
+                        if cached:
+                            st.image(cached, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                        else:
+                            highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
+                            st.image(highlighted, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                except Exception as e:
+                    st.info(f"비교 렌더 실패: {e}")
 
     grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
     if os.path.isdir(grouped_dir):
@@ -423,8 +746,7 @@ with tab2:
         if group_filter != "전체":
             groups = [g for g in groups if g == group_filter]
 
-        def is_2file(filename):
-            return filename.lower().endswith('.jpg') and filename[-5] == '2'
+                # use global is_2file
 
         # --- 대형 비교 모드: 페이지네이션 + 두 장을 크게 나란히 ---
         if group_view_mode.startswith("대형"):
@@ -479,13 +801,11 @@ with tab2:
                             st.image(_safe_image_open(disp_back), caption=f"뒷면: {back_nm}", use_container_width=True)
                         else:
                             st.warning(f"뒷장 파일을 찾을 수 없음: {back_nm}")
-
-        # --- 그리드 모드: 여러 썸네일(해상도 설정 반영) ---
+                # --- 그리드 모드 복원: 사용자가 탭에서 '그리드'를 선택했을 때 표시되는 블록 ---
         else:
             sel = st.selectbox("그룹 선택", ["전체 그룹 보기"] + groups)
             targets = groups if sel == "전체 그룹 보기" else [sel]
             for gid in targets:
-                # 그룹 텍스트/캡션은 모두 표시하도록 변경 (특정 그룹 숨김 제거)
                 st.subheader(f"그룹: {gid}")
                 files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
                 if len(files) == 0:
@@ -495,34 +815,89 @@ with tab2:
                     a_front = corresponding_front_filename(a_name)
                     b_front = corresponding_front_filename(b_name)
                     st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 해당 뒷장이 앞면과 동일한 내용이라면, 앞면 {a_front} 및 {b_front}을 다시 스캔하세요.")
-                cols = st.columns(grid_cols)
-                for idx, f in enumerate(files):
+
+                # 각 이미지를 별도 항목으로 나누어 그리드에 채움
+                items = []
+                for f in files:
                     back_path = os.path.join(grouped_dir, gid, f)
                     front_name = corresponding_front_filename(f)
                     front_path_candidate = os.path.join(grouped_dir, gid, front_name)
                     if not os.path.exists(front_path_candidate):
                         front_path_candidate = resolve_image_path(front_name) or front_path_candidate
+                    items.append(("앞면", front_name, front_path_candidate))
+                    items.append(("뒷면", f, back_path))
 
-                    with cols[idx % grid_cols]:
-                        # 앞면 먼저
-                        if os.path.exists(front_path_candidate):
-                            disp_front = make_display_image(front_path_candidate, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
-                            if st.button(f"🔎 앞면 {front_name}", key=f"pv_front_{gid}_{idx}"):
-                                open_preview(front_path_candidate, caption=f"앞면: {front_name}")
-                            st.image(_safe_image_open(disp_front), caption=f"앞면: {front_name}", use_container_width=True)
-                        else:
-                            st.info(f"앞면 파일 없음: {front_name}")
+                # 그리드: 앞면/뒷면을 각각 별도 박스로, 한 줄에 4개 표시
+                cols = st.columns(4)
+                # rescan 탭 전용 선택 상태 초기화
+                if "rescan_selected" not in st.session_state:
+                    st.session_state["rescan_selected"] = []
 
-                        # 뒷장
-                        if os.path.exists(back_path):
-                            disp_back = make_display_image(back_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
-                            if st.button(f"🔎 뒷면 {f}", key=f"pv_back_{gid}_{idx}"):
-                                open_preview(back_path, caption=f"뒷면: {f}")
-                            st.image(_safe_image_open(disp_back), caption=f"뒷면: {f}", use_container_width=True)
+                for idx, (kind, name, pth) in enumerate(items):
+                    with cols[idx % 4]:
+                        if os.path.exists(pth):
+                            # rescan 전용 비교 선택 토글 (경로 저장)
+                            selected = pth in st.session_state["rescan_selected"]
+                            label = "✔ 비교 취소" if selected else "↔ 비교 선택"
+                            if st.button(label, key=f"cmp_rescan_{gid}_{idx}"):
+                                if selected:
+                                    st.session_state["rescan_selected"] = [n for n in st.session_state["rescan_selected"] if n != pth]
+                                else:
+                                    if len(st.session_state["rescan_selected"]) >= 2:
+                                        st.session_state["rescan_selected"] = st.session_state["rescan_selected"][1:] + [pth]
+                                    else:
+                                        st.session_state["rescan_selected"].append(pth)
+                            disp = make_display_image(pth, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                            st.image(_safe_image_open(disp), caption=f"{kind}: {name}", use_container_width=True)
                         else:
-                            st.info(f"뒷장 파일 없음: {f}")
+                            st.info(f"{kind} 파일 없음: {name}")
+
+                # 선택된 이미지 비교(대형 인라인 뷰)는 탭 상단의 "즉시 비교(재스캔 탭)"에서 제공합니다.
+                # 여기서는 각 모드에 대한 간단한 설명과 사용 팁을 보여줍니다.
+                sel_paths = st.session_state.get("rescan_selected", [])
+                if sel_paths:
+                    st.markdown("---")
+                    st.markdown("#### � 비교 모드 사용 안내")
+                    st.markdown("- Fade: 두 이미지를 겹쳐서 앞(A) 이미지의 투명도를 조절합니다. 작은 차이를 육안으로 직관적으로 확인할 때 유용합니다. 추천값: A alpha 0.4–0.6")
+                    st.markdown("- Difference: 그레이스케일 차이를 계산해 heatmap으로 시각화합니다. 픽셀 단위의 변경을 강조할 때 좋습니다. Blur와 Threshold를 조절해 노이즈를 줄이세요. 추천값: Blur=3, Threshold=10")
+                    st.markdown("- Highlighter: 차이 마스크를 색상으로 오버레이합니다. 문서 스캔의 글자 추가/삭제 같은 작은 변경을 컬러로 빠르게 식별할 때 유용합니다. 추천값: Threshold=15, 색상=Yellow")
+                    st.markdown("\n사용 방법: 아래 그리드에서 '↔ 비교 선택'으로 두 장을 선택하면, 탭 상단의 '즉시 비교 (재스캔 탭)'에서 선택한 모드로 결과를 즉시 확인할 수 있습니다.")
+                    # 선택 초기화 버튼(간단한 접근)
+                    c1, c2 = st.columns([1, 9])
+                    with c1:
+                        if st.button("선택 초기화", key=f"rescan_reset_{gid}"):
+                            st.session_state["rescan_selected"] = []
     else:
-        st.info("그룹 결과 폴더가 없습니다. 먼저 파이프라인을 실행하세요.")
+        st.info("그룹 결과 폴더가 없습니다. 하지만 입력 폴더 또는 리포트에서 재스캔 후보를 검사할 수 있습니다.")
+
+    # If no grouped results, show candidates from input pHash (dup_pairs) and report '유사 후보' pairs
+    if (not os.path.isdir(grouped_dir)) or (os.path.isdir(grouped_dir) and len(os.listdir(grouped_dir)) == 0):
+        candidates = []
+        # from input pHash duplicates
+        for a, b, d in (dup_pairs if 'dup_pairs' in locals() else []):
+            pa = os.path.join(input_dir, a)
+            pb = os.path.join(input_dir, b)
+            if os.path.exists(pa) and os.path.exists(pb):
+                candidates.append((pa, pb, {'reason': f'pHash d={d}'}))
+        # from report '유사 후보'
+        for pa, pb, sim in (report_dups if 'report_dups' in locals() else []):
+            if pa and pb and os.path.exists(pa) and os.path.exists(pb):
+                candidates.append((pa, pb, {'reason': f'report sim={sim}'}))
+
+        if candidates:
+            st.subheader("재스캔 후보 (입력 폴더 / 리포트 기반)")
+            for idx, (a_path, b_path, meta) in enumerate(candidates):
+                cols = st.columns(2)
+                with cols[0]:
+                    disp_a = make_display_image(a_path, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                    st.image(_safe_image_open(disp_a), caption=os.path.basename(a_path))
+                with cols[1]:
+                    disp_b = make_display_image(b_path, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                    st.image(_safe_image_open(disp_b), caption=os.path.basename(b_path))
+                st.markdown(f"- 이유: {meta.get('reason')}")
+                st.markdown("---")
+        else:
+            st.info("입력 폴더 및 리포트에서 유효한 재스캔 후보가 발견되지 않았습니다.")
 
 # === Tab3: 정상/공백 ===
 with tab3:
@@ -530,8 +905,7 @@ with tab3:
     blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
     sel = st.radio("보기 옵션", ["모두 보기", "정상만", "공백만"], horizontal=True)
 
-    def is_2file(filename):
-        return filename.lower().endswith('.jpg') and filename[-5] == '2'
+    # use global is_2file
 
     if sel in ["모두 보기", "정상만"] and os.path.isdir(ok_dir):
         st.subheader("✅ 정상 답안")
@@ -541,9 +915,19 @@ with tab3:
             img_path = os.path.join(ok_dir, f)
             disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
             with cols[idx % grid_cols]:
-                if st.button(f"🔎 {f}", key=f"pv_ok_{idx}"):
-                    open_preview(img_path, caption=f)
-                st.image(_safe_image_open(disp), caption=f, use_container_width=True)
+                # 비교 토글 버튼으로 통일 (전역 gallery_selected 사용)
+                selected = f in st.session_state.gallery_selected
+                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
+                if st.button(label, key=f"cmp_ok_{idx}"):
+                    if selected:
+                        st.session_state.gallery_selected = [n for n in st.session_state.gallery_selected if n != f]
+                    else:
+                        if len(st.session_state.gallery_selected) >= 2:
+                            st.session_state.gallery_selected = st.session_state.gallery_selected[1:] + [f]
+                        else:
+                            st.session_state.gallery_selected.append(f)
+                caption = f + ("  ✅ 선택됨" if selected else "")
+                st.image(_safe_image_open(disp), caption=caption, use_container_width=True)
 
     if sel in ["모두 보기", "공백만"] and os.path.isdir(blank_dir):
         st.subheader("⭕ 공백 답안")
@@ -553,9 +937,43 @@ with tab3:
             img_path = os.path.join(blank_dir, f)
             disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
             with cols[idx % grid_cols]:
-                if st.button(f"🔎 {f}", key=f"pv_blank_{idx}"):
-                    open_preview(img_path, caption=f)
-                st.image(_safe_image_open(disp), caption=f, use_container_width=True)
+                # 비교 토글 버튼으로 통일 (전역 gallery_selected 사용)
+                selected = f in st.session_state.gallery_selected
+                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
+                if st.button(label, key=f"cmp_blank_{idx}"):
+                    if selected:
+                        st.session_state.gallery_selected = [n for n in st.session_state.gallery_selected if n != f]
+                    else:
+                        if len(st.session_state.gallery_selected) >= 2:
+                            st.session_state.gallery_selected = st.session_state.gallery_selected[1:] + [f]
+                        else:
+                            st.session_state.gallery_selected.append(f)
+                caption = f + ("  ✅ 선택됨" if selected else "")
+                st.image(_safe_image_open(disp), caption=caption, use_container_width=True)
+
+    # === Tab3: 선택된 비교 항목을 즉시 대형 비교로 표시 ===
+    if st.session_state.gallery_selected:
+        st.markdown("---")
+        st.markdown("### 🔍 선택 비교 (대형) — 탭3")
+        sel_paths = [BASENAME_MAP.get(n.lower(), None) for n in st.session_state.gallery_selected]
+        sel_paths = [p for p in sel_paths if p and os.path.isfile(p)]
+        if len(sel_paths) == 1:
+            big = make_display_image(sel_paths[0], size=max(1400, grid_target_px), fmt=disp_fmt, quality=disp_quality)
+            st.image(_safe_image_open(big), caption=os.path.basename(sel_paths[0]), use_container_width=True)
+        elif len(sel_paths) >= 2:
+            a_path, b_path = sel_paths[:2]
+            big_a = make_display_image(a_path, size=max(1600, grid_target_px), fmt=disp_fmt, quality=disp_quality)
+            big_b = make_display_image(b_path, size=max(1600, grid_target_px), fmt=disp_fmt, quality=disp_quality)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
+            with c2:
+                st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
+        # 선택 초기화 버튼
+        c1, c2 = st.columns([1, 9])
+        with c1:
+            if st.button("선택 초기화", key="tab3_reset"):
+                st.session_state.gallery_selected = []
 
 # === Tab4: 전체 보기 ===
 with tab4:
@@ -652,25 +1070,19 @@ with tab4:
         with cols[idx % grid_cols_local]:
             # 이미지
             st.image(_safe_image_open(disp), caption=os.path.basename(path), use_container_width=True)
-            # 동작 버튼 (미리보기/비교)
-            cba, cbb = st.columns(2)
-            with cba:
-                if st.button("🔎 미리보기", key=f"pv_all_{idx}"):
-                    open_preview(path, caption=os.path.basename(path))
-            with cbb:
-                # 비교 선택 토글 (최대 2장)
-                selected = os.path.basename(path) in st.session_state.gallery_selected
-                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                if st.button(label, key=f"cmp_all_{idx}"):
-                    name = os.path.basename(path)
-                    if selected:
-                        st.session_state.gallery_selected = [n for n in st.session_state.gallery_selected if n != name]
+            # 동작 버튼: 비교 토글만 표시
+            selected = os.path.basename(path) in st.session_state.gallery_selected
+            label = "✔ 비교 취소" if selected else "↔ 비교 선택"
+            if st.button(label, key=f"cmp_all_{idx}"):
+                name = os.path.basename(path)
+                if selected:
+                    st.session_state.gallery_selected = [n for n in st.session_state.gallery_selected if n != name]
+                else:
+                    if len(st.session_state.gallery_selected) >= 2:
+                        # 가장 오래된 선택 제거 후 추가
+                        st.session_state.gallery_selected = st.session_state.gallery_selected[1:] + [name]
                     else:
-                        if len(st.session_state.gallery_selected) >= 2:
-                            # 가장 오래된 선택 제거 후 추가
-                            st.session_state.gallery_selected = st.session_state.gallery_selected[1:] + [name]
-                        else:
-                            st.session_state.gallery_selected.append(name)
+                        st.session_state.gallery_selected.append(name)
 
     # ---------- 선택 비교(대형 2분할) ----------
     if st.session_state.gallery_selected:
@@ -701,7 +1113,7 @@ with tab4:
                 st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
 
             # 옵션에 따라 간단 분석(원하면 켜서 사용)
-            if show_absdiff or show_ssim or show_lpips:
+            if show_absdiff or show_ssim:
                 st.markdown("#### 차이 분석 (선택 사항)")
                 try:
                     ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
@@ -722,21 +1134,6 @@ with tab4:
                         heat = cv2.applyColorMap(ssim_img, cv2.COLORMAP_INFERNO)
                         st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB),
                                  caption=f"SSIM Map (score={score:.4f})", use_container_width=True)
-                    if show_lpips and _HAS_LPIPS:
-                        import torchvision.transforms as T
-                        tf = T.Compose([T.ToTensor()])
-                        A = cv2.cvtColor(cv2.imread(a_path), cv2.COLOR_BGR2RGB)
-                        B = cv2.cvtColor(cv2.imread(b_path), cv2.COLOR_BGR2RGB)
-                        h2 = min(A.shape[0], B.shape[0]); w2 = min(A.shape[1], B.shape[1])
-                        A = cv2.resize(A, (w2, h2)); B = cv2.resize(B, (w2, h2))
-                        if '_lpips_model' not in globals() or _lpips_model is None:
-                            from lpips import LPIPS
-                            globals()['_lpips_model'] = LPIPS(net='vgg').eval()
-                        a_t = tf(Image.fromarray(A)).unsqueeze(0)
-                        b_t = tf(Image.fromarray(B)).unsqueeze(0)
-                        with torch.no_grad():
-                            d = _lpips_model(a_t, b_t).item()
-                        st.write(f"LPIPS distance: **{d:.4f}** (낮을수록 유사)")
                 except Exception as e:
                     st.info(f"분석 실패: {e}")
 
@@ -745,16 +1142,6 @@ with tab4:
         with cols_ctrl[0]:
             if st.button("선택 초기화"):
                 st.session_state.gallery_selected = []
-        with cols_ctrl[1]:
-            if st.button("선택 2장 미리보기 모달"):
-                if len(sel_paths) >= 1:
-                    open_preview(sel_paths[0], caption=os.path.basename(sel_paths[0]))
-                if len(sel_paths) >= 2:
-                    open_preview(sel_paths[1], caption=os.path.basename(sel_paths[1]))
+    # 우선 비교 토글로 대체 — 모달형 미리보기 버튼 제거
 
-    # 모달 미지원 대체 표시
-    if (not _HAS_DIALOG) and st.session_state.get("legacy_preview_path"):
-        st.markdown("---")
-        bp, cap = st.session_state["legacy_preview_path"]
-        st.subheader(f"미리보기: {cap}")
-        st.image(_safe_image_open(bp), use_container_width=True)
+    # 모달 미지원 대체 표시: 없음(직접 inline으로 대체됨)

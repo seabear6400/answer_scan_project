@@ -496,46 +496,60 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 if votes > 0:
                     confirmed = True
 
+            # confirmed 여부가 True이면 edges 목록에 추가
             if confirmed:
                 confirmed_edges.append((i, j, sim))
 
-    # --- 최대 가중치 매칭(Blossom) or Greedy fallback ---
-    matched_pairs: List[Tuple[int, int]] = []
-    if confirmed_edges:
-        if _HAS_NX:
-            G = nx.Graph()
-            for u, v, w in confirmed_edges:
-                G.add_edge(u, v, weight=float(w))
-            matching = nx.algorithms.matching.max_weight_matching(G, maxcardinality=False)
-            matched_pairs = [(u, v) for u, v in matching]  # vertex-disjoint
-        else:
-            confirmed_edges.sort(key=lambda x: x[2], reverse=True)
-            used = set()
+        # --- confirmed_edges로 유사 그래프를 구성하고 연결요소를 그룹으로 추출 ---
+        # 이제 그룹은 모든 confirmed_edges를 모은 뒤에 한 번만 계산합니다.
+        groups: Dict[str, List[str]] = {}
+        gid_counter = 1
+        if confirmed_edges:
+            # 인접 리스트 생성
+            adj: Dict[int, set] = {}
             for u, v, _w in confirmed_edges:
-                if u in used or v in used:
+                adj.setdefault(u, set()).add(v)
+                adj.setdefault(v, set()).add(u)
+
+            # DFS 기반 연결요소 추출
+            visited = set()
+            for node in list(adj.keys()):
+                if node in visited:
                     continue
-                matched_pairs.append((u, v))
-                used.add(u); used.add(v)
+                stack = [node]
+                comp = []
+                while stack:
+                    cur = stack.pop()
+                    if cur in visited:
+                        continue
+                    visited.add(cur)
+                    comp.append(cur)
+                    for nb in adj.get(cur, ()):  # type: ignore[arg-type]
+                        if nb not in visited:
+                            stack.append(nb)
 
-    # 그룹ID 생성 (각 그룹은 항상 2장만)
-    groups: Dict[str, List[str]] = {}
-    gid_counter = 1
-    for u, v in matched_pairs:
-        fi, fj = name_by_row[u], name_by_row[v]
-        gid = f"group_{gid_counter:03d}"
-        groups[gid] = [fi, fj]
-        gid_counter += 1
+                # 연결요소가 2개 이상일 때만 그룹으로 만듦
+                if len(comp) >= 2:
+                    members = sorted([name_by_row[i] for i in comp])
+                    gid = f"group_{gid_counter:03d}"
+                    groups[gid] = members
+                    gid_counter += 1
 
-    # 리포트 테이블
-    grouped_pairs_set = {tuple(sorted((name_by_row[u], name_by_row[v]))) for u, v in matched_pairs}
+    # 리포트 테이블: 그룹 내 모든 페어를 grouped로 표기
+    grouped_pairs_set = set()
+    pair_to_gid: Dict[Tuple[str, str], str] = {}
+    for gid, members in groups.items():
+        # 그룹이 2명 이상일 때 모든 조합을 그룹 페어로 추가
+        for a, b in itertools.combinations(members, 2):
+            key = tuple(sorted((a, b)))
+            grouped_pairs_set.add(key)
+            pair_to_gid[key] = gid
+
     pair_rows: List[List] = []
     for fi, fj, sim in all_pair_records:
         key = tuple(sorted((fi, fj)))
         if key in grouped_pairs_set:
-            gid = "-"
-            for g, members in groups.items():
-                if set(members) == set([fi, fj]):
-                    gid = g; break
+            gid = pair_to_gid.get(key, "-")
             pair_rows.append([fi, fj, round(sim, 4), "중복/그룹", gid])
         else:
             status = "유사 후보" if sim >= cfg.suspect_low else "다름"
