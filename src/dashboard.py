@@ -9,6 +9,7 @@ import os
 import glob
 import sys
 import hashlib
+import re
 from typing import Tuple, List, Dict, Optional
 
 import streamlit as st
@@ -55,6 +56,7 @@ def parse_streamlit_args():
         user_args = []
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument('--output_dir', default='output')
+    p.add_argument('--input_dir', default='input_images')
     try:
         ns, _ = p.parse_known_args(user_args)
     except SystemExit:
@@ -64,6 +66,7 @@ def parse_streamlit_args():
 
 ns = parse_streamlit_args()
 OUTPUT_DIR = ns.output_dir
+INPUT_DIR = getattr(ns, 'input_dir', 'input_images')
 REPORT_PARQUET = os.path.join(OUTPUT_DIR, "report.parquet")
 REPORT_CSV = os.path.join(OUTPUT_DIR, "report.csv")
 IMG_SUMMARY = os.path.join(OUTPUT_DIR, "images_summary.csv")
@@ -158,6 +161,29 @@ def resolve_image_path(name_or_path: str) -> Optional[str]:
         return rel
     bn = os.path.basename(name_or_path).lower()
     return BASENAME_MAP.get(bn, None)
+
+
+# ===== 번호/앞뒷장 유틸 =====
+def _extract_first_number(s: str):
+    """문자열에서 첫 번째 연속 숫자 그룹을 찾아 (숫자문자열, 정수값, start, end) 반환하거나 None 반환."""
+    m = re.search(r"(\d+)", s)
+    if not m:
+        return None
+    ns = m.group(1)
+    return ns, int(ns), m.start(1), m.end(1)
+
+def corresponding_front_filename(fname: str) -> str:
+    """파일명에서 숫자를 찾아 짝수이면 -1(앞면), 홀수면 그대로로 대응하는 앞면 파일명을 생성하여 반환."""
+    rec = _extract_first_number(fname)
+    if not rec:
+        return fname
+    ns, n, sidx, eidx = rec
+    if n % 2 == 0:
+        front_n = n - 1
+    else:
+        front_n = n
+    front_ns = str(front_n).zfill(len(ns))
+    return fname[:sidx] + front_ns + fname[eidx:]
 
 # ===== 캐싱: 표시용(썸네일/대형) 이미지 생성 =====
 @st.cache_data(show_spinner=False)
@@ -353,7 +379,11 @@ with tab1:
 # === Tab2: 유사 그룹 ===
 with tab2:
     # ---- Rescan(재스캔) 감지: 입력 폴더의 이미지 해시(pHash)로 거의 동일한 이미지 쌍 탐지 ----
-    input_dir = OUTPUT_DIR.replace("output", "input_images") if "output" in OUTPUT_DIR else "input_images"
+    # 우선 CLI/streamlit 인자로 전달된 INPUT_DIR 사용, 없으면 output 경로를 기반으로 유추
+    if os.path.isdir(INPUT_DIR):
+        input_dir = INPUT_DIR
+    else:
+        input_dir = OUTPUT_DIR.replace("output", "input_images") if "output" in OUTPUT_DIR else "input_images"
     exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
     try:
         scan_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(exts)])
@@ -367,21 +397,25 @@ with tab2:
         for f in scan_files:
             p = os.path.join(input_dir, f)
             try:
-                h = imagehash.phash(Image.open(p).convert('L'))
+                # 안전하게 열기 (읽기 실패 파일은 건너뜀)
+                with open(p, 'rb') as fh:
+                    img = Image.open(fh).convert('L')
+                    h = imagehash.phash(img)
                 hashes[f] = h
             except Exception:
+                # 읽기 실패 파일은 로그로 남기고 무시
+                # st.write(f"파일 로드 실패: {f}")
                 continue
         fl = list(hashes.keys())
         for i in range(len(fl)):
             for j in range(i+1, len(fl)):
                 a, b = fl[i], fl[j]
                 d = abs(hashes[a] - hashes[b])
-                # 매우 작은 해시 차이면 동일한 뒷면이 두 번 스캔된 것일 가능성 높음
+                # 매우 작은 해시 차이면 동일한 뒷장이 두 번 스캔된 것일 가능성 높음
                 if d <= 1:
                     dup_pairs.append((a, b, int(d)))
     except Exception:
-        # imagehash가 없거나 처리 실패 시 무시
-        pass
+        dup_pairs = []
 
     grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
     if os.path.isdir(grouped_dir):
@@ -409,18 +443,42 @@ with tab2:
                 # 명확한 재스캔 안내 — 그룹의 첫 두 장을 지목하여 재스캔 권고
                 if len(files) >= 2:
                     a_name, b_name = files[0], files[1]
-                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 두 장을 확인한 앞장 A와 B를 다시 스캔해주세요.")
-                # 대형 표시(긴 변 group_large_px)
-                disp_paths = []
+                    # 뒷장인 경우 앞면 파일명 제시
+                    a_front = corresponding_front_filename(a_name)
+                    b_front = corresponding_front_filename(b_name)
+                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 해당 뒷장이 앞면과 동일한 내용이라면, 앞면 {a_front} 및 {b_front}을 다시 스캔하세요.")
+                # 대형 표시: 앞면 2장 먼저, 그 아래 뒷장 2장 표시
+                pairs = []
                 for f in files[:2]:  # 보통 2장이므로 2장만
-                    p = os.path.join(grouped_dir, gid, f)
-                    disp_paths.append(make_display_image(p, size=group_large_px, fmt=disp_fmt, quality=disp_quality))
+                    back_path = os.path.join(grouped_dir, gid, f)
+                    front_name = corresponding_front_filename(f)
+                    front_path_candidate = os.path.join(grouped_dir, gid, front_name)
+                    if not os.path.exists(front_path_candidate):
+                        # grouped 폴더에 없으면 전역 맵에서 찾기
+                        front_path_candidate = resolve_image_path(front_name) or front_path_candidate
+                    pairs.append((front_path_candidate, back_path, front_name, f))
 
+                # 두 개의 컬럼으로 앞면을 먼저 표시
                 cols = st.columns(2)
-                for i in range(min(2, len(disp_paths))):
+                for i in range(len(pairs)):
+                    front_p, back_p, front_nm, back_nm = pairs[i]
                     with cols[i]:
-                        cap = files[i]
-                        st.image(_safe_image_open(disp_paths[i]), caption=cap, use_container_width=True)
+                        if os.path.exists(front_p):
+                            disp_front = make_display_image(front_p, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                            st.image(_safe_image_open(disp_front), caption=f"앞면: {front_nm}", use_container_width=True)
+                        else:
+                            st.warning(f"앞면 파일을 찾을 수 없음: {front_nm}")
+
+                # 그리고 뒷장 표시(같은 레이아웃)
+                cols2 = st.columns(2)
+                for i in range(len(pairs)):
+                    front_p, back_p, front_nm, back_nm = pairs[i]
+                    with cols2[i]:
+                        if os.path.exists(back_p):
+                            disp_back = make_display_image(back_p, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                            st.image(_safe_image_open(disp_back), caption=f"뒷면: {back_nm}", use_container_width=True)
+                        else:
+                            st.warning(f"뒷장 파일을 찾을 수 없음: {back_nm}")
 
         # --- 그리드 모드: 여러 썸네일(해상도 설정 반영) ---
         else:
@@ -434,16 +492,35 @@ with tab2:
                     continue
                 if len(files) >= 2:
                     a_name, b_name = files[0], files[1]
-                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 두 장을 확인한 뒤 A와 B를 다시 스캔해주세요.")
+                    a_front = corresponding_front_filename(a_name)
+                    b_front = corresponding_front_filename(b_name)
+                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 해당 뒷장이 앞면과 동일한 내용이라면, 앞면 {a_front} 및 {b_front}을 다시 스캔하세요.")
                 cols = st.columns(grid_cols)
                 for idx, f in enumerate(files):
-                    img_path = os.path.join(grouped_dir, gid, f)
-                    disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
+                    back_path = os.path.join(grouped_dir, gid, f)
+                    front_name = corresponding_front_filename(f)
+                    front_path_candidate = os.path.join(grouped_dir, gid, front_name)
+                    if not os.path.exists(front_path_candidate):
+                        front_path_candidate = resolve_image_path(front_name) or front_path_candidate
+
                     with cols[idx % grid_cols]:
-                        btn_label = f"🔎 {f}"
-                        if st.button(btn_label, key=f"pv_{gid}_{idx}"):
-                            open_preview(img_path, caption=f)
-                        st.image(_safe_image_open(disp), caption=f, use_container_width=True)
+                        # 앞면 먼저
+                        if os.path.exists(front_path_candidate):
+                            disp_front = make_display_image(front_path_candidate, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
+                            if st.button(f"🔎 앞면 {front_name}", key=f"pv_front_{gid}_{idx}"):
+                                open_preview(front_path_candidate, caption=f"앞면: {front_name}")
+                            st.image(_safe_image_open(disp_front), caption=f"앞면: {front_name}", use_container_width=True)
+                        else:
+                            st.info(f"앞면 파일 없음: {front_name}")
+
+                        # 뒷장
+                        if os.path.exists(back_path):
+                            disp_back = make_display_image(back_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
+                            if st.button(f"🔎 뒷면 {f}", key=f"pv_back_{gid}_{idx}"):
+                                open_preview(back_path, caption=f"뒷면: {f}")
+                            st.image(_safe_image_open(disp_back), caption=f"뒷면: {f}", use_container_width=True)
+                        else:
+                            st.info(f"뒷장 파일 없음: {f}")
     else:
         st.info("그룹 결과 폴더가 없습니다. 먼저 파이프라인을 실행하세요.")
 
