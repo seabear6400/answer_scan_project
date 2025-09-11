@@ -232,14 +232,43 @@ def make_display_image(src_path: str, size: int, fmt: str = "WEBP", quality: int
 # ===== KPI 계산 =====
 def compute_kpis(df: pd.DataFrame, img_df: pd.DataFrame) -> Dict[str, int]:
     kpis = {"총 이미지": 0, "그룹 수": 0, "공백 수": 0, "유사 후보 쌍": 0}
-    try: kpis["총 이미지"] = len(img_df) if len(img_df) else 0
-    except Exception: pass
-    try: kpis["그룹 수"] = df['그룹ID'].replace('-', pd.NA).dropna().nunique()
-    except Exception: pass
-    try: kpis["공백 수"] = int(img_df["빈칸여부"].sum()) if "빈칸여부" in img_df.columns else 0
-    except Exception: pass
-    try: kpis["유사 후보 쌍"] = int((df["상태"] == "유사 후보").sum())
-    except Exception: pass
+
+    # 총 이미지
+    try:
+        kpis["총 이미지"] = int(len(img_df)) if hasattr(img_df, '__len__') else 0
+    except Exception:
+        pass
+
+    # 그룹 수 (report의 그룹ID 컬럼, '-'은 무시)
+    try:
+        if isinstance(df, pd.DataFrame) and '그룹ID' in df.columns:
+            kpis["그룹 수"] = int(df['그룹ID'].replace('-', pd.NA).dropna().nunique())
+    except Exception:
+        pass
+
+    # 공백 수: output/blank_answers 폴더에 있는 이미지 파일 수를 센다 (안전하게 처리)
+    try:
+        blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
+        blank_cnt = 0
+        if os.path.isdir(blank_dir):
+            exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp'}
+            for name in os.listdir(blank_dir):
+                p = os.path.join(blank_dir, name)
+                if os.path.isfile(p):
+                    _, ext = os.path.splitext(name)
+                    if ext.lower() in exts:
+                        blank_cnt += 1
+        kpis["공백 수"] = int(blank_cnt)
+    except Exception:
+        pass
+
+    # 유사 후보 쌍: report(df)의 '상태' 컬럼에서 '유사 후보'로 표기된 행 수 (있을 경우)
+    try:
+        if isinstance(df, pd.DataFrame) and '상태' in df.columns:
+            kpis["유사 후보 쌍"] = int((df['상태'].astype(str) == '유사 후보').sum())
+    except Exception:
+        pass
+
     return kpis
 
 # ===== 데이터 로딩 =====
@@ -252,7 +281,6 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("총 이미지", f"{kpis['총 이미지']:,}")
 c2.metric("그룹 수", f"{kpis['그룹 수']:,}")
 c3.metric("공백 수", f"{kpis['공백 수']:,}")
-c4.metric("유사 후보 쌍", f"{kpis['유사 후보 쌍']:,}")
 
 
 # ===== 사이드바: 꼭 필요한 옵션만 노출 =====
@@ -470,7 +498,7 @@ def toggle_compare(img_path: str):
         st.session_state.compare_list = st.session_state.compare_list[-2:]
 
 # ===== 탭 구성 =====
-tab1, tab2, tab3, tab4 = st.tabs(["리포트 요약", "재스캔 필요", "정상/공백 답안", "전체 보기"])
+tab2, tab3, tab4 = st.tabs([ "재스캔 필요", "정상/공백 답안", "전체 보기"])
 
 # ===== Global: 탭 어디에서든 2장 선택 시 상단에 즉시 비교 패널 표시 =====
 def _render_global_compare():
@@ -505,73 +533,73 @@ if cmp_pair:
 
 
 
-# === Tab1: 리포트 요약 ===
-with tab1:
+# # === Tab1: 리포트 요약 ===
+# with tab1:
 
-    # 안전한 처리: 리포트가 비어있으면 안내
-    if df is None or (hasattr(df, '__len__') and len(df) == 0):
-        st.info("⚠️ 보고서가 비어 있습니다. 먼저 파이프라인을 실행하세요.")
-    else:
-        # 필터/정렬 적용된 뷰
-        df_view = filter_sort_report(df)
+#     # 안전한 처리: 리포트가 비어있으면 안내
+#     if df is None or (hasattr(df, '__len__') and len(df) == 0):
+#         st.info("⚠️ 보고서가 비어 있습니다. 먼저 파이프라인을 실행하세요.")
+#     else:
+#         # 필터/정렬 적용된 뷰
+#         df_view = filter_sort_report(df)
 
-        # 상단: 간단한 요약 카드/테이블
-        st.subheader("요약")
-        sc1, sc2, sc3 = st.columns([1.2, 1.2, 1.0])
-        with sc1:
-            st.write("**상태별 분포**")
-            if "상태" in df_view.columns:
-                st.table(df_view["상태"].value_counts().rename_axis('상태').reset_index(name='건수'))
-            else:
-                st.write("상태 정보 없음")
-        with sc2:
-            st.write("**그룹별 상위(최대 10)**")
-            if "그룹ID" in df_view.columns:
-                grp = df_view['그룹ID'].replace('-', pd.NA).dropna()
-                if len(grp):
-                    st.table(grp.value_counts().head(10).rename_axis('그룹ID').reset_index(name='건수'))
-                else:
-                    st.write("그룹 정보 없음")
-            else:
-                st.write("그룹 정보 없음")
-        with sc3:
-            st.write("**이미지 요약(빈칸)**")
-            if isinstance(img_df, pd.DataFrame) and '빈칸여부' in img_df.columns:
-                total_imgs = len(img_df)
-                blank_cnt = int(img_df['빈칸여부'].sum()) if total_imgs else 0
-                st.metric("공백 수", f"{blank_cnt}", delta=f"{(blank_cnt/total_imgs*100):.1f}%" if total_imgs else "")
-            else:
-                st.write("이미지 요약 파일이 없습니다")
+#         # 상단: 간단한 요약 카드/테이블
+#         st.subheader("요약")
+#         sc1, sc2, sc3 = st.columns([1.2, 1.2, 1.0])
+#         with sc1:
+#             st.write("**상태별 분포**")
+#             if "상태" in df_view.columns:
+#                 st.table(df_view["상태"].value_counts().rename_axis('상태').reset_index(name='건수'))
+#             else:
+#                 st.write("상태 정보 없음")
+#         with sc2:
+#             st.write("**그룹별 상위(최대 10)**")
+#             if "그룹ID" in df_view.columns:
+#                 grp = df_view['그룹ID'].replace('-', pd.NA).dropna()
+#                 if len(grp):
+#                     st.table(grp.value_counts().head(10).rename_axis('그룹ID').reset_index(name='건수'))
+#                 else:
+#                     st.write("그룹 정보 없음")
+#             else:
+#                 st.write("그룹 정보 없음")
+#         with sc3:
+#             st.write("**이미지 요약(빈칸)**")
+#             if isinstance(img_df, pd.DataFrame) and '빈칸여부' in img_df.columns:
+#                 total_imgs = len(img_df)
+#                 blank_cnt = int(img_df['빈칸여부'].sum()) if total_imgs else 0
+#                 st.metric("공백 수", f"{blank_cnt}", delta=f"{(blank_cnt/total_imgs*100):.1f}%" if total_imgs else "")
+#             else:
+#                 st.write("이미지 요약 파일이 없습니다")
 
-        st.markdown("---")
+#         st.markdown("---")
 
-        # 중간: 필터된 리포트 표와 다운로드
-        st.subheader("필터된 리포트")
-        st.dataframe(df_view, use_container_width=True, height=300)
-        st.download_button("⬇ CSV 다운로드", df_view.to_csv(index=False).encode("utf-8-sig"),
-                           "filtered_report.csv", "text/csv")
+#         # 중간: 필터된 리포트 표와 다운로드
+#         st.subheader("필터된 리포트")
+#         st.dataframe(df_view, use_container_width=True, height=300)
+#         st.download_button("⬇ CSV 다운로드", df_view.to_csv(index=False).encode("utf-8-sig"),
+#                            "filtered_report.csv", "text/csv")
 
-        # 하단: 리포트에 등장하는 파일들의 이미지 메타(밀도/빈칸여부) 병합 테이블
-        st.markdown("---")
-        st.subheader("파일별 메타 (리포트 연동)")
-        # 파일1/파일2 컬럼을 합쳐 고유 파일 목록 생성
-        files = []
-        if '파일1' in df_view.columns:
-            files += list(df_view['파일1'].dropna().astype(str).tolist())
-        if '파일2' in df_view.columns:
-            files += list(df_view['파일2'].dropna().astype(str).tolist())
-        files = list(dict.fromkeys(files))
-        meta_df = pd.DataFrame({'파일': files})
-        if isinstance(img_df, pd.DataFrame) and '파일' in img_df.columns:
-            meta_df = meta_df.merge(img_df, on='파일', how='left')
-        # 기본 컬럼 정리(존재하지 않더라도 에러 방지)
-        for col in ['밀도', '빈칸여부']:
-            if col not in meta_df.columns:
-                meta_df[col] = pd.NA
-        st.dataframe(meta_df, use_container_width=True, height=240)
-        # 추가 다운로드: meta
-        st.download_button("⬇ 파일 메타 다운로드", meta_df.to_csv(index=False).encode("utf-8-sig"),
-                           "report_files_meta.csv", "text/csv")
+#         # 하단: 리포트에 등장하는 파일들의 이미지 메타(밀도/빈칸여부) 병합 테이블
+#         st.markdown("---")
+#         st.subheader("파일별 메타 (리포트 연동)")
+#         # 파일1/파일2 컬럼을 합쳐 고유 파일 목록 생성
+#         files = []
+#         if '파일1' in df_view.columns:
+#             files += list(df_view['파일1'].dropna().astype(str).tolist())
+#         if '파일2' in df_view.columns:
+#             files += list(df_view['파일2'].dropna().astype(str).tolist())
+#         files = list(dict.fromkeys(files))
+#         meta_df = pd.DataFrame({'파일': files})
+#         if isinstance(img_df, pd.DataFrame) and '파일' in img_df.columns:
+#             meta_df = meta_df.merge(img_df, on='파일', how='left')
+#         # 기본 컬럼 정리(존재하지 않더라도 에러 방지)
+#         for col in ['밀도', '빈칸여부']:
+#             if col not in meta_df.columns:
+#                 meta_df[col] = pd.NA
+#         st.dataframe(meta_df, use_container_width=True, height=240)
+#         # 추가 다운로드: meta
+#         st.download_button("⬇ 파일 메타 다운로드", meta_df.to_csv(index=False).encode("utf-8-sig"),
+#                            "report_files_meta.csv", "text/csv")
 
 
 # === Tab2: 유사 그룹 ===
@@ -871,34 +899,6 @@ with tab2:
     else:
         st.info("그룹 결과 폴더가 없습니다. 하지만 입력 폴더 또는 리포트에서 재스캔 후보를 검사할 수 있습니다.")
 
-    # If no grouped results, show candidates from input pHash (dup_pairs) and report '유사 후보' pairs
-    if (not os.path.isdir(grouped_dir)) or (os.path.isdir(grouped_dir) and len(os.listdir(grouped_dir)) == 0):
-        candidates = []
-        # from input pHash duplicates
-        for a, b, d in (dup_pairs if 'dup_pairs' in locals() else []):
-            pa = os.path.join(input_dir, a)
-            pb = os.path.join(input_dir, b)
-            if os.path.exists(pa) and os.path.exists(pb):
-                candidates.append((pa, pb, {'reason': f'pHash d={d}'}))
-        # from report '유사 후보'
-        for pa, pb, sim in (report_dups if 'report_dups' in locals() else []):
-            if pa and pb and os.path.exists(pa) and os.path.exists(pb):
-                candidates.append((pa, pb, {'reason': f'report sim={sim}'}))
-
-        if candidates:
-            st.subheader("재스캔 후보 (입력 폴더 / 리포트 기반)")
-            for idx, (a_path, b_path, meta) in enumerate(candidates):
-                cols = st.columns(2)
-                with cols[0]:
-                    disp_a = make_display_image(a_path, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
-                    st.image(_safe_image_open(disp_a), caption=os.path.basename(a_path))
-                with cols[1]:
-                    disp_b = make_display_image(b_path, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
-                    st.image(_safe_image_open(disp_b), caption=os.path.basename(b_path))
-                st.markdown(f"- 이유: {meta.get('reason')}")
-                st.markdown("---")
-        else:
-            st.info("입력 폴더 및 리포트에서 유효한 재스캔 후보가 발견되지 않았습니다.")
 
 # === Tab3: 정상/공백 ===
 with tab3:

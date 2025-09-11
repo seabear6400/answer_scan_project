@@ -15,6 +15,7 @@ import pandas as pd
 import polars as pl
 
 import stat
+import time
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -372,6 +373,28 @@ def _recreate_clean_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
+def _safe_recreate_dir(path: str, retries: int = 3, delay: float = 0.5):
+    """Try to fully remove and recreate a directory with retries.
+
+    This addresses Windows file-locks or transient permission errors by
+    retrying a few times before giving up.
+    """
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, onerror=_handle_remove_readonly)
+            os.makedirs(path, exist_ok=True)
+            return True
+        except Exception as e:
+            last_exc = e
+            warnings.warn(f"[{attempt}/{retries}] Failed to recreate dir {path}: {e}")
+            time.sleep(delay)
+    # 마지막 시도 실패
+    warnings.warn(f"Could not recreate directory {path} after {retries} attempts: {last_exc}")
+    return False
+
+
 # -------------------------- Main pipeline ------------------------------
 def detect_pipeline(input_dir: str, output_dir: str,
                     config: Optional[DetectorConfig] = None,
@@ -380,13 +403,17 @@ def detect_pipeline(input_dir: str, output_dir: str,
     cfg = config or DetectorConfig()
 
     # ✅ output 폴더 전체를 완전히 삭제 후 재생성 (모든 하위 폴더/파일 초기화)
-    if os.path.isdir(output_dir):
-        shutil.rmtree(output_dir, onerror=_handle_remove_readonly)
-    os.makedirs(output_dir, exist_ok=True)
+    ok = _safe_recreate_dir(output_dir, retries=5, delay=0.5)
+    if not ok:
+        # 재시도에도 실패하면 명확한 에러를 던집니다.
+        raise RuntimeError(f"Failed to initialize output dir: {output_dir}")
     # 하위 폴더도 재생성
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        os.makedirs(os.path.join(output_dir, sub), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "artifacts", "thumbnails"), exist_ok=True)
+        subp = os.path.join(output_dir, sub)
+        if not _safe_recreate_dir(subp, retries=3, delay=0.2):
+            warnings.warn(f"Proceeding despite failing to create subdir: {subp}")
+    if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=3, delay=0.2):
+        warnings.warn("Failed to create thumbnails dir; continuing")
 
     # 1) Collect image files
     exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
