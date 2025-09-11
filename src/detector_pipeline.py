@@ -455,6 +455,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     all_pair_records: List[Tuple[str, str, float]] = []
     confirmed_edges: List[Tuple[int, int, float]] = []
 
+    # gather all candidate pairs and confirmed edges across all rows
     for i in range(n):
         if idxs.shape[1] == 0:
             continue
@@ -500,40 +501,49 @@ def detect_pipeline(input_dir: str, output_dir: str,
             if confirmed:
                 confirmed_edges.append((i, j, sim))
 
-        # --- confirmed_edges로 유사 그래프를 구성하고 연결요소를 그룹으로 추출 ---
-        # 이제 그룹은 모든 confirmed_edges를 모은 뒤에 한 번만 계산합니다.
-        groups: Dict[str, List[str]] = {}
-        gid_counter = 1
-        if confirmed_edges:
-            # 인접 리스트 생성
-            adj: Dict[int, set] = {}
-            for u, v, _w in confirmed_edges:
-                adj.setdefault(u, set()).add(v)
-                adj.setdefault(v, set()).add(u)
+    # --- confirmed_edges로 유사 그래프를 구성하고 연결요소를 그룹으로 추출 ---
+    # 모든 confirmed_edges를 수집한 뒤에 한 번만 계산합니다. 여기서는 union-find(Disjoint Set)
+    # 을 사용해 더 견고하게 컴포넌트를 추출합니다.
+    groups: Dict[str, List[str]] = {}
+    gid_counter = 1
+    if confirmed_edges:
+        # union-find init only for nodes that appear
+        parents: Dict[int, int] = {}
+        def find(x: int) -> int:
+            # path compression
+            while parents[x] != x:
+                parents[x] = parents[parents[x]]
+                x = parents[x]
+            return x
+        def union(a: int, b: int):
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                return
+            parents[rb] = ra
 
-            # DFS 기반 연결요소 추출
-            visited = set()
-            for node in list(adj.keys()):
-                if node in visited:
-                    continue
-                stack = [node]
-                comp = []
-                while stack:
-                    cur = stack.pop()
-                    if cur in visited:
-                        continue
-                    visited.add(cur)
-                    comp.append(cur)
-                    for nb in adj.get(cur, ()):  # type: ignore[arg-type]
-                        if nb not in visited:
-                            stack.append(nb)
+        # initialize parents
+        nodes = set()
+        for u, v, _w in confirmed_edges:
+            nodes.add(u); nodes.add(v)
+        for node in nodes:
+            parents[node] = node
 
-                # 연결요소가 2개 이상일 때만 그룹으로 만듦
-                if len(comp) >= 2:
-                    members = sorted([name_by_row[i] for i in comp])
-                    gid = f"group_{gid_counter:03d}"
-                    groups[gid] = members
-                    gid_counter += 1
+        # union all edges
+        for u, v, _w in confirmed_edges:
+            union(u, v)
+
+        # collect groups by root
+        comps: Dict[int, List[int]] = {}
+        for node in nodes:
+            root = find(node)
+            comps.setdefault(root, []).append(node)
+
+        for comp_nodes in comps.values():
+            if len(comp_nodes) >= 2:
+                members = sorted([name_by_row[i] for i in comp_nodes])
+                gid = f"group_{gid_counter:03d}"
+                groups[gid] = members
+                gid_counter += 1
 
     # 리포트 테이블: 그룹 내 모든 페어를 grouped로 표기
     grouped_pairs_set = set()
@@ -592,6 +602,232 @@ def detect_pipeline(input_dir: str, output_dir: str,
             shutil.copy2(src, os.path.join(okdir, f))
 
     # Artifacts (덮어쓰기)
+    try:
+        np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
+        with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
+            fw.write(backend_used)
+    except Exception:
+        pass
+
+    return pair_rows, groups
+
+
+def detect_pipeline_files(file_paths: List[str], output_dir: str,
+                          config: Optional[DetectorConfig] = None):
+    """
+    Similar to detect_pipeline but accepts an explicit list of image file paths.
+    file_paths: list of absolute/relative paths to image files.
+    """
+    cfg = config or DetectorConfig()
+
+    # Normalize and filter existing files
+    paths = [os.path.abspath(p) for p in file_paths if os.path.isfile(p)]
+    if not paths:
+        raise FileNotFoundError("No valid image files provided")
+
+    # Prepare output dirs (same behavior as detect_pipeline)
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir, onerror=_handle_remove_readonly)
+    os.makedirs(output_dir, exist_ok=True)
+    for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
+        os.makedirs(os.path.join(output_dir, sub), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "artifacts", "thumbnails"), exist_ok=True)
+
+    # files: basenames (used in reports), and a map basename -> full path
+    files = [os.path.basename(p) for p in paths]
+    path_map = {os.path.basename(p): p for p in paths}
+
+    # The rest of the pipeline expects lists named 'files' and 'paths' where
+    # paths are full paths matching files entries. We'll reuse much of the logic
+    # from detect_pipeline by reusing variable names.
+
+    # 2) Metadata: prefilters + density + (optional) OCR text
+    print(f"[1/5] Metadata (pHash/PDQ + density)")
+    phashes: Dict[str, imagehash.ImageHash] = {}
+    pdqs: Dict[str, Optional[np.ndarray]] = {}
+    densities: Dict[str, float] = {}
+    texts: Dict[str, str] = {}
+
+    for f in files:
+        p = path_map[f]
+        try:
+            if cfg.prefilter in ("phash", "both"):
+                phashes[f] = phash_of(p, cfg.roi_ratio)
+            if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
+                pdqs[f] = pdq_of(p, cfg.roi_ratio)
+            densities[f] = ink_density(p, cfg.roi_ratio, cfg.blank_method)
+            if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
+                texts[f] = ocr_text(p)
+        except Exception as e:
+            warnings.warn(f"Metadata failed for {f}: {e}")
+            if cfg.prefilter in ("phash", "both"):
+                phashes[f] = imagehash.hex_to_hash("0" * 16)
+            if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
+                pdqs[f] = np.zeros((256,), dtype=np.uint8)
+            densities[f] = 0.0
+            if cfg.use_ocr:
+                texts[f] = ""
+
+    # 3) Embeddings
+    print("[2/5] CNN/ViT embeddings …")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    embs, ordered_paths = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+    n = len(files)
+    name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
+
+    # 4) ANN candidates
+    print("[3/5] Candidate neighbors via ANN …")
+    idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
+
+    # 5) Pairwise scoring → reuse same grouping logic but using path_map when needed
+    print("[4/5] Pair scoring + pairing (max-weight matching) …")
+
+    def prefilter_ok(fi: str, fj: str) -> bool:
+        if cfg.prefilter in ("phash", "both"):
+            if abs(phashes.get(fi, imagehash.hex_to_hash("0"*16)) - phashes.get(fj, imagehash.hex_to_hash("0"*16))) > cfg.phash_thresh:
+                return False
+        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
+            a = pdqs.get(fi, None); b = pdqs.get(fj, None)
+            if a is not None and b is not None:
+                if hamming_distance_bits(a, b) > cfg.pdq_thresh:
+                    return False
+        if abs(densities.get(fi, 0.0) - densities.get(fj, 0.0)) > cfg.density_diff_thresh:
+            return False
+        return True
+
+    all_pair_records: List[Tuple[str, str, float]] = []
+    confirmed_edges: List[Tuple[int, int, float]] = []
+
+    for i in range(n):
+        if idxs.shape[1] == 0:
+            continue
+        for col in range(1, idxs.shape[1]):
+            j = int(idxs[i, col])
+            if j <= i:
+                continue
+            fi, fj = name_by_row[i], name_by_row[j]
+
+            if not (os.path.splitext(fi)[0].endswith('2') and os.path.splitext(fj)[0].endswith('2')):
+                continue
+
+            if densities.get(fi, 0.0) <= cfg.blank_density_thresh or densities.get(fj, 0.0) <= cfg.blank_density_thresh:
+                continue
+
+            if not prefilter_ok(fi, fj):
+                continue
+
+            sim = float(sims[i, col])
+            all_pair_records.append((fi, fj, sim))
+
+            confirmed = False
+            if sim >= cfg.cnn_thresh:
+                confirmed = True
+            elif sim >= cfg.suspect_low:
+                votes = 0
+                if cfg.use_lpips and _HAS_LPIPS:
+                    d = lpips_distance(path_map[fi], path_map[fj])
+                    if d is not None and d <= cfg.lpips_thresh:
+                        votes += 1
+                if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
+                    ta = texts.get(fi, "") or ocr_text(path_map[fi])
+                    tb = texts.get(fj, "") or ocr_text(path_map[fj])
+                    if text_similarity(ta, tb) >= cfg.text_sim_thresh:
+                        votes += 1
+                if votes > 0:
+                    confirmed = True
+
+            if confirmed:
+                confirmed_edges.append((i, j, sim))
+
+    # grouping logic (copy from detect_pipeline) — use union-find here as well
+    groups: Dict[str, List[str]] = {}
+    gid_counter = 1
+    if confirmed_edges:
+        parents: Dict[int, int] = {}
+        def find2(x: int) -> int:
+            while parents[x] != x:
+                parents[x] = parents[parents[x]]
+                x = parents[x]
+            return x
+        def union2(a: int, b: int):
+            ra, rb = find2(a), find2(b)
+            if ra == rb:
+                return
+            parents[rb] = ra
+
+        nodes = set()
+        for u, v, _w in confirmed_edges:
+            nodes.add(u); nodes.add(v)
+        for node in nodes:
+            parents[node] = node
+        for u, v, _w in confirmed_edges:
+            union2(u, v)
+
+        comps: Dict[int, List[int]] = {}
+        for node in nodes:
+            root = find2(node)
+            comps.setdefault(root, []).append(node)
+        for comp_nodes in comps.values():
+            if len(comp_nodes) >= 2:
+                members = sorted([name_by_row[i] for i in comp_nodes])
+                gid = f"group_{gid_counter:03d}"
+                groups[gid] = members
+                gid_counter += 1
+
+    # build pair rows
+    grouped_pairs_set = set()
+    pair_to_gid: Dict[Tuple[str, str], str] = {}
+    for gid, members in groups.items():
+        for a, b in itertools.combinations(members, 2):
+            key = tuple(sorted((a, b)))
+            grouped_pairs_set.add(key)
+            pair_to_gid[key] = gid
+
+    pair_rows: List[List] = []
+    for fi, fj, sim in all_pair_records:
+        key = tuple(sorted((fi, fj)))
+        if key in grouped_pairs_set:
+            gid = pair_to_gid.get(key, "-")
+            pair_rows.append([fi, fj, round(sim, 4), "중복/그룹", gid])
+        else:
+            status = "유사 후보" if sim >= cfg.suspect_low else "다름"
+            pair_rows.append([fi, fj, round(sim, 4), status, "-"])
+
+    # Save reports
+    print("[5/5] Save reports / organize outputs …")
+    csv_path = os.path.join(output_dir, "report.csv")
+    parquet_path = os.path.join(output_dir, "report.parquet")
+    df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
+    df_pairs.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    pl.from_pandas(df_pairs).write_parquet(parquet_path)
+
+    img_df = pd.DataFrame({
+        "파일": files,
+        "밀도": [densities.get(f, 0.0) for f in files],
+        "빈칸여부": [densities.get(f, 0.0) <= cfg.blank_density_thresh for f in files],
+    })
+    img_df.to_csv(os.path.join(output_dir, "images_summary.csv"), index=False, encoding="utf-8-sig")
+
+    # Copy grouped / ok / blank
+    for gid, members in groups.items():
+        gdir = os.path.join(output_dir, "grouped", gid)
+        os.makedirs(gdir, exist_ok=True)
+        for m in members:
+            shutil.copy2(path_map[m], os.path.join(gdir, m))
+
+    okdir = os.path.join(output_dir, "ok")
+    bdir = os.path.join(output_dir, "blank_answers")
+    os.makedirs(okdir, exist_ok=True)
+    os.makedirs(bdir, exist_ok=True)
+
+    grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
+    for f in files:
+        src = path_map[f]
+        if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
+            shutil.copy2(src, os.path.join(bdir, f))
+        elif f not in grouped_set:
+            shutil.copy2(src, os.path.join(okdir, f))
+
     try:
         np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
         with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:

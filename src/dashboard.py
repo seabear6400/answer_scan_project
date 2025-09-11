@@ -48,7 +48,6 @@ def parse_streamlit_args():
         user_args = []
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument('--output_dir', default='output')
-    p.add_argument('--input_dir', default='input_images')
     try:
         ns, _ = p.parse_known_args(user_args)
     except SystemExit:
@@ -58,7 +57,6 @@ def parse_streamlit_args():
 
 ns = parse_streamlit_args()
 OUTPUT_DIR = ns.output_dir
-INPUT_DIR = getattr(ns, 'input_dir', 'input_images')
 REPORT_PARQUET = os.path.join(OUTPUT_DIR, "report.parquet")
 REPORT_CSV = os.path.join(OUTPUT_DIR, "report.csv")
 IMG_SUMMARY = os.path.join(OUTPUT_DIR, "images_summary.csv")
@@ -579,17 +577,20 @@ with tab1:
 # === Tab2: 유사 그룹 ===
 with tab2:
     # ---- Rescan(재스캔) 감지: 입력 폴더의 이미지 해시(pHash)로 거의 동일한 이미지 쌍 탐지 ----
-    # 우선 CLI/streamlit 인자로 전달된 INPUT_DIR 사용, 없으면 output 경로를 기반으로 유추
-    # 입력 폴더는 선택적(없는 경우에도 정상 동작)
-    if os.path.isdir(INPUT_DIR):
-        input_dir = INPUT_DIR
-    else:
-        input_dir = OUTPUT_DIR.replace("output", "input_images") if "output" in OUTPUT_DIR else "input_images"
+    # 입력 폴더는 사용하지 않음 — 대신 OUTPUT_DIR 하위 파일들만 스캔합니다.
+    input_dir = OUTPUT_DIR
     exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
     # input_dir가 없으면 빈 리스트로 처리
     if os.path.isdir(input_dir):
         try:
-            scan_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(exts)])
+            # 스캔 대상: output 디렉터리 하위의 grouped/ok/blank_answers 등의 파일들
+            scan_files = []
+            for root, _dirs, files in os.walk(input_dir):
+                for f in files:
+                    if f.lower().endswith(exts):
+                        # show relative basename (original filename)
+                        scan_files.append(os.path.relpath(os.path.join(root, f), input_dir))
+            scan_files = sorted(scan_files)
         except Exception:
             scan_files = []
     else:
