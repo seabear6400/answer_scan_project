@@ -3,7 +3,7 @@ import argparse
 import subprocess
 import threading
 from typing import Optional, Tuple
-from detector_pipeline import detect_pipeline, DetectorConfig
+from detector_pipeline import detect_pipeline, DetectorConfig, detect_pipeline_files
 
 # Pre-warm tkinter in a background thread so the folder dialog opens faster on demand.
 # This reduces perceived startup latency when the user is prompted for a folder.
@@ -25,7 +25,6 @@ _tk_thread.start()
 
 def parse_args():
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
-    p.add_argument("--input_dir", default="input_images")
     p.add_argument("--output_dir", default="output")
 
     # Backends
@@ -70,8 +69,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다. 취소하면 기존 args.input_dir 사용.
-    # Attempt to use warmed tkinter modules for faster dialog display. Fall back to on-demand import.
+    # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다.
     try:
         if _tk_warmed and _tk_mods:
             tk, filedialog = _tk_mods
@@ -83,20 +81,15 @@ def main():
         root = tk.Tk()
         root.attributes('-topmost', True)
         root.withdraw()
-        print("[*] 폴더 선택 대화상자를 엽니다 — 분석할 폴더를 선택하세요 (취소하면 기본값 사용).")
+        print("[*] 폴더 선택 대화상자를 엽니다 — 분석할 폴더를 선택하세요.")
         sel = filedialog.askdirectory(title="분석할 폴더 선택")
         try:
             root.destroy()
         except Exception:
             pass
-        if sel:
-            args.input_dir = sel
-            print(f"선택된 입력 폴더: {args.input_dir}")
-        else:
-            print(f"폴더 선택 취소 — 기본 입력 폴더 사용: {args.input_dir}")
-    except Exception as e:
-        # GUI 사용 불가한 환경이면 기존 args.input_dir 사용
-        print(f"GUI 폴더 선택을 사용할 수 없음, 기본 입력 폴더 사용: {args.input_dir} ({e})")
+    except Exception:
+        print("파일 선택 UI를 초기화하지 못했습니다.")
+        sel = ()
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
         os.makedirs(os.path.join(args.output_dir, sub), exist_ok=True)
 
@@ -126,13 +119,17 @@ def main():
         roi_ratio=tuple(args.roi),
     )
 
-    detect_pipeline(args.input_dir, args.output_dir, config=cfg)
+    # sel is a directory path string. If empty, abort.
+    if not sel:
+        print("중단: 처리할 폴더가 선택되지 않았습니다.")
+        return
+    detect_pipeline(sel, args.output_dir, config=cfg)
     print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
     print("🌐 대시보드 실행…")
     # input_dir 인자도 함께 전달하여 사용자가 선택한 입력 폴더가 대시보드에서 인식되도록 함
     cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--",
-           f"--output_dir={args.output_dir}", f"--input_dir={args.input_dir}"]
+           f"--output_dir={args.output_dir}"]
     try:
         if args.detach and os.name == 'nt':   
             subprocess.Popen(["cmd", "/c", "start"] + cmd)
