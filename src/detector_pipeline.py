@@ -46,6 +46,7 @@ except Exception:
 # Optional: LPIPS
 try:
     import lpips
+    
     _HAS_LPIPS = True
 except Exception:
     _HAS_LPIPS = False

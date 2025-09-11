@@ -307,8 +307,8 @@ group_filter = st.sidebar.selectbox("특정 그룹만 보기", ["전체"] + grou
 # 그리드 열 개수만 노출 (화질/포맷/품질 등은 고정)
 grid_cols = st.sidebar.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
 
-# 유사 그룹 뷰 모드(대형/그리드) — 이 컨트롤이 없으면 later code에서 NameError 발생
-group_view_mode = st.sidebar.radio("유사 그룹 보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=1)
+# 재스캔 필요 뷰 모드(대형/그리드) — 이 컨트롤이 없으면 later code에서 NameError 발생
+group_view_mode = st.sidebar.radio("재스캔 필요 보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=1)
 
 # 고급 옵션(화질, 포맷, 품질, 분석 등)은 숨김/제거
 grid_target_px = 768  # 고정값
