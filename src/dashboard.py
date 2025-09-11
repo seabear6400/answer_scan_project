@@ -302,7 +302,7 @@ except Exception:
 min_sim = st.sidebar.slider("최소 유사도", 0.0, 1.0, 0.90, 0.01, help="유사도 임계값을 조정하세요.")
 name_query = st.sidebar.text_input("파일명 검색", value="", help="특정 파일명을 빠르게 찾고 싶을 때 입력")
 group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
-group_filter = st.sidebar.selectbox("특정 그룹만 보기", ["전체"] + group_list)
+group_filter = st.sidebar.selectbox("특정 그룹만 보기(재스캔 필요)", ["전체"] + group_list)
 
 # 그리드 열 개수만 노출 (화질/포맷/품질 등은 고정)
 grid_cols = st.sidebar.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
@@ -602,27 +602,27 @@ if cmp_pair:
 #                            "report_files_meta.csv", "text/csv")
 
 
-# === Tab2: 유사 그룹 ===
+# === Tab2: 재스캔 필요 ===
 with tab2:
     # ---- Rescan(재스캔) 감지: 입력 폴더의 이미지 해시(pHash)로 거의 동일한 이미지 쌍 탐지 ----
     # 입력 폴더는 사용하지 않음 — 대신 OUTPUT_DIR 하위 파일들만 스캔합니다.
-    input_dir = OUTPUT_DIR
-    exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
-    # input_dir가 없으면 빈 리스트로 처리
-    if os.path.isdir(input_dir):
-        try:
-            # 스캔 대상: output 디렉터리 하위의 grouped/ok/blank_answers 등의 파일들
-            scan_files = []
-            for root, _dirs, files in os.walk(input_dir):
-                for f in files:
-                    if f.lower().endswith(exts):
-                        # show relative basename (original filename)
-                        scan_files.append(os.path.relpath(os.path.join(root, f), input_dir))
-            scan_files = sorted(scan_files)
-        except Exception:
-            scan_files = []
-    else:
-        scan_files = []
+    # input_dir = OUTPUT_DIR
+    # exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+    # # input_dir가 없으면 빈 리스트로 처리
+    # if os.path.isdir(input_dir):
+    #     try:
+    #         # 스캔 대상: output 디렉터리 하위의 grouped/ok/blank_answers 등의 파일들
+    #         scan_files = []
+    #         for root, _dirs, files in os.walk(input_dir):
+    #             for f in files:
+    #                 if f.lower().endswith(exts):
+    #                     # show relative basename (original filename)
+    #                     scan_files.append(os.path.relpath(os.path.join(root, f), input_dir))
+    #         scan_files = sorted(scan_files)
+    #     except Exception:
+    #         scan_files = []
+    # else:
+    #     scan_files = []
 
     try:
         import imagehash
