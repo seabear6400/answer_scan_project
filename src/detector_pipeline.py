@@ -624,7 +624,16 @@ def detect_pipeline(input_dir: str, output_dir: str,
     for f in files:
         src = os.path.join(input_dir, f)
         if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
-            shutil.copy2(src, os.path.join(bdir, f))
+            # blank_answers에는 파일명(확장자 제외)이 '2'로 끝나는 파일만 넣는다
+            name_wo_ext = os.path.splitext(f)[0]
+            if name_wo_ext.endswith('2'):
+                try:
+                    shutil.copy2(src, os.path.join(bdir, f))
+                except Exception as e:
+                    warnings.warn(f"Failed to copy blank answer {f}: {e}")
+            else:
+                # 빈칸으로 감지되었지만 파일명이 '*2'가 아니면 복사하지 않음
+                pass
         elif f not in grouped_set:
             shutil.copy2(src, os.path.join(okdir, f))
 
@@ -851,7 +860,16 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     for f in files:
         src = path_map[f]
         if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
-            shutil.copy2(src, os.path.join(bdir, f))
+            # blank_answers에는 파일명(확장자 제외)이 '2'로 끝나는 파일만 넣는다
+            name_wo_ext = os.path.splitext(f)[0]
+            if name_wo_ext.endswith('2'):
+                try:
+                    shutil.copy2(src, os.path.join(bdir, f))
+                except Exception as e:
+                    warnings.warn(f"Failed to copy blank answer {f}: {e}")
+            else:
+                # 빈칸으로 감지되었지만 파일명이 '*2'가 아니면 복사하지 않음
+                pass
         elif f not in grouped_set:
             shutil.copy2(src, os.path.join(okdir, f))
 

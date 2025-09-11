@@ -2,6 +2,8 @@ import os
 import argparse
 import subprocess
 import threading
+import shutil
+import stat
 from typing import Optional, Tuple
 from detector_pipeline import detect_pipeline, DetectorConfig, detect_pipeline_files
 
@@ -90,8 +92,26 @@ def main():
     except Exception:
         print("파일 선택 UI를 초기화하지 못했습니다.")
         sel = ()
+    # 안전한 초기화: output 하위의 기존 내용을 삭제(읽기전용 파일 처리)한 뒤 재생성합니다.
+    def _handle_remove_readonly(func, path, exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+        except Exception:
+            pass
+        try:
+            func(path)
+        except Exception:
+            pass
+
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        os.makedirs(os.path.join(args.output_dir, sub), exist_ok=True)
+        out_sub = os.path.join(args.output_dir, sub)
+        try:
+            if os.path.exists(out_sub):
+                shutil.rmtree(out_sub, onerror=_handle_remove_readonly)
+        except Exception:
+            # 삭제 실패 시 안전하게 넘어가고 기존 디렉터리를 덮어쓰지 않습니다.
+            pass
+        os.makedirs(out_sub, exist_ok=True)
 
     print("🔍 탐지 실행…")
     cfg = DetectorConfig(
