@@ -68,6 +68,8 @@ def parse_args():
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--roi", type=float, nargs=4, default=[0.15, 0.15, 0.85, 0.85])
     p.add_argument("--detach", action="store_true", help="윈도우에서 Streamlit을 새 창으로 분리 실행합니다 (비차단).")
+    # 파일 수집 재귀 옵션
+    p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir for images")
     return p.parse_args()
 
 def main():
@@ -159,7 +161,7 @@ def main():
         roi_ratio=tuple(args.roi),
     )
 
-    detect_pipeline(sel, args.output_dir, config=cfg)
+    detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive)
     print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
     print("🌐 대시보드 실행…")
