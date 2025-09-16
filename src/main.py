@@ -2,10 +2,12 @@ import os
 import argparse
 import subprocess
 import threading
+import logging
 import shutil
 import stat
 from typing import Optional, Tuple
-from detector_pipeline import detect_pipeline, DetectorConfig, detect_pipeline_files
+# NOTE: `detector_pipeline` can be heavy to import. Import it lazily inside main()
+# after the folder selection so the UI prompt can appear faster on startup.
 
 # Pre-warm tkinter in a background thread so the folder dialog opens faster on demand.
 # This reduces perceived startup latency when the user is prompted for a folder.
@@ -22,8 +24,45 @@ def _warm_tk():
     except Exception:
         _tk_warmed = False
 
-_tk_thread = threading.Thread(target=_warm_tk, daemon=True)
-_tk_thread.start()
+_tk_thread = None
+# Allow opt-out for headless/CI environments
+_DISABLE_TK_PREWARM = os.environ.get("DISABLE_TK_PREWARM", "0") in ("1", "true", "True")
+if not _DISABLE_TK_PREWARM:
+    _tk_thread = threading.Thread(target=_warm_tk, daemon=True)
+    _tk_thread.start()
+
+# Background early folder prompt: start asking for a folder as soon as the module is imported
+# so that when main() runs the selection dialog may already be completed by the user.
+_early_sel: Optional[str] = None
+def _early_ask():
+    global _early_sel
+    try:
+        if _tk_warmed and _tk_mods:
+            tk, filedialog = _tk_mods
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
+
+        root = tk.Tk()
+        root.attributes('-topmost', True)
+        root.withdraw()
+        # This will block until the user picks or cancels; running in a daemon thread.
+        _early_sel = filedialog.askdirectory(title="분석할 폴더 선택")
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    except Exception:
+        _early_sel = None
+
+_prompt_thread = None
+if not _DISABLE_TK_PREWARM:
+    _prompt_thread = threading.Thread(target=_early_ask, daemon=True)
+    _prompt_thread.start()
+# logger
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
@@ -73,24 +112,28 @@ def main():
     args = parse_args()
     # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다.
     try:
-        if _tk_warmed and _tk_mods:
-            tk, filedialog = _tk_mods
+        # If the background prompt already captured a selection, use it immediately.
+        if _early_sel:
+            sel = _early_sel
         else:
-            import tkinter as tk
-            from tkinter import filedialog
+            if _tk_warmed and _tk_mods:
+                tk, filedialog = _tk_mods
+            else:
+                import tkinter as tk
+                from tkinter import filedialog
 
-        # Create a short-lived root for the dialog and ensure it's on top.
-        root = tk.Tk()
-        root.attributes('-topmost', True)
-        root.withdraw()
-        print("[*] 폴더 선택 대화상자를 엽니다 — 분석할 폴더를 선택하세요.")
-        sel = filedialog.askdirectory(title="분석할 폴더 선택")
-        try:
-            root.destroy()
-        except Exception:
-            pass
+            # Create a short-lived root for the dialog and ensure it's on top.
+            root = tk.Tk()
+            root.attributes('-topmost', True)
+            root.withdraw()
+            logger.info("[*] 폴더 선택 대화상자를 엽니다 — 분석할 폴더를 선택하세요.")
+            sel = filedialog.askdirectory(title="분석할 폴더 선택")
+            try:
+                root.destroy()
+            except Exception:
+                pass
     except Exception:
-        print("파일 선택 UI를 초기화하지 못했습니다.")
+        logger.warning("파일 선택 UI를 초기화하지 못했습니다.")
         sel = ()
     # 안전한 초기화: output 하위의 기존 내용을 삭제(읽기전용 파일 처리)한 뒤 재생성합니다.
     def _handle_remove_readonly(func, path, exc_info):
@@ -113,7 +156,10 @@ def main():
             pass
         os.makedirs(out_sub, exist_ok=True)
 
-    print("🔍 탐지 실행…")
+    logger.info("🔍 탐지 실행…")
+    # Lazy import heavy pipeline module only after folder selection/UI is done.
+    from detector_pipeline import detect_pipeline, DetectorConfig, detect_pipeline_files
+
     cfg = DetectorConfig(
         embed_backend=args.embed_backend,
         ann_backend=args.ann_backend,
@@ -141,24 +187,24 @@ def main():
 
     # sel is a directory path string. If empty, abort.
     if not sel:
-        print("중단: 처리할 폴더가 선택되지 않았습니다.")
+        logger.info("중단: 처리할 폴더가 선택되지 않았습니다.")
         return
     detect_pipeline(sel, args.output_dir, config=cfg)
-    print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
+    logger.info("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
-    print("🌐 대시보드 실행…")
+    logger.info("🌐 대시보드 실행…")
     # input_dir 인자도 함께 전달하여 사용자가 선택한 입력 폴더가 대시보드에서 인식되도록 함
     cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--",
            f"--output_dir={args.output_dir}"]
     try:
-        if args.detach and os.name == 'nt':   
+        if args.detach and os.name == 'nt':
             subprocess.Popen(["cmd", "/c", "start"] + cmd)
         else:
             subprocess.run(cmd)
     except KeyboardInterrupt:
-        print("중단: 사용자가 실행을 취소했습니다.")
+        logger.info("중단: 사용자가 실행을 취소했습니다.")
     except Exception as e:
-        print(f"대시보드 실행 중 오류가 발생했습니다: {e}")
+        logger.exception(f"대시보드 실행 중 오류가 발생했습니다: {e}")
 
 if __name__ == "__main__":
     main()

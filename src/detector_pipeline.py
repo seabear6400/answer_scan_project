@@ -21,6 +21,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.models import resnet18, ResNet18_Weights
+import concurrent.futures
+import hashlib
 
 # Optional: timm (DINOv2)
 try:
@@ -86,6 +88,12 @@ except Exception:
     _HAS_NX = False
 
 from sklearn.neighbors import NearestNeighbors
+
+# module logger
+import logging
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 
 @dataclass
@@ -263,8 +271,21 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
             out = model(x).detach().cpu().numpy().astype(np.float32)
             embs.append(out)
             ordered_paths.extend(list(pths))
-    D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
-    embs = np.vstack(embs) if len(embs) else np.zeros((0, D_out), dtype=np.float32)
+    # Stack collected outputs; if none, attempt to infer model output dimensionality
+    if len(embs):
+        embs = np.vstack(embs)
+    else:
+        try:
+            with torch.no_grad():
+                dummy = torch.zeros((1, 3, 224, 224), device=device)
+                out = model(dummy).detach().cpu().numpy()
+                if out.ndim == 2:
+                    D_out = out.shape[1]
+                else:
+                    D_out = int(np.prod(out.shape[1:]))
+        except Exception:
+            D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
+        embs = np.zeros((0, D_out), dtype=np.float32)
     return embs, ordered_paths
 
 
@@ -293,8 +314,14 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
         else:
             backend = "brute"
 
+    # For cosine-based backends normalize once
+    use_cosine = backend in ("faiss", "hnsw", "brute")
+    mat = embs.astype(np.float32)
+    if use_cosine and mat.size:
+        mat = l2_normalize(mat)
+
     if backend == "faiss" and _HAS_FAISS:
-        xb = l2_normalize(embs.astype(np.float32))
+        xb = mat
         index = faiss.IndexFlatIP(D)  # inner product == cosine on normalized vectors
         index.add(xb)
         sims, idxs = index.search(xb, min(k + 1, N))
@@ -303,15 +330,15 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
     if backend == "hnsw" and _HAS_HNSW:
         idx = hnswlib.Index(space='cosine', dim=D)
         idx.init_index(max_elements=N, ef_construction=hnsw_efC, M=hnsw_M)
-        idx.add_items(embs)
+        idx.add_items(mat)
         idx.set_ef(hnsw_efS)
-        labels, dists = idx.knn_query(embs, k=min(k + 1, N))
+        labels, dists = idx.knn_query(mat, k=min(k + 1, N))
         sims = 1.0 - dists
         return labels, sims, "hnsw"
 
     nn = NearestNeighbors(n_neighbors=min(k + 1, N), metric="cosine", algorithm="brute")
-    nn.fit(embs)
-    dists, idxs = nn.kneighbors(embs, return_distance=True)
+    nn.fit(mat)
+    dists, idxs = nn.kneighbors(mat, return_distance=True)
     sims = 1.0 - dists
     return idxs, sims, "brute"
 
@@ -374,6 +401,17 @@ def _recreate_clean_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
+def _copy_to_dir(src: str, dst_dir: str):
+    """Copy src file into dst_dir preserving filename; create dst_dir if needed."""
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy2(src, os.path.join(dst_dir, os.path.basename(src)))
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to copy {src} to {dst_dir}: {e}")
+        return False
+
+
 def _safe_recreate_dir(path: str, retries: int = 3, delay: float = 0.5):
     """Try to fully remove and recreate a directory with retries.
 
@@ -394,6 +432,52 @@ def _safe_recreate_dir(path: str, retries: int = 3, delay: float = 0.5):
     # 마지막 시도 실패
     warnings.warn(f"Could not recreate directory {path} after {retries} attempts: {last_exc}")
     return False
+
+
+# ---------------------- artifacts / parallel helpers ----------------------
+def _max_mtime(paths: List[str]) -> float:
+    try:
+        return max(os.path.getmtime(p) for p in paths)
+    except Exception:
+        return 0.0
+
+
+def _is_fresh(artifact_path: str, paths: List[str]) -> bool:
+    if not os.path.exists(artifact_path):
+        return False
+    try:
+        return os.path.getmtime(artifact_path) >= _max_mtime(paths)
+    except Exception:
+        return False
+
+
+def _metadata_worker(args):
+    # Worker executed in ThreadPoolExecutor for IO-bound metadata tasks
+    f, p, cfg = args
+    ph = None
+    pdq = None
+    dens = 0.0
+    txt = ""
+    try:
+        if cfg.prefilter in ("phash", "both"):
+            ph = phash_of(p, cfg.roi_ratio)
+    except Exception:
+        ph = imagehash.hex_to_hash("0" * 16)
+    try:
+        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
+            pdq = pdq_of(p, cfg.roi_ratio)
+    except Exception:
+        pdq = (np.zeros((256,), dtype=np.uint8) if _HAS_PDQ else None)
+    try:
+        dens = ink_density(p, cfg.roi_ratio, cfg.blank_method)
+    except Exception:
+        dens = 0.0
+    try:
+        if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
+            txt = ocr_text(p)
+    except Exception:
+        txt = ""
+    return f, ph, pdq, float(dens), txt
 
 
 # -------------------------- Main pipeline ------------------------------
@@ -428,44 +512,98 @@ def detect_pipeline(input_dir: str, output_dir: str,
         raise FileNotFoundError(f"No images under {input_dir} (필터 적용됨)")
 
     # 2) Metadata: prefilters + density + (optional) OCR text
-    print(f"[1/5] Metadata (pHash/PDQ + density)")
+    logger.info("[1/5] Metadata (pHash/PDQ + density)")
     phashes: Dict[str, imagehash.ImageHash] = {}
     pdqs: Dict[str, Optional[np.ndarray]] = {}
     densities: Dict[str, float] = {}
     texts: Dict[str, str] = {}
 
-    for f, p in zip(files, paths):
+    images_summary_path = os.path.join(output_dir, "images_summary.csv")
+    # If existing summary is fresh relative to input files, load densities to skip recompute
+    if _is_fresh(images_summary_path, paths):
         try:
-            if cfg.prefilter in ("phash", "both"):
-                phashes[f] = phash_of(p, cfg.roi_ratio)
-            if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-                pdqs[f] = pdq_of(p, cfg.roi_ratio)
-            densities[f] = ink_density(p, cfg.roi_ratio, cfg.blank_method)
-            if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
-                texts[f] = ocr_text(p)
-        except Exception as e:
-            warnings.warn(f"Metadata failed for {f}: {e}")
-            if cfg.prefilter in ("phash", "both"):
-                phashes[f] = imagehash.hex_to_hash("0" * 16)
-            if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-                pdqs[f] = np.zeros((256,), dtype=np.uint8)
-            densities[f] = 0.0
-            if cfg.use_ocr:
-                texts[f] = ""
+            img_df_prev = pd.read_csv(images_summary_path)
+            for _, row in img_df_prev.iterrows():
+                fname = row.get("파일")
+                if fname in files:
+                    densities[fname] = float(row.get("밀도", 0.0))
+            logger.info("Loaded fresh images_summary.csv -> skipping density recompute for cached entries")
+        except Exception:
+            pass
+
+    # Prepare worker args and run in ThreadPoolExecutor (IO-bound workloads)
+    worker_args = [(f, p, cfg) for f, p in zip(files, paths)]
+    # prefer explicit cfg.num_workers when set; otherwise scale reasonably for IO-bound
+    if cfg.num_workers and cfg.num_workers > 0:
+        max_workers = cfg.num_workers
+    else:
+        max_workers = min(32, max(4, (os.cpu_count() or 2) * 2))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for f, ph, pdqv, dens, txt in ex.map(_metadata_worker, worker_args):
+            if ph is not None:
+                phashes[f] = ph
+            if pdqv is not None:
+                pdqs[f] = pdqv
+            # only override density if not loaded from fresh summary
+            if f not in densities or densities.get(f, 0.0) == 0.0:
+                densities[f] = dens
+            if txt:
+                texts[f] = txt
+
+    # persist images_summary.csv (density + blank flag) for faster subsequent runs
+    try:
+        img_df = pd.DataFrame({
+            "파일": files,
+            "밀도": [densities.get(f, 0.0) for f in files],
+            "빈칸여부": [densities.get(f, 0.0) <= cfg.blank_density_thresh for f in files],
+        })
+        img_df.to_csv(images_summary_path, index=False, encoding="utf-8-sig")
+    except Exception:
+        warnings.warn("Failed to write images_summary.csv")
 
     # 3) Embeddings
-    print("[2/5] CNN/ViT embeddings …")
+    logger.info("[2/5] CNN/ViT embeddings …")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    embs, ordered_paths = compute_embeddings(paths, device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+    # 3) Embeddings: attempt to reuse cached embeddings.npy + ordered_paths.txt
+    logger.info("[2/5] CNN/ViT embeddings …")
+    emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
+    opaths_art = os.path.join(output_dir, "artifacts", "ordered_paths.txt")
+    embs = None
+    ordered_paths = None
+    if _is_fresh(emb_art, paths) and os.path.exists(opaths_art):
+        try:
+            embs = np.load(emb_art)
+            with open(opaths_art, "r", encoding="utf-8") as fr:
+                ordered_paths = [l.strip() for l in fr.readlines() if l.strip()]
+            if len(ordered_paths) != len(files) or embs.shape[0] != len(files):
+                logger.warning("Artifact sizes mismatch: forcing re-compute embeddings")
+                embs = None
+                ordered_paths = None
+            else:
+                logger.info("Loaded cached embeddings.npy + ordered_paths.txt")
+        except Exception as e:
+            logger.warning(f"Failed to load embedding artifacts: {e}; will recompute")
+            embs = None
+            ordered_paths = None
+
+    if embs is None:
+        embs, ordered_paths = compute_embeddings(paths, device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+        try:
+            np.save(emb_art, embs)
+            with open(opaths_art, "w", encoding="utf-8") as fw:
+                fw.write("\n".join(ordered_paths))
+        except Exception:
+            warnings.warn("Failed to save embedding artifacts")
+
     n = len(files)
     name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
 
     # 4) ANN candidates
-    print("[3/5] Candidate neighbors via ANN …")
+    logger.info("[3/5] Candidate neighbors via ANN …")
     idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
 
     # 5) Pairwise scoring → "확정 유사" 에지 만들기 → (Blossom) 최대가중치매칭으로 2장 그룹화
-    print("[4/5] Pair scoring + pairing (max-weight matching) …")
+    logger.info("[4/5] Pair scoring + pairing (max-weight matching) …")
 
     def prefilter_ok(fi: str, fj: str) -> bool:
         if cfg.prefilter in ("phash", "both"):
@@ -594,7 +732,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
             pair_rows.append([fi, fj, round(sim, 4), status, "-"])
 
     # 6) Save reports / organize outputs
-    print("[5/5] Save reports / organize outputs …")
+    logger.info("[5/5] Save reports / organize outputs …")
     csv_path = os.path.join(output_dir, "report.csv")
     parquet_path = os.path.join(output_dir, "report.parquet")
     df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
@@ -612,9 +750,8 @@ def detect_pipeline(input_dir: str, output_dir: str,
     # Copy grouped
     for gid, members in groups.items():
         gdir = os.path.join(output_dir, "grouped", gid)
-        os.makedirs(gdir, exist_ok=True)
         for m in members:
-            shutil.copy2(os.path.join(input_dir, m), os.path.join(gdir, m))
+            _copy_to_dir(os.path.join(input_dir, m), gdir)
 
     okdir = os.path.join(output_dir, "ok")
     bdir = os.path.join(output_dir, "blank_answers")
@@ -635,16 +772,16 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 dst = os.path.join(bdir, f)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             try:
-                shutil.copy2(src, dst)
+                _copy_to_dir(src, os.path.dirname(dst))
             except Exception as e:
-                warnings.warn(f"Failed to copy file {f} (dst={dst}): {e}")
+                logger.warning(f"Failed to copy file {f} (dst={dst}): {e}")
         elif f not in grouped_set:
             dst = os.path.join(okdir, f)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             try:
-                shutil.copy2(src, dst)
+                _copy_to_dir(src, os.path.dirname(dst))
             except Exception as e:
-                warnings.warn(f"Failed to copy ok file {f}: {e}")
+                logger.warning(f"Failed to copy ok file {f}: {e}")
 
     # Artifacts (덮어쓰기)
     try:
@@ -671,12 +808,13 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
         raise FileNotFoundError("No valid image files provided")
 
     # Prepare output dirs (same behavior as detect_pipeline)
-    if os.path.isdir(output_dir):
-        shutil.rmtree(output_dir, onerror=_handle_remove_readonly)
-    os.makedirs(output_dir, exist_ok=True)
+    if not _safe_recreate_dir(output_dir, retries=3, delay=0.2):
+        raise RuntimeError(f"Failed to prepare output dir: {output_dir}")
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        os.makedirs(os.path.join(output_dir, sub), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "artifacts", "thumbnails"), exist_ok=True)
+        if not _safe_recreate_dir(os.path.join(output_dir, sub), retries=2, delay=0.1):
+            logger.warning(f"Proceeding despite failing to create subdir: {sub}")
+    if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=2, delay=0.1):
+        logger.warning("Failed to create thumbnails dir; continuing")
 
     # files: basenames (used in reports), and a map basename -> full path
     files = [os.path.basename(p) for p in paths]
@@ -687,45 +825,78 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     # from detect_pipeline by reusing variable names.
 
     # 2) Metadata: prefilters + density + (optional) OCR text
-    print(f"[1/5] Metadata (pHash/PDQ + density)")
+    logger.info(f"[1/5] Metadata (pHash/PDQ + density)")
     phashes: Dict[str, imagehash.ImageHash] = {}
     pdqs: Dict[str, Optional[np.ndarray]] = {}
     densities: Dict[str, float] = {}
     texts: Dict[str, str] = {}
 
-    for f in files:
-        p = path_map[f]
+    images_summary_path = os.path.join(output_dir, "images_summary.csv")
+    if _is_fresh(images_summary_path, paths):
         try:
-            if cfg.prefilter in ("phash", "both"):
-                phashes[f] = phash_of(p, cfg.roi_ratio)
-            if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-                pdqs[f] = pdq_of(p, cfg.roi_ratio)
-            densities[f] = ink_density(p, cfg.roi_ratio, cfg.blank_method)
-            if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
-                texts[f] = ocr_text(p)
-        except Exception as e:
-            warnings.warn(f"Metadata failed for {f}: {e}")
-            if cfg.prefilter in ("phash", "both"):
-                phashes[f] = imagehash.hex_to_hash("0" * 16)
-            if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-                pdqs[f] = np.zeros((256,), dtype=np.uint8)
-            densities[f] = 0.0
-            if cfg.use_ocr:
-                texts[f] = ""
+            img_df_prev = pd.read_csv(images_summary_path)
+            for _, row in img_df_prev.iterrows():
+                fname = row.get("파일")
+                if fname in files:
+                    densities[fname] = float(row.get("밀도", 0.0))
+            print("Loaded fresh images_summary.csv -> skipping density recompute for cached entries")
+        except Exception:
+            pass
+
+    worker_args = [(f, path_map[f], cfg) for f in files]
+    max_workers = min(32, max(2, (cfg.num_workers or 1) * 4, os.cpu_count() or 2))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for f, ph, pdqv, dens, txt in ex.map(_metadata_worker, worker_args):
+            if ph is not None:
+                phashes[f] = ph
+            if pdqv is not None:
+                pdqs[f] = pdqv
+            if f not in densities or densities.get(f, 0.0) == 0.0:
+                densities[f] = dens
+            if txt:
+                texts[f] = txt
 
     # 3) Embeddings
-    print("[2/5] CNN/ViT embeddings …")
+    logger.info("[2/5] CNN/ViT embeddings …")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    embs, ordered_paths = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+    emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
+    opaths_art = os.path.join(output_dir, "artifacts", "ordered_paths.txt")
+    embs = None
+    ordered_paths = None
+    if _is_fresh(emb_art, paths) and os.path.exists(opaths_art):
+        try:
+            embs = np.load(emb_art)
+            with open(opaths_art, "r", encoding="utf-8") as fr:
+                ordered_paths = [l.strip() for l in fr.readlines() if l.strip()]
+            if len(ordered_paths) != len(files) or embs.shape[0] != len(files):
+                logger.warning("Artifact sizes mismatch: forcing re-compute embeddings")
+                embs = None
+                ordered_paths = None
+            else:
+                logger.info("Loaded cached embeddings.npy + ordered_paths.txt")
+        except Exception as e:
+            logger.warning(f"Failed to load embedding artifacts: {e}; will recompute")
+            embs = None
+            ordered_paths = None
+
+    if embs is None:
+        embs, ordered_paths = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+        try:
+            np.save(emb_art, embs)
+            with open(opaths_art, "w", encoding="utf-8") as fw:
+                fw.write("\n".join(ordered_paths))
+        except Exception:
+            warnings.warn("Failed to save embedding artifacts")
+
     n = len(files)
     name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
 
     # 4) ANN candidates
-    print("[3/5] Candidate neighbors via ANN …")
+    logger.info("[3/5] Candidate neighbors via ANN …")
     idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
 
     # 5) Pairwise scoring → reuse same grouping logic but using path_map when needed
-    print("[4/5] Pair scoring + pairing (max-weight matching) …")
+    logger.info("[4/5] Pair scoring + pairing (max-weight matching) …")
 
     def prefilter_ok(fi: str, fj: str) -> bool:
         if cfg.prefilter in ("phash", "both"):
@@ -839,7 +1010,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             pair_rows.append([fi, fj, round(sim, 4), status, "-"])
 
     # Save reports
-    print("[5/5] Save reports / organize outputs …")
+    logger.info("[5/5] Save reports / organize outputs …")
     csv_path = os.path.join(output_dir, "report.csv")
     parquet_path = os.path.join(output_dir, "report.parquet")
     df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
@@ -856,9 +1027,8 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     # Copy grouped / ok / blank
     for gid, members in groups.items():
         gdir = os.path.join(output_dir, "grouped", gid)
-        os.makedirs(gdir, exist_ok=True)
         for m in members:
-            shutil.copy2(path_map[m], os.path.join(gdir, m))
+            _copy_to_dir(path_map[m], gdir)
 
     okdir = os.path.join(output_dir, "ok")
     bdir = os.path.join(output_dir, "blank_answers")
@@ -874,22 +1044,22 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             # 파일명 끝이 '1'이면 blank로 감지되어도 ok로 분류합니다.
             if name_wo_ext.endswith('2'):
                 try:
-                    shutil.copy2(src, os.path.join(bdir, f))
+                    _copy_to_dir(src, os.path.join(bdir))
                 except Exception as e:
-                    warnings.warn(f"Failed to copy blank answer {f}: {e}")
+                    logger.warning(f"Failed to copy blank answer {f}: {e}")
             elif name_wo_ext.endswith('1'):
                 try:
-                    shutil.copy2(src, os.path.join(okdir, f))
+                    _copy_to_dir(src, os.path.join(okdir))
                 except Exception as e:
-                    warnings.warn(f"Failed to copy reclassified ok file {f}: {e}")
+                    logger.warning(f"Failed to copy reclassified ok file {f}: {e}")
             else:
                 # 그 외의 빈칸 감지 파일은 원래대로 복사하지 않음
                 pass
         elif f not in grouped_set:
             try:
-                shutil.copy2(src, os.path.join(okdir, f))
+                _copy_to_dir(src, os.path.join(okdir))
             except Exception as e:
-                warnings.warn(f"Failed to copy ok file {f}: {e}")
+                logger.warning(f"Failed to copy ok file {f}: {e}")
 
     try:
         np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
