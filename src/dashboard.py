@@ -18,6 +18,13 @@ from PIL import Image
 import numpy as np
 import pandas as pd
 import cv2
+import time
+import logging
+
+# module logger
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 # ===== Optional metrics/components (존재하면 사용) =====
 try:
@@ -118,12 +125,14 @@ def list_all_images(root: str, cache_buster: float = 0) -> List[str]:
 
 # ===== 캐싱: 베이스네임 → 경로 맵 (탐색/해결용) =====
 @st.cache_data(show_spinner=False)
-def build_basename_map(root: str) -> Dict[str, str]:
+def build_basename_map(root: str, cache_buster: float = 0) -> Dict[str, str]:
     """
     같은 파일명이 여러 폴더에 있으면 우선순위:
     grouped/  → ok/ → blank_answers/ → 기타
     """
-    imgs = list_all_images(root)
+    # cache_buster allows callers to force recompute when underlying files change
+    _ = cache_buster
+    imgs = list_all_images(root, cache_buster=cache_buster)
     def pri(p: str) -> int:
         low = p.replace("\\", "/").lower()
         if "/grouped/" in low: return 0
@@ -293,11 +302,16 @@ st.sidebar.header("주요 필터/설정")
 # 캐시 새로고침: 파일/폴더 변경이 반영되지 않을 때 사용
 try:
     if st.sidebar.button("새로고침 (캐시 재생성)"):
-        # Clear streamlit data cache and rerun
+        # Clear streamlit data cache and rebuild basename map, then rerun
         try:
             st.cache_data.clear()
         except Exception:
-            pass
+            logger.debug("st.cache_data.clear() failed or unsupported")
+        try:
+            # force rebuild with a cache_buster timestamp
+            BASENAME_MAP = build_basename_map(OUTPUT_DIR, cache_buster=time.time())
+        except Exception:
+            logger.exception("Failed to rebuild BASENAME_MAP")
         try:
             st.experimental_rerun()
         except Exception:
@@ -392,13 +406,14 @@ def _comp_cache_key(a_path: str, b_path: str, mode: str, params: Dict) -> str:
     return hashlib.md5(s.encode('utf-8')).hexdigest()
 
 
-def _write_cached_image(arr_rgb: np.ndarray, dst: str, fmt: str = 'PNG') -> str:
+def _write_cached_image(arr_rgb: np.ndarray, dst: str, fmt: str = 'PNG') -> Optional[str]:
     try:
         img = Image.fromarray(arr_rgb)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         img.save(dst, fmt)
         return dst
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to write cached image {dst}: {e}")
         return None
 
 
