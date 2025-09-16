@@ -79,7 +79,7 @@ st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized)")
 
 # --- Gallery state (전체 보기 탭 전용) ---
 if "gallery_limit" not in st.session_state:
-    st.session_state.gallery_limit = 60  # 한 번에 보여줄 개수 초기값
+    st.session_state.gallery_limit = 120  # 한 번에 보여줄 개수 초기값 (증가)
 if "gallery_selected" not in st.session_state:
     st.session_state.gallery_selected = []  # 비교 선택(최대 2장)
 
@@ -215,10 +215,12 @@ def make_display_image(src_path: str, size: int, fmt: str = "WEBP", quality: int
     ext_map = {"WEBP": "webp", "JPEG": "jpg", "PNG": "png"}
     ext = ext_map.get(fmt, "webp")
     key = _disp_key(src_path, size, fmt, quality)
-    dst = os.path.join(THUMB_DIR, f"{key}.{ext}")
+    cache_sub = os.path.join(THUMB_DIR, "disp_cache")
+    os.makedirs(cache_sub, exist_ok=True)
+    dst = os.path.join(cache_sub, f"{key}.{ext}")
 
-    if not os.path.exists(dst) or _file_mtime(dst) < _file_mtime(src_path):
-        try:
+    try:
+        if not os.path.exists(dst) or _file_mtime(dst) < _file_mtime(src_path):
             img = _safe_image_open(src_path).convert("RGB")
             w, h = img.size
             if max(w, h) > size:
@@ -236,8 +238,9 @@ def make_display_image(src_path: str, size: int, fmt: str = "WEBP", quality: int
                 img.save(dst, "JPEG", quality=quality, optimize=True, progressive=True)
             else:  # WEBP
                 img.save(dst, "WEBP", quality=quality, method=6)
-        except Exception:
-            return src_path
+    except Exception as e:
+        logger.debug(f"make_display_image failed for {src_path} -> {dst}: {e}")
+        return src_path
     return dst
 
 # ===== KPI 계산 =====
@@ -296,6 +299,23 @@ c3.metric("공백 수", f"{kpis['공백 수']:,}")
 
 # ===== 사이드바: 꼭 필요한 옵션만 노출 =====
 st.sidebar.header("주요 필터/설정")
+# 사이드바: 결과 파일/아티팩트 존재 여부 요약
+try:
+    missing = []
+    checks = [(REPORT_PARQUET, 'report.parquet'), (REPORT_CSV, 'report.csv'), (IMG_SUMMARY, 'images_summary.csv')]
+    for p, name in checks:
+        if not os.path.exists(p):
+            missing.append(name)
+    art_txt = os.path.join(OUTPUT_DIR, 'artifacts', 'ann_backend.txt')
+    if not os.path.exists(art_txt):
+        # optional artifact
+        pass
+    if missing:
+        st.sidebar.warning("결과 파일 누락: " + ", ".join(missing) + ". 먼저 파이프라인을 실행하세요.")
+    else:
+        st.sidebar.success("결과 파일이 확인되었습니다.")
+except Exception:
+    pass
 # 캐시 새로고침: 파일/폴더 변경이 반영되지 않을 때 사용
 try:
     if st.sidebar.button("새로고침 (캐시 재생성)"):
@@ -330,7 +350,7 @@ THEMES = {
         'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','secondary':'#475569','accent':'#0B66FF','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
     },
     'Soft Dark': {
-        'palette': { 'bg':'#0f1722','sidebar_bg':'#0d1620','text':'#e6eef6','secondary':'#9fb0c3','accent':'#6fb3ff','card_bg':'#0b1a24','card_border':'#14232d','shadow':'0 6px 18px rgba(3,10,18,0.45)'} ,
+        'palette': { 'bg':'#0f1722','sidebar_bg':'#0d1620','text':'#e6eef6','sidebar_text':'#F1F5F9','secondary':'#9fb0c3','accent':'#6fb3ff','card_bg':'#0b1a24','card_border':'#14232d','shadow':'0 6px 18px rgba(3,10,18,0.45)'} ,
     },
     'Warm Sepia': {
         'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','secondary':'#6e5a4a','accent':'#b77936','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
@@ -351,6 +371,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     bg = pal.get('bg','#F7F9FB')
     sidebar_bg = pal.get('sidebar_bg', '#FFFFFF')
     text = pal.get('text', '#0B1726')
+    sidebar_text = pal.get('sidebar_text', text)
     secondary_text = pal.get('secondary', '#41515F')
     accent = pal.get('accent', '#0B66FF')
     card_bg = pal.get('card_bg', '#FFFFFF')
@@ -360,7 +381,8 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     css = f"""
     <style>
     .stApp {{ background-color: {bg} !important; color: {text} !important; }}
-    [data-testid="stSidebar"] {{ background-color: {sidebar_bg} !important; box-shadow: none !important; }}
+    [data-testid="stSidebar"] {{ background-color: {sidebar_bg} !important; box-shadow: none !important; color: {sidebar_text} !important; }}
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stHeader, [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] .css-1d391kg {{ color: {sidebar_text} !important; opacity: 0.98 !important; }}
     .stBlock, .stCard {{ background-color: {card_bg} !important; border: 1px solid {card_border}; border-radius: 10px; box-shadow: {shadow}; padding: 12px; }}
     .stMetric {{ color: {text} !important; }}
     /* KPI/Metric 내부 텍스트(라벨/서브텍스트)가 다크에서 안보이는 문제 해결: 강제 색상/불투명도 적용 */
@@ -368,6 +390,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     .stMetric p, .stMetric span, .stMetric small {{ color: {secondary_text} !important; opacity: 0.95 !important; }}
     input, textarea, select, button {{ color: {text} !important; background-color: transparent !important; border-radius: 8px; }}
     .stApp p, .stApp span, label, .css-1v0mbdj p {{ color: {secondary_text} !important; }}
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {{ color: {secondary_text} !important; }}
     a, .stButton>button, .css-18e3th9 a, .css-18e3th9 button {{ color: {accent} !important; }}
     .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
     img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
@@ -609,7 +632,13 @@ def toggle_compare(img_path: str):
     """Toggle selection for comparison. Stores absolute paths in `gallery_selected` (max 2)."""
     if not img_path:
         return
+    # normalize to absolute path if possible
     path = img_path
+    if not os.path.isfile(path):
+        # try resolving via basename map
+        resolved = resolve_image_path(path)
+        if resolved and os.path.isfile(resolved):
+            path = resolved
     # deselect if already present
     if path in st.session_state["gallery_selected"]:
         st.session_state["gallery_selected"] = [p for p in st.session_state["gallery_selected"] if p != path]
@@ -691,6 +720,70 @@ with tab2:
                 report_dups.append((pa, pb, float(row.get('유사도', 0.0))))
     except Exception:
         report_dups = []
+
+    # Merge and prioritize candidates: pHash pairs (d smaller is stronger), report pairs (유사도 larger is stronger)
+    candidates = []  # tuples of (score, a_path, b_path, source, meta)
+    try:
+        for a, b, d in dup_pairs:
+            pa = resolve_image_path(a) or os.path.join(OUTPUT_DIR, a)
+            pb = resolve_image_path(b) or os.path.join(OUTPUT_DIR, b)
+            # score: smaller d -> higher priority, invert to 1/(1+d)
+            score = 1.0 / (1.0 + float(d))
+            candidates.append((score, pa, pb, 'phash', {'d': d}))
+    except Exception:
+        pass
+    try:
+        for pa, pb, sim in report_dups:
+            # report similarity is already 0..1, use directly
+            candidates.append((float(sim), pa, pb, 'report', {'sim': sim}))
+    except Exception:
+        pass
+
+    # sort descending by score (higher = more urgent)
+    candidates = sorted([c for c in candidates if c[1] and c[2]], key=lambda x: x[0], reverse=True)
+
+    # Deduplicate by basename pair (unordered)
+    seen = set()
+    deduped = []
+    for score, pa, pb, src, meta in candidates:
+        key = tuple(sorted((os.path.basename(pa).lower(), os.path.basename(pb).lower())))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((score, pa, pb, src, meta))
+
+    # Show top candidates with quick actions
+    if deduped:
+        st.markdown("---")
+        st.markdown("### ⚠️ 재스캔 권장 후보 (우선순위 순)")
+        # show up to 12 candidates succinctly
+        for idx, (score, pa, pb, src, meta) in enumerate(deduped[:12]):
+            col_a, col_b, col_c = st.columns([4, 4, 2])
+            an = os.path.basename(pa) if pa else 'Unknown'
+            bn = os.path.basename(pb) if pb else 'Unknown'
+            with col_a:
+                if pa and os.path.exists(pa):
+                    thumb_a = make_display_image(pa, size=300, fmt=disp_fmt, quality=80)
+                    st.image(_safe_image_open(thumb_a), caption=f"A: {an}", use_container_width=True)
+                else:
+                    st.write(f"A: {an} (없음)")
+            with col_b:
+                if pb and os.path.exists(pb):
+                    thumb_b = make_display_image(pb, size=300, fmt=disp_fmt, quality=80)
+                    st.image(_safe_image_open(thumb_b), caption=f"B: {bn}", use_container_width=True)
+                else:
+                    st.write(f"B: {bn} (없음)")
+            with col_c:
+                st.write(f"우선도: {score:.3f}")
+                # rescan recommendation toggle (stored per-pair key in session)
+                pair_key = f"rescan_rec_{idx}_{hashlib.md5((an+bn).encode('utf-8')).hexdigest()[:8]}"
+                if pair_key not in st.session_state:
+                    st.session_state[pair_key] = True
+                rec = st.checkbox("재스캔 권고", value=st.session_state.get(pair_key, True), key=pair_key)
+                if st.button("↔ 비교 선택", key=f"cmp_cand_{idx}"):
+                    # add both to comparison (toggle behavior)
+                    toggle_compare(pa)
+                    toggle_compare(pb)
 
     # ----- 즉시 비교 패널: 사용자가 아래 그리드에서 '↔ 비교 선택' 버튼을 클릭하면
     # rescan 탭의 상단에 바로 비교 옵션과 결과가 표시되도록 함
@@ -939,6 +1032,7 @@ with tab3:
                 label = "✔ 비교 취소" if selected else "↔ 비교 선택"
                 if st.button(label, key=f"cmp_ok_{idx}"):
                     toggle_compare(img_abs)
+                st.caption("(버튼: 클릭하면 비교 큐에 추가됩니다. 최대 2장)")
                 caption = f + ("  ✅ 선택됨" if selected else "")
                 # 작은 배지: 선택 상태가 있으면 이미지 위에 overlay 표시 (HTML 사용)
                 if selected:
@@ -961,6 +1055,7 @@ with tab3:
                 label = "✔ 비교 취소" if selected else "↔ 비교 선택"
                 if st.button(label, key=f"cmp_blank_{idx}"):
                     toggle_compare(img_abs)
+                st.caption("(버튼: 클릭하면 비교 큐에 추가됩니다. 최대 2장)")
                 caption = f + ("  ✅ 선택됨" if selected else "")
                 if selected:
                     badge_html = f"<div style='position:relative;display:inline-block'>"
@@ -992,6 +1087,7 @@ with tab3:
         with c1:
             if st.button("선택 초기화", key="tab3_reset"):
                 st.session_state.gallery_selected = []
+            st.caption("(버튼: 현재 비교 선택을 모두 초기화합니다)")
 
 # === Tab4: 전체 보기 ===
 with tab4:
@@ -1112,8 +1208,16 @@ with tab4:
         st.markdown("---")
         st.markdown("### 🔍 선택 비교 (대형)")
         # 파일명 → 경로 복원 (BASENAME_MAP 사용)
-        sel_paths = [BASENAME_MAP.get(n.lower(), None) for n in st.session_state.gallery_selected]
-        sel_paths = [p for p in sel_paths if p and os.path.isfile(p)]
+        # gallery_selected should contain absolute paths; however older sessions may have basenames
+        sel_paths = []
+        for n in st.session_state.gallery_selected:
+            if os.path.isfile(n):
+                sel_paths.append(n)
+            else:
+                # try basename map
+                p = BASENAME_MAP.get(os.path.basename(n).lower())
+                if p and os.path.isfile(p):
+                    sel_paths.append(p)
         if len(sel_paths) == 1:
             st.info("한 장이 선택되었습니다. 한 장을 더 선택하면 2분할 비교가 표시됩니다.")
             # 1장도 크게 보여주자 (같은 품질 파라미터로)
