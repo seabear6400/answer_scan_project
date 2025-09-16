@@ -726,62 +726,62 @@ with tab2:
             st.image(_safe_image_open(bigp), caption=os.path.basename(sel_exist_top[0]), use_container_width=True)
         else:
             a_path, b_path = sel_exist_top[:2]
-            big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
-            big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
-            c1t, c2t = st.columns(2)
-            with c1t:
-                st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
-            with c2t:
-                # If user selected plain Compare, just show the second image side-by-side
-                if cmp_mode_top == "Compare":
+            # If user selected plain Compare, show two images side-by-side; otherwise show only the merged/processed single image
+            if cmp_mode_top == "Compare":
+                big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                c1t, c2t = st.columns(2)
+                with c1t:
+                    st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
+                with c2t:
                     st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
-                else:
-                    try:
-                        if cmp_mode_top == "Fade":
-                            # use cached path if available
-                            cached = _cached_blend_path(a_path, b_path, alpha=alpha_top)
-                            if play_anim:
-                                gif = _create_fade_gif(a_path, b_path, steps=24, duration_ms=40)
-                                if gif and os.path.exists(gif):
-                                    st.image(gif, caption=f"Fade animation — {os.path.basename(b_path)}", use_column_width=True)
-                                elif cached:
-                                    st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
-                                else:
-                                    blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
-                                    st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+            else:
+                try:
+                    # For non-Compare modes, create or retrieve a single merged image and display it full-width
+                    if cmp_mode_top == "Fade":
+                        cached = _cached_blend_path(a_path, b_path, alpha=alpha_top)
+                        if play_anim:
+                            gif = _create_fade_gif(a_path, b_path, steps=24, duration_ms=40)
+                            if gif and os.path.exists(gif):
+                                st.image(gif, caption=f"Fade animation — {os.path.basename(b_path)}", use_column_width=True)
+                            elif cached:
+                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
                             else:
-                                if cached:
-                                    st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
-                                else:
-                                    blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
-                                    st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
-                        elif cmp_mode_top == "Difference":
-                            cached = _cached_diff_path(a_path, b_path, blur=diff_blur_top, thresh=diff_thresh_top)
-                            if cached:
-                                st.image(cached, caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
-                            else:
-                                ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
-                                gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
-                                h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
-                                ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
-                                gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
-                                diff = cv2.absdiff(ga, gb)
-                                diff = cv2.GaussianBlur(diff, (diff_blur_top, diff_blur_top), 0)
-                                _, diff_mask = cv2.threshold(diff, diff_thresh_top, 255, cv2.THRESH_TOZERO)
-                                diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
-                                heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
-                                st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
+                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
+                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
                         else:
-                            color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
-                            col_bgr = color_map.get(hl_color_top, (0, 255, 255))
-                            cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
                             if cached:
-                                st.image(cached, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
                             else:
-                                highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
-                                st.image(highlighted, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
-                    except Exception as e:
-                        st.info(f"비교 렌더 실패: {e}")
+                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
+                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
+                    elif cmp_mode_top == "Difference":
+                        cached = _cached_diff_path(a_path, b_path, blur=diff_blur_top, thresh=diff_thresh_top)
+                        if cached:
+                            st.image(cached, caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
+                        else:
+                            ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
+                            gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
+                            h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
+                            ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
+                            gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
+                            diff = cv2.absdiff(ga, gb)
+                            diff = cv2.GaussianBlur(diff, (diff_blur_top, diff_blur_top), 0)
+                            _, diff_mask = cv2.threshold(diff, diff_thresh_top, 255, cv2.THRESH_TOZERO)
+                            diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
+                            heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
+                            st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
+                    else:
+                        color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
+                        col_bgr = color_map.get(hl_color_top, (0, 255, 255))
+                        cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
+                        if cached:
+                            st.image(cached, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                        else:
+                            highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
+                            st.image(highlighted, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                except Exception as e:
+                    st.info(f"비교 렌더 실패: {e}")
 
     grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
     if os.path.isdir(grouped_dir):
