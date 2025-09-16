@@ -6,9 +6,9 @@ import shutil
 import stat
 from typing import Optional, Tuple
 
-# Pre-warm tkinter in a background thread as early as possible so the folder
-# dialog opens faster when requested. Keep only lightweight imports at module
-# import time to avoid blocking startup.
+# 가능한 한 일찍 백그라운드 스레드에서 tkinter를 예열하여
+# 폴더 선택 대화상자가 요청될 때 더 빠르게 열리도록 합니다.
+# 모듈 레벨에서는 가벼운 임포트만 유지하여 시작 시 차단을 방지합니다.
 _tk_warmed: bool = False
 _tk_mods: Optional[Tuple[object, object]] = None
 def _warm_tk():
@@ -16,13 +16,13 @@ def _warm_tk():
     try:
         import tkinter as tk
         from tkinter import filedialog
-        # Keep references to modules so main() can use them immediately.
+    # main()가 즉시 사용할 수 있도록 모듈 참조를 유지합니다.
         _tk_mods = (tk, filedialog)
         _tk_warmed = True
     except Exception:
         _tk_warmed = False
 
-# Start warming immediately on import (daemon thread so it won't block exit).
+# 모듈 import 시 즉시 예열을 시작합니다(데몬 스레드로 프로세스 종료를 방해하지 않습니다).
 _tk_thread = threading.Thread(target=_warm_tk, daemon=True)
 _tk_thread.start()
 
@@ -30,40 +30,40 @@ def parse_args():
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
     p.add_argument("--output_dir", default="output")
 
-    # Backends
+    # 백엔드
     p.add_argument("--embed_backend", choices=["resnet18", "dinov2"], default="dinov2")
     p.add_argument("--ann_backend", choices=["auto", "brute", "faiss", "hnsw"], default="auto")
 
-    # ANN params
+    # ANN 파라미터
     p.add_argument("--k", type=int, default=20)
     p.add_argument("--hnsw_M", type=int, default=32)
     p.add_argument("--hnsw_efC", type=int, default=200)
     p.add_argument("--hnsw_efS", type=int, default=64)
 
-    # Prefilters
+    # 사전 필터
     p.add_argument("--prefilter", choices=["phash", "pdq", "both"], default="phash")
     p.add_argument("--phash_thresh", type=int, default=10)
     p.add_argument("--pdq_thresh", type=int, default=80)
     p.add_argument("--density_diff", type=float, default=0.15)
 
-    # Similarity thresholds
+    # 유사도 임계값
     p.add_argument("--cnn_thresh", type=float, default=0.99)
     p.add_argument("--suspect_low", type=float, default=0.95)
 
-    # Blank detection
+    # 공백(빈칸) 감지
     p.add_argument("--blank_method", choices=["otsu", "sauvola"], default="sauvola")
     p.add_argument("--blank_thresh", type=float, default=0.02)
 
-    # Re-ranking / OCR (optional)
+    # 재정렬 / OCR (선택)
     p.add_argument("--use_lpips", action="store_true")
     p.add_argument("--lpips_thresh", type=float, default=0.2)
     p.add_argument("--use_ocr", action="store_true")
     p.add_argument("--text_sim_thresh", type=float, default=0.85)
 
-    # Alignment
+    # 정렬 (Alignment)
     p.add_argument("--use_alignment", action="store_true")
 
-    # Embedding
+    # 임베딩
     p.add_argument("--batch", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--roi", type=float, nargs=4, default=[0.15, 0.15, 0.85, 0.85])
@@ -80,7 +80,7 @@ def main():
             import tkinter as tk
             from tkinter import filedialog
 
-        # Create a short-lived root for the dialog and ensure it's on top.
+    # 대화상자를 위한 단기간의 루트를 생성하고 최상위로 표시되도록 합니다.
         root = tk.Tk()
         root.attributes('-topmost', True)
         root.withdraw()
@@ -114,13 +114,13 @@ def main():
             pass
         os.makedirs(out_sub, exist_ok=True)
 
-    # Lazy-import the heavy detector pipeline only after we've shown the
-    # folder-selection dialog. This reduces perceived startup latency.
+# 무거운 detector pipeline은 폴더 선택 대화상자를 표시한 이후에 지연 임포트합니다.
+# 이렇게 하면 사용자가 느끼는 시작 지연이 줄어듭니다.
     print("🔍 탐지 실행…")
     try:
-        # When run as a package (python -m src.main) a relative import works;
-        # when run as a script (python src/main.py) the absolute import may be
-        # needed. Try relative first, then fall back to absolute.
+    # 패키지(python -m src.main)로 실행할 때는 상대 임포트가 작동합니다;
+    # 스크립트(python src/main.py)로 실행할 때는 절대 임포트가 필요할 수 있습니다.
+    # 먼저 상대 임포트를 시도하고 실패하면 절대 임포트로 대체합니다.
         try:
             from .detector_pipeline import detect_pipeline, DetectorConfig
         except Exception:
@@ -129,7 +129,7 @@ def main():
         print(f"검사 도중 모듈을 불러오지 못했습니다: {e}")
         return
 
-    # sel is a directory path string. If empty, abort.
+    # sel은 디렉터리 경로 문자열입니다. 비어 있으면 중단합니다.
     if not sel:
         print("중단: 처리할 폴더가 선택되지 않았습니다.")
         return
