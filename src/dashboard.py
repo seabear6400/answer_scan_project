@@ -104,11 +104,16 @@ def load_img_summary(img_summary_csv: str) -> pd.DataFrame:
     return pd.DataFrame(columns=["파일", "밀도", "빈칸여부"])
 
 @st.cache_data(show_spinner=False)
-def list_all_images(root: str) -> List[str]:
-    exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
+def list_all_images(root: str, cache_buster: float = 0) -> List[str]:
+    """Recursively list image files under root.
+    cache_buster exists so callers can force cache invalidation when reports change.
+    """
+    exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
     all_paths = []
-    for ext in exts:
-        all_paths += glob.glob(os.path.join(root, "**", ext), recursive=True)
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if os.path.splitext(fn)[1].lower() in exts:
+                all_paths.append(os.path.join(dirpath, fn))
     return sorted(all_paths)
 
 # ===== 캐싱: 베이스네임 → 경로 맵 (탐색/해결용) =====
@@ -518,18 +523,8 @@ def _render_global_compare():
 
 
 cmp_pair = _render_global_compare()
-if cmp_pair:
-    a_path, b_path = cmp_pair
-    st.markdown("---")
-    st.markdown("### 🔀 선택한 두 이미지 즉시 비교")
-    c1g, c2g = st.columns(2)
-    with c1g:
-        big_a = make_display_image(a_path, size=max(1200, group_large_px), fmt=disp_fmt, quality=disp_quality)
-        st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
-    with c2g:
-        big_b = make_display_image(b_path, size=max(1200, group_large_px), fmt=disp_fmt, quality=disp_quality)
-        st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
-    st.markdown("_두 장이 선택되면 여기에서 바로 비교 모드를 사용해 분석할 수 있습니다._")
+
+    
 
 
 
@@ -628,6 +623,9 @@ with tab2:
         import imagehash
         dup_pairs = []
         hashes = {}
+        # ensure variables exist even if scanning block is commented out
+        input_dir = locals().get('input_dir', OUTPUT_DIR)
+        scan_files = locals().get('scan_files', [])
         for f in scan_files:
             p = os.path.join(input_dir, f)
             try:
@@ -680,34 +678,46 @@ with tab2:
         # 공통: 모드 선택 + 도움말 옆 배치
         colm1, colm2 = st.columns([3, 7])
         with colm1:
-            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["Fade", "Difference", "Highlighter"], index=0, horizontal=True, key="cmp_mode_top")
+            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["Compare","Fade", "Difference", "Highlighter"], index=0, horizontal=True, key="cmp_mode_top")
         with colm2:
-            st.markdown(
-                "**모드 설명 (요약 & 권장 설정)**\n"
-                "- **Fade**: 두 이미지를 위아래로 겹쳐 보여줍니다. 앞(A) 이미지의 투명도(alpha)를 조절해 미세한 변화가 어느 위치에서 발생하는지 문맥과 함께 확인할 수 있습니다.\n"
-                "  - 추천: A alpha = 0.4–0.6\n"
-                "  - 장점: 전체 레이아웃 맥락을 유지하면서 변화 관찰 가능\n"
-                "  - 단점: 색 대비가 약하거나 스캔 노이즈가 많으면 차이를 식별하기 어려울 수 있음\n"
-                "- **Difference**: 그레이스케일 절대 차이를 계산해 heatmap으로 표시합니다. 픽셀 단위 변경을 강조합니다.\n"
-                "  - 추천: Blur = 3, Threshold = 10\n"
-                "  - 장점: 아주 작은 픽셀 변화까지 시각화 가능\n"
-                "  - 단점: 스캔 노이즈(먼지, 압력 자국 등)에 민감함 — Blur/Threshold로 노이즈 제어 필요\n"
-                "- **Highlighter**: Difference 마스크를 색상으로 원본 이미지에 오버레이합니다. 문서의 글자 추가/삭제 등 의미 있는 변경을 컬러로 빠르게 파악할 때 유용합니다.\n"
-                "  - 추천: Threshold = 15, 색상 = Yellow\n"
-                "  - 장점: 변경 영역이 직관적으로 눈에 띔\n"
-                "  - 단점: 임계값과 색상 조절이 필요할 수 있음\n\n"
-                "사용법: 아래 그리드에서 두 장을 선택하면 이 상단 패널에서 선택한 모드로 즉시 결과를 확인할 수 있습니다.\n"
-                "- Fade 애니메이션: 'Play fade animation'을 체크하면 자동으로 alpha를 변화시키는 GIF를 재생합니다 (캐시 사용).\n"
-                "- 성능: 비교 이미지는 `artifacts/thumbnails/`에 캐시되어 다음 조회 시 빠르게 로드됩니다."
-            )
+            # Show only the description relevant to the selected compare mode
+            if cmp_mode_top == "Compare":
+                st.markdown(
+                    "**Compare (즉시 보기)**\n"
+                    "- 선택한 두 이미지를 좌우로 나란히 크게 보여줍니다. 빠르게 원본 대비를 확인할 때 사용하세요.\n"
+                )
+            elif cmp_mode_top == "Fade":
+                st.markdown(
+                    "**Fade (요약 & 권장 설정)**\n"
+                    "- 두 이미지를 위아래로 겹쳐 보여줍니다. 앞(A) 이미지의 투명도(alpha)를 조절해 미세한 변화 위치를 문맥과 함께 확인하세요.\n"
+                    "- 추천: A alpha = 0.4–0.6\n"
+                    "- 팁: 전체 레이아웃을 보존하므로 레이아웃 변화 식별에 유리합니다.\n"
+                )
+            elif cmp_mode_top == "Difference":
+                st.markdown(
+                    "**Difference (요약 & 권장 설정)**\n"
+                    "- 그레이스케일 절대 차이를 계산해 heatmap으로 표시합니다. 픽셀 단위 변경을 강조합니다.\n"
+                    "- 추천: Blur = 3, Threshold = 10\n"
+                    "- 팁: 노이즈에 민감하므로 Blur/Threshold 조정으로 노이즈를 억제하세요.\n"
+                )
+            else:
+                st.markdown(
+                    "**Highlighter (요약 & 권장 설정)**\n"
+                    "- Difference 마스크를 색상으로 원본 이미지에 오버레이합니다. 글자 추가/삭제 같은 의미 있는 변경을 빠르게 파악할 때 유용합니다.\n"
+                    "- 추천: Threshold = 15, 색상 = Yellow\n"
+                )
 
-        if cmp_mode_top == "Fade":
+        # Parameter controls per mode. 'Compare' shows no extra controls.
+        if cmp_mode_top == "Compare":
+            # No parameters for simple side-by-side compare
+            pass
+        elif cmp_mode_top == "Fade":
             alpha_top = st.slider("Fade: 앞쪽 이미지 투명도 (A)", 0.0, 1.0, 0.5, 0.01, key="alpha_top")
             play_anim = st.checkbox("Play fade animation", key="play_fade_anim")
         elif cmp_mode_top == "Difference":
             diff_blur_top = st.slider("Difference: Blur 강도(odd kernel)", 1, 11, 3, 2, key="diff_blur_top")
             diff_thresh_top = st.slider("Difference: 강조 임계값", 0, 255, 10, 1, key="diff_thresh_top")
-        else:
+        elif cmp_mode_top == "Highlighter":
             hl_color_top = st.selectbox("Highlighter 색상", ["Yellow", "Red", "Lime", "Cyan"], index=0, key="hl_color_top")
             hl_thresh_top = st.slider("Highlighter: 임계값", 1, 100, 20, 1, key="hl_thresh_top")
 
@@ -722,52 +732,56 @@ with tab2:
             with c1t:
                 st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
             with c2t:
-                try:
-                    if cmp_mode_top == "Fade":
-                        # use cached path if available
-                        cached = _cached_blend_path(a_path, b_path, alpha=alpha_top)
-                        if play_anim:
-                            gif = _create_fade_gif(a_path, b_path, steps=24, duration_ms=40)
-                            if gif and os.path.exists(gif):
-                                st.image(gif, caption=f"Fade animation — {os.path.basename(b_path)}", use_column_width=True)
-                            elif cached:
-                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                # If user selected plain Compare, just show the second image side-by-side
+                if cmp_mode_top == "Compare":
+                    st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
+                else:
+                    try:
+                        if cmp_mode_top == "Fade":
+                            # use cached path if available
+                            cached = _cached_blend_path(a_path, b_path, alpha=alpha_top)
+                            if play_anim:
+                                gif = _create_fade_gif(a_path, b_path, steps=24, duration_ms=40)
+                                if gif and os.path.exists(gif):
+                                    st.image(gif, caption=f"Fade animation — {os.path.basename(b_path)}", use_column_width=True)
+                                elif cached:
+                                    st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                                else:
+                                    blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
+                                    st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
                             else:
-                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
-                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
-                        else:
+                                if cached:
+                                    st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                                else:
+                                    blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
+                                    st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                        elif cmp_mode_top == "Difference":
+                            cached = _cached_diff_path(a_path, b_path, blur=diff_blur_top, thresh=diff_thresh_top)
                             if cached:
-                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
+                                st.image(cached, caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
                             else:
-                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
-                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f}) — {os.path.basename(b_path)}", use_container_width=True)
-                    elif cmp_mode_top == "Difference":
-                        cached = _cached_diff_path(a_path, b_path, blur=diff_blur_top, thresh=diff_thresh_top)
-                        if cached:
-                            st.image(cached, caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
+                                ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
+                                gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
+                                h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
+                                ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
+                                gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
+                                diff = cv2.absdiff(ga, gb)
+                                diff = cv2.GaussianBlur(diff, (diff_blur_top, diff_blur_top), 0)
+                                _, diff_mask = cv2.threshold(diff, diff_thresh_top, 255, cv2.THRESH_TOZERO)
+                                diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
+                                heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
+                                st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
                         else:
-                            ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
-                            gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
-                            h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
-                            ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
-                            gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
-                            diff = cv2.absdiff(ga, gb)
-                            diff = cv2.GaussianBlur(diff, (diff_blur_top, diff_blur_top), 0)
-                            _, diff_mask = cv2.threshold(diff, diff_thresh_top, 255, cv2.THRESH_TOZERO)
-                            diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
-                            heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
-                            st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
-                    else:
-                        color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
-                        col_bgr = color_map.get(hl_color_top, (0, 255, 255))
-                        cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
-                        if cached:
-                            st.image(cached, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
-                        else:
-                            highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
-                            st.image(highlighted, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
-                except Exception as e:
-                    st.info(f"비교 렌더 실패: {e}")
+                            color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
+                            col_bgr = color_map.get(hl_color_top, (0, 255, 255))
+                            cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
+                            if cached:
+                                st.image(cached, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                            else:
+                                highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
+                                st.image(highlighted, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                    except Exception as e:
+                        st.info(f"비교 렌더 실패: {e}")
 
     grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
     if os.path.isdir(grouped_dir):
@@ -883,19 +897,22 @@ with tab2:
 
                 # 선택된 이미지 비교(대형 인라인 뷰)는 탭 상단의 "즉시 비교(재스캔 탭)"에서 제공합니다.
                 # 여기서는 각 모드에 대한 간단한 설명과 사용 팁을 보여줍니다.
-                sel_paths = st.session_state.get("rescan_selected", [])
-                if sel_paths:
-                    st.markdown("---")
-                    st.markdown("#### � 비교 모드 사용 안내")
-                    st.markdown("- Fade: 두 이미지를 겹쳐서 앞(A) 이미지의 투명도를 조절합니다. 작은 차이를 육안으로 직관적으로 확인할 때 유용합니다. 추천값: A alpha 0.4–0.6")
-                    st.markdown("- Difference: 그레이스케일 차이를 계산해 heatmap으로 시각화합니다. 픽셀 단위의 변경을 강조할 때 좋습니다. Blur와 Threshold를 조절해 노이즈를 줄이세요. 추천값: Blur=3, Threshold=10")
-                    st.markdown("- Highlighter: 차이 마스크를 색상으로 오버레이합니다. 문서 스캔의 글자 추가/삭제 같은 작은 변경을 컬러로 빠르게 식별할 때 유용합니다. 추천값: Threshold=15, 색상=Yellow")
-                    st.markdown("\n사용 방법: 아래 그리드에서 '↔ 비교 선택'으로 두 장을 선택하면, 탭 상단의 '즉시 비교 (재스캔 탭)'에서 선택한 모드로 결과를 즉시 확인할 수 있습니다.")
-                    # 선택 초기화 버튼(간단한 접근)
-                    c1, c2 = st.columns([1, 9])
-                    with c1:
-                        if st.button("선택 초기화", key=f"rescan_reset_{gid}"):
-                            st.session_state["rescan_selected"] = []
+                # sel_paths = st.session_state.get("rescan_selected", [])
+                # if sel_paths:
+                #     st.markdown("---")
+                #     # show a concise guidance based on the selected compare mode (rescan grid)
+                #     if st.session_state.get('cmp_mode_top', 'Fade') == 'Fade':
+                #         st.markdown("**Fade** — 앞 이미지 투명도 조절로 미세 변화 위치를 문맥과 함께 확인하세요. 추천: A alpha 0.4–0.6")
+                #     elif st.session_state.get('cmp_mode_top') == 'Difference':
+                #         st.markdown("**Difference** — 그레이스케일 절대 차이를 heatmap으로 시각화합니다. Blur/Threshold로 노이즈 제어하세요. 추천: Blur=3, Threshold=10")
+                #     else:
+                #         st.markdown("**Highlighter** — 차이 마스크를 색상으로 오버레이해 변경 영역을 직관적으로 확인하세요. 추천: Threshold=15, 색상=Yellow")
+                #     st.markdown("\n아래 그리드에서 '↔ 비교 선택'으로 두 장을 선택하면, 탭 상단의 '즉시 비교 (재스캔 탭)'에서 선택한 모드로 결과를 즉시 확인할 수 있습니다.")
+                #     # 선택 초기화 버튼(간단한 접근)
+                #     c1, c2 = st.columns([1, 9])
+                #     with c1:
+                #         if st.button("선택 초기화", key=f"rescan_reset_{gid}"):
+                #             st.session_state["rescan_selected"] = []
     else:
         st.info("그룹 결과 폴더가 없습니다. 하지만 입력 폴더 또는 리포트에서 재스캔 후보를 검사할 수 있습니다.")
 
@@ -1002,16 +1019,16 @@ with tab4:
         target_px_eff, disp_fmt_eff, disp_quality_eff = 1024, "WEBP", 95
     elif quality_profile == "선명":
         target_px_eff, disp_fmt_eff, disp_quality_eff = 1600, "WEBP", 98
-    else:
-        # 사용자 지정 옵션
-        st.markdown("##### 사용자 지정")
-        cc1, cc2, cc3 = st.columns(3)
-        with cc1:
-            target_px_eff = st.slider("표시 해상도(px, 긴 변)", 512, 2400, 1400, 50)
-        with cc2:
-            disp_fmt_eff = st.selectbox("표시 포맷", ["WEBP", "JPEG", "PNG"], index=0)
-        with cc3:
-            disp_quality_eff = st.slider("표시 품질(압축)", 80, 100, 95)
+    # else:
+    #     # 사용자 지정 옵션
+    #     st.markdown("##### 사용자 지정")
+    #     cc1, cc2, cc3 = st.columns(3)
+    #     with cc1:
+    #         target_px_eff = st.slider("표시 해상도(px, 긴 변)", 512, 2400, 1400, 50)
+    #     with cc2:
+    #         disp_fmt_eff = st.selectbox("표시 포맷", ["WEBP", "JPEG", "PNG"], index=0)
+    #     with cc3:
+    #         disp_quality_eff = st.slider("표시 품질(압축)", 80, 100, 95)
 
     st.markdown("---")
 
@@ -1025,7 +1042,12 @@ with tab4:
         sort_key = st.selectbox("정렬", ["파일명", "수정시각(최신순)", "수정시각(오래된순)"], index=0)
 
     # ---------- 데이터 준비 ----------
-    all_imgs = list_all_images(OUTPUT_DIR)
+    # use images_summary.csv mtime to bust cache when report is updated
+    try:
+        cache_buster = os.path.getmtime(IMG_SUMMARY)
+    except Exception:
+        cache_buster = 0
+    all_imgs = list_all_images(OUTPUT_DIR, cache_buster)
     # 검색/확장자 필터
     if q:
         all_imgs = [p for p in all_imgs if q.lower() in p.lower()]
@@ -1043,21 +1065,21 @@ with tab4:
     total_items = len(all_imgs)
     st.caption(f"총 {total_items}개 파일")
 
-    # ---------- 페이지네이션(Load more) ----------
-    colp1, colp2, colp3 = st.columns([1.2, 1, 3])
-    with colp1:
-        page_chunk = st.slider("한 번에 더 보기", 20, 200, 80, 10)
-    with colp2:
-        if st.button("더 보기 ⤵"):
-            st.session_state.gallery_limit = min(total_items, st.session_state.gallery_limit + page_chunk)
-    with colp3:
-        if st.button("처음으로 ⤴"):
-            st.session_state.gallery_limit = min(total_items, page_chunk)
+    # # ---------- 페이지네이션(Load more) ----------
+    # colp1, colp2, colp3 = st.columns([1.2, 1, 3])
+    # with colp1:
+    #     page_chunk = st.slider("한 번에 더 보기", 20, 200, 80, 10)
+    # with colp2:
+    #     if st.button("더 보기 ⤵"):
+    #         st.session_state.gallery_limit = min(total_items, st.session_state.gallery_limit + page_chunk)
+    # with colp3:
+    #     if st.button("처음으로 ⤴"):
+    #         st.session_state.gallery_limit = min(total_items, page_chunk)
 
-    # 현재 보여줄 범위
-    limit = min(total_items, max(1, st.session_state.gallery_limit))
-    show_paths = all_imgs[:limit]
-    st.caption(f"{1}–{limit} / {total_items}")
+    # 전체 보기: 제한 없이 모든 이미지를 즉시 표시
+    st.session_state.gallery_limit = total_items
+    show_paths = all_imgs
+    st.caption(f"1–{total_items} / {total_items}")
 
     # ---------- 그리드 렌더 ----------
     cols = st.columns(grid_cols_local)
