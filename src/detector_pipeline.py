@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 import io
 from PIL import UnidentifiedImageError
+import pathlib
 import imagehash
 import cv2
 import pandas as pd
@@ -145,7 +146,7 @@ def crop_roi(img: Image.Image, roi_ratio: Tuple[float, float, float, float]):
 
 
 def read_gray(path: str):
-    # 우선 OpenCV로 시도
+    # 우선 OpenCV로 시도 (빠르고 파일 경로 인코딩 문제에 관대)
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if img is not None:
         return img
@@ -156,36 +157,41 @@ def read_gray(path: str):
         pil = Image.open(io.BytesIO(data)).convert('L')
         arr = np.array(pil)
         return arr
+    except UnidentifiedImageError:
+        logger.warning(f"이미지 파싱 실패: {path}")
+        return None
     except Exception as e:
-        raise RuntimeError(f"이미지 로딩 실패: {path} ({e})")
+        logger.warning(f"이미지 로드 예외: {path} -> {e}")
+        return None
 
 
 # -------------------------- Prefilters ------------------------------
 def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> imagehash.ImageHash:
     try:
-        with open(path, 'rb') as f:
-            data = f.read()
-        img = Image.open(io.BytesIO(data)).convert("L")
-    except Exception:
-        img = Image.open(path).convert("L")
-    img = crop_roi(img, roi_ratio)
-    img = img.resize((64, 64))
-    return imagehash.phash(img)
+        img = Image.open(path)
+        img = crop_roi(img, roi_ratio)
+        return imagehash.phash(img)
+    except Exception as e:
+        logger.warning(f"phash 계산 실패: {path} -> {e}")
+        return None
 
 
 def pdq_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> Optional[np.ndarray]:
-    if not _HAS_PDQ:
-        return None
     try:
-        with open(path, 'rb') as f:
-            data = f.read()
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-    except Exception:
-        img = Image.open(path).convert("RGB")
-    img = crop_roi(img, roi_ratio)
-    arr = np.array(img)
-    hash_vec, _ = pdqhash.compute_pdq_hash(arr)  # 256-d bits (0/1)
-    return hash_vec.astype(np.uint8)
+        if not _HAS_PDQ:
+            return None
+        img = Image.open(path).convert('RGB')
+        img = crop_roi(img, roi_ratio)
+        arr = np.array(img)
+        # pdqhash 라이브러리가 제공하는 API 사용
+        if 'pdqhash' in globals():
+            # compute_pdq_hash -> (hash_vec, metadata)
+            hash_vec, _ = pdqhash.compute_pdq_hash(arr)
+            return hash_vec.astype(np.uint8)
+        return None
+    except Exception as e:
+        logger.warning(f"PDQ 계산 실패: {path} -> {e}")
+        return None
 
 
 def hamming_distance_bits(a_bits: np.ndarray, b_bits: np.ndarray) -> int:
@@ -194,6 +200,9 @@ def hamming_distance_bits(a_bits: np.ndarray, b_bits: np.ndarray) -> int:
 
 def ink_density(path: str, roi_ratio: Tuple[float, float, float, float], method: str = "sauvola") -> float:
     gray = read_gray(path)
+    if gray is None:
+        logger.warning(f"ink_density: 이미지 로드 실패로 0 반환: {path}")
+        return 0.0
     h, w = gray.shape[:2]
     l, t, r, b = roi_ratio
     x1, y1, x2, y2 = int(l * w), int(t * h), int(r * w), int(b * h)
@@ -244,14 +253,23 @@ class ImgDataset(Dataset):
 
 
 def load_model(device: torch.device, backend: str) -> nn.Module:
-    if backend == "dinov2" and _HAS_TIMM:
-        model = timm.create_model("vit_base_patch14_dinov2.lvd142m", pretrained=True, num_classes=0)
+    # 안전한 모델 로드: timm 실패 시 ResNet18로 폴백
+    try:
+        if backend == "dinov2" and _HAS_TIMM:
+            model = timm.create_model("vit_base_patch14_dinov2.lvd142m", pretrained=True, num_classes=0)
+            model.eval().to(device)
+            return model
+    except Exception as e:
+        logger.warning(f"timm 모델 로드 실패(backend={backend}): {e}. ResNet18로 폴백합니다.")
+    # ResNet 폴백
+    try:
+        model = resnet18(weights=ResNet18_Weights.DEFAULT)
+        model.fc = nn.Identity()
         model.eval().to(device)
         return model
-    model = resnet18(weights=ResNet18_Weights.DEFAULT)
-    model.fc = nn.Identity()
-    model.eval().to(device)
-    return model
+    except Exception as e:
+        logger.error(f"ResNet18 로드 실패: {e}")
+        raise
 
 
 def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, num_workers: int,
@@ -267,10 +285,19 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     ordered_paths = []
     with torch.no_grad():
         for x, pths in dl:
-            x = x.to(device)
-            out = model(x).detach().cpu().numpy().astype(np.float32)
-            embs.append(out)
-            ordered_paths.extend(list(pths))
+            try:
+                x = x.to(device)
+                out_t = model(x)
+                out = out_t.detach().cpu().numpy()
+                # flatten spatial dims if present -> (B, D)
+                if out.ndim > 2:
+                    out = out.reshape(out.shape[0], -1)
+                out = out.astype(np.float32)
+                embs.append(out)
+                ordered_paths.extend(list(pths))
+            except Exception as e:
+                logger.warning(f"임베딩 배치 처리 실패(일부 배치 건너뜀): {e}")
+                continue
     # Stack collected outputs; if none, attempt to infer model output dimensionality
     if len(embs):
         embs = np.vstack(embs)
@@ -291,7 +318,12 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
 
 # -------------------------- ANN building -----------------------------
 def l2_normalize(mat: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12
+    # 빈 행렬 처리
+    if mat.size == 0:
+        return mat
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    # 영 노름 보호: 0으로 나누는 것을 피함
+    norms[norms == 0] = 1.0
     return mat / norms
 
 
@@ -307,10 +339,11 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
 
     backend = ann_backend
     if ann_backend == "auto":
-        if _HAS_HNSW and N >= 1000:
-            backend = "hnsw"
-        elif _HAS_FAISS and N >= 2000:
+        # 우선순위: FAISS(대규모, 설치됨) -> HNSW -> brute
+        if _HAS_FAISS and N >= 2000:
             backend = "faiss"
+        elif _HAS_HNSW and N >= 1000:
+            backend = "hnsw"
         else:
             backend = "brute"
 
@@ -353,8 +386,13 @@ def lpips_distance(a_path: str, b_path: str) -> Optional[float]:
         _lpips_model = lpips.LPIPS(net='vgg').eval()
     import torchvision.transforms as T
     tf = T.Compose([T.ToTensor()])
-    A = cv2.cvtColor(cv2.imread(a_path), cv2.COLOR_BGR2RGB)
-    B = cv2.cvtColor(cv2.imread(b_path), cv2.COLOR_BGR2RGB)
+    Araw = cv2.imread(a_path)
+    Braw = cv2.imread(b_path)
+    if Araw is None or Braw is None:
+        logger.warning(f"LPIPS: 이미지 로드 실패 a={a_path} b={b_path}")
+        return None
+    A = cv2.cvtColor(Araw, cv2.COLOR_BGR2RGB)
+    B = cv2.cvtColor(Braw, cv2.COLOR_BGR2RGB)
     h = min(A.shape[0], B.shape[0]); w = min(A.shape[1], B.shape[1])
     A = cv2.resize(A, (w, h)); B = cv2.resize(B, (w, h))
     a = tf(Image.fromarray(A)).unsqueeze(0)
@@ -484,6 +522,7 @@ def _metadata_worker(args):
 def detect_pipeline(input_dir: str, output_dir: str,
                     config: Optional[DetectorConfig] = None,
                     filter_func: Optional[callable] = None,
+                    recursive: bool = False,
                     **_deprecated_kwargs):
     cfg = config or DetectorConfig()
 
@@ -500,9 +539,18 @@ def detect_pipeline(input_dir: str, output_dir: str,
     if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=3, delay=0.2):
         warnings.warn("Failed to create thumbnails dir; continuing")
 
-    # 1) Collect image files
+    # 1) Collect image files (optionally recursive)
     exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
-    all_files = [f for f in sorted(os.listdir(input_dir)) if f.lower().endswith(exts)]
+    all_files = []
+    if recursive:
+        for root, _, filenames in os.walk(input_dir):
+            for fn in filenames:
+                if fn.lower().endswith(exts):
+                    rel = os.path.relpath(os.path.join(root, fn), input_dir)
+                    all_files.append(rel)
+        all_files.sort()
+    else:
+        all_files = [f for f in sorted(os.listdir(input_dir)) if f.lower().endswith(exts)]
     if filter_func is not None:
         files = [f for f in all_files if filter_func(f)]
     else:
