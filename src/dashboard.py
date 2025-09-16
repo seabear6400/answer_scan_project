@@ -342,43 +342,6 @@ THEMES = {
 
 if 'theme' not in st.session_state:
     st.session_state['theme'] = 'Light (기본)'
-
-# 사이드바에서 테마 선택 + 스와치 표시
-with st.sidebar.expander('테마', expanded=True):
-    theme_keys = list(THEMES.keys())
-    sel = st.radio('테마 선택', theme_keys, index=theme_keys.index(st.session_state['theme']) if st.session_state['theme'] in theme_keys else 0)
-    # 스와치: 작은 박스들로 팔레트 미리보기
-    pal = THEMES[sel]['palette']
-    swatch_html = '<div style="display:flex;gap:6px;margin-top:8px;align-items:center">'
-    # 주요 색상들(배경/카드/텍스트/액센트)
-    for k in ['bg','card_bg','text','accent']:
-        if k in pal:
-            swatch_html += f"<div style=\"width:36px;height:24px;border-radius:6px;background:{pal[k]};border:1px solid rgba(0,0,0,0.06)\" title=\"{k}\"></div>"
-    swatch_html += '</div>'
-    st.markdown(swatch_html, unsafe_allow_html=True)
-    st.write(THEMES[sel].get('desc',''))
-    if sel != st.session_state['theme']:
-        st.session_state['theme'] = sel
-        # 테마 변경 시 즉시 CSS를 주입하여 사용자가 새 테마를 바로 보도록 함
-        try:
-            fn = globals().get('_inject_theme_css', None)
-            if callable(fn):
-                fn(sel)
-        except Exception:
-            logger.debug("_inject_theme_css failed on immediate apply")
-        rerun_fn = getattr(st, 'experimental_rerun', None)
-        if callable(rerun_fn):
-            try:
-                rerun_fn()
-            except Exception:
-                logger.debug("experimental_rerun failed on theme change")
-        else:
-            try:
-                st.stop()
-            except Exception:
-                pass
-
-
 def _inject_theme_css(mode: str = 'Light (기본)'):
     # mode에 따라 팔레트 선택
     theme = THEMES.get(mode, THEMES['Light (기본)'])
@@ -414,6 +377,32 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         st.markdown(css, unsafe_allow_html=True)
     except Exception:
         pass
+
+# 사이드바에서 테마 선택 + 스와치 표시
+with st.sidebar.expander('테마', expanded=True):
+    theme_keys = list(THEMES.keys())
+    # 라디오를 session_state 'theme' 키에 바인딩합니다. Streamlit은 위젯 클릭 시 자동으로 재실행하므로
+    # 별도의 experimental_rerun은 필요하지 않습니다.
+    default_idx = theme_keys.index(st.session_state.get('theme', theme_keys[0])) if st.session_state.get('theme') in theme_keys else 0
+    st.radio('테마 선택', theme_keys, index=default_idx, key='theme')
+    sel = st.session_state.get('theme', theme_keys[0])
+
+    # 스와치: 작은 박스들로 팔레트 미리보기
+    pal = THEMES[sel]['palette']
+    swatch_html = '<div style="display:flex;gap:6px;margin-top:8px;align-items:center">'
+    # 주요 색상들(배경/카드/텍스트/액센트)
+    for k in ['bg','card_bg','text','accent']:
+        if k in pal:
+            swatch_html += f"<div style=\"width:36px;height:24px;border-radius:6px;background:{pal[k]};border:1px solid rgba(0,0,0,0.06)\" title=\"{k}\"></div>"
+    swatch_html += '</div>'
+    st.markdown(swatch_html, unsafe_allow_html=True)
+    st.write(THEMES[sel].get('desc',''))
+
+    # 라디오 클릭으로 session_state['theme']가 갱신되며 Streamlit이 재실행됩니다. 이 렌더 주기에서 바로 CSS를 주입합니다.
+    try:
+        _inject_theme_css(sel)
+    except Exception:
+        logger.debug("_inject_theme_css failed on immediate apply")
 
 # 실제로 주입
 _inject_theme_css(st.session_state.get('theme','Light (기본)'))
