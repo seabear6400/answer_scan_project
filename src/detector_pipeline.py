@@ -625,18 +625,20 @@ def detect_pipeline(input_dir: str, output_dir: str,
     for f in files:
         src = os.path.join(input_dir, f)
         if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
-            # blank_answers에는 파일명(확장자 제외)이 '2'로 끝나는 파일만 넣는다
-            name_wo_ext = os.path.splitext(f)[0]
-            if name_wo_ext.endswith('2'):
-                try:
-                    shutil.copy2(src, os.path.join(bdir, f))
-                except Exception as e:
-                    warnings.warn(f"Failed to copy blank answer {f}: {e}")
-            else:
-                # 빈칸으로 감지되었지만 파일명이 '*2'가 아니면 복사하지 않음
-                pass
+            # 빈칸으로 감지된 파일은 파일명 규칙과 상관없이 모두 blank_answers로 복사
+            dst = os.path.join(bdir, f)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+            except Exception as e:
+                warnings.warn(f"Failed to copy blank answer {f}: {e}")
         elif f not in grouped_set:
-            shutil.copy2(src, os.path.join(okdir, f))
+            dst = os.path.join(okdir, f)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+            except Exception as e:
+                warnings.warn(f"Failed to copy ok file {f}: {e}")
 
     # Artifacts (덮어쓰기)
     try:
