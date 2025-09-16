@@ -624,14 +624,20 @@ def detect_pipeline(input_dir: str, output_dir: str,
     grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
     for f in files:
         src = os.path.join(input_dir, f)
+        # 파일명(확장자 제외) 끝 문자에 따라 빈칸 파일의 최종 분류를 조정
+        name_wo_ext = os.path.splitext(f)[0]
         if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
-            # 빈칸으로 감지된 파일은 파일명 규칙과 상관없이 모두 blank_answers로 복사
-            dst = os.path.join(bdir, f)
+            # 기본 동작: blank_answers로 복사
+            # 단, 파일명 끝이 '1'이면 blank로 감지되어도 ok로 보관
+            if name_wo_ext.endswith('1'):
+                dst = os.path.join(okdir, f)
+            else:
+                dst = os.path.join(bdir, f)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             try:
                 shutil.copy2(src, dst)
             except Exception as e:
-                warnings.warn(f"Failed to copy blank answer {f}: {e}")
+                warnings.warn(f"Failed to copy file {f} (dst={dst}): {e}")
         elif f not in grouped_set:
             dst = os.path.join(okdir, f)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -862,19 +868,28 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
     for f in files:
         src = path_map[f]
+        name_wo_ext = os.path.splitext(f)[0]
         if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
-            # blank_answers에는 파일명(확장자 제외)이 '2'로 끝나는 파일만 넣는다
-            name_wo_ext = os.path.splitext(f)[0]
+            # 기본적으로 blank_answers에는 '*2'로 끝나는 파일만 넣도록 하되,
+            # 파일명 끝이 '1'이면 blank로 감지되어도 ok로 분류합니다.
             if name_wo_ext.endswith('2'):
                 try:
                     shutil.copy2(src, os.path.join(bdir, f))
                 except Exception as e:
                     warnings.warn(f"Failed to copy blank answer {f}: {e}")
+            elif name_wo_ext.endswith('1'):
+                try:
+                    shutil.copy2(src, os.path.join(okdir, f))
+                except Exception as e:
+                    warnings.warn(f"Failed to copy reclassified ok file {f}: {e}")
             else:
-                # 빈칸으로 감지되었지만 파일명이 '*2'가 아니면 복사하지 않음
+                # 그 외의 빈칸 감지 파일은 원래대로 복사하지 않음
                 pass
         elif f not in grouped_set:
-            shutil.copy2(src, os.path.join(okdir, f))
+            try:
+                shutil.copy2(src, os.path.join(okdir, f))
+            except Exception as e:
+                warnings.warn(f"Failed to copy ok file {f}: {e}")
 
     try:
         np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
