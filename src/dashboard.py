@@ -316,34 +316,6 @@ try:
         st.sidebar.success("결과 파일이 확인되었습니다.")
 except Exception:
     pass
-# 캐시 새로고침: 파일/폴더 변경이 반영되지 않을 때 사용
-try:
-    if st.sidebar.button("새로고침 (캐시 재생성)"):
-    # Streamlit 데이터 캐시를 지우고 베이스네임 맵을 재생성한 뒤 재실행합니다
-        try:
-            st.cache_data.clear()
-        except Exception:
-            logger.debug("st.cache_data.clear() failed or unsupported")
-        try:
-            # cache_buster 타임스탬프로 강제 재생성
-            BASENAME_MAP = build_basename_map(OUTPUT_DIR, cache_buster=time.time())
-        except Exception:
-            logger.exception("Failed to rebuild BASENAME_MAP")
-        # 안전한 재실행: Streamlit 버전에 experimental_rerun이 없을 수 있으므로 대체 처리
-        rerun_fn = getattr(st, 'experimental_rerun', None)
-        if callable(rerun_fn):
-            try:
-                rerun_fn()
-            except Exception:
-                logger.debug("experimental_rerun failed")
-        else:
-            # 대체: 중단 후 사용자가 새로고침하도록 유도
-            try:
-                st.stop()
-            except Exception:
-                pass
-except Exception:
-    pass
 # ===== 테마 선택: 여러 디자이너 친화적 테마 제공 =====
 THEMES = {
     'Light (기본)': {

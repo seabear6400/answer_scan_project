@@ -1,2 +1,2 @@
 timestamp,platform,n_images,mean_size,mean_w,mean_h,batch_size,num_workers,use_ocr,use_lpips,embed_backend,gpu,mem_total,cpu_count,meta_s,model_load_s,embed_forward_s,embed_s,ann_s,io_s,total_s
-1758172466,Windows,20,1771203.2,1757.2,2481.75,64,0,0,0,dinov2,0,16973877248,12,3.1114,0.2601,2.1185,2.3786,0.0037,0.0979,5.5958
+1758172645,Windows,20,1771203.2,1757.2,2481.75,64,0,0,0,dinov2,0,16973877248,12,2.6323,0.2044,1.6307,1.8351,0.0017,0.0811,4.5565
