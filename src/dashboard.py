@@ -14,7 +14,7 @@ from typing import Tuple, List, Dict, Optional
 
 import streamlit as st
 import polars as pl
-from PIL import Image
+from PIL import Image, ImageDraw
 import numpy as np
 import pandas as pd
 import cv2
@@ -90,9 +90,51 @@ def _file_mtime(path: str) -> float:
     except Exception: return 0.0
 
 def _safe_image_open(path: str) -> Image.Image:
-    img = Image.open(path)
-    img.load()
-    return img
+    """Safely open an image path and return a PIL.Image.
+    - Try PIL.Image.open first.
+    - If that fails, try cv2.imread -> PIL conversion.
+    - If all fail, return a small placeholder image so the UI doesn't crash.
+    """
+    try:
+        img = Image.open(path)
+        img.load()
+        # normalize mode to RGB for consistent downstream handling
+        if img.mode not in ("RGB", "RGBA", "L"):
+            img = img.convert("RGB")
+        return img
+    except Exception as e:
+        logger.debug(f"_safe_image_open: PIL failed for {path}: {e}")
+    # PIL failed, try cv2 fallback
+    try:
+        arr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if arr is not None:
+            # convert BGR(A) -> RGB(A)
+            if len(arr.shape) == 3:
+                if arr.shape[2] == 4:
+                    b, g, r, a = cv2.split(arr)
+                    arr = cv2.merge((r, g, b, a))
+                    pil = Image.fromarray(arr)
+                else:
+                    arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                    pil = Image.fromarray(arr)
+            else:
+                pil = Image.fromarray(arr)
+            return pil
+    except Exception as e:
+        logger.debug(f"_safe_image_open: cv2 fallback failed for {path}: {e}")
+
+    # final fallback: create a placeholder image so UI keeps running
+    try:
+        w, h = 640, 480
+        ph = Image.new("RGB", (w, h), (220, 220, 220))
+        draw = ImageDraw.Draw(ph)
+        basename = os.path.basename(path) if path else "unknown"
+        txt = f"UNREADABLE\n{basename}"
+        draw.text((8, 8), txt, fill=(80, 80, 80))
+        return ph
+    except Exception:
+        # if even placeholder creation fails, re-raise original error
+        raise
 
 # ===== 캐싱: 데이터 읽기 =====
 @st.cache_data(show_spinner=False)
@@ -312,8 +354,7 @@ try:
         pass
     if missing:
         st.sidebar.warning("결과 파일 누락: " + ", ".join(missing) + ". 먼저 파이프라인을 실행하세요.")
-    else:
-        st.sidebar.success("결과 파일이 확인되었습니다.")
+
 except Exception:
     pass
 # ===== 테마 선택: 여러 디자이너 친화적 테마 제공 =====
@@ -331,6 +372,13 @@ THEMES = {
         'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','secondary':'#4b6b64','accent':'#39b89f','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
     }
 }
+
+if 'theme' not in st.session_state:
+    st.session_state['theme'] = 'Light (기본)'
+def _inject_theme_css(mode: str = 'Light (기본)'):
+    # mode에 따라 팔레트 선택
+    theme = THEMES.get(mode, THEMES['Light (기본)'])
+    pal = theme['palette']
 
 if 'theme' not in st.session_state:
     st.session_state['theme'] = 'Light (기본)'
@@ -366,24 +414,19 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     a, .stButton>button, .css-18e3th9 a, .css-18e3th9 button {{ color: {accent} !important; }}
     .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
     img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
-
-    /* ===== Fix for selectbox / dropdown / input backgrounds that appear solid black in some themes ===== */
-    /* Streamlit uses .stSelectbox, .stMultiSelect, .stForm and various internal classes; target common patterns */
-    div[role="listbox"], .stSelectbox > div, .stMultiSelect > div, .stTextInput > div, .stTextArea > div, .stNumberInput > div {{ background-color: {card_bg} !important; color: {text} !important; border: 1px solid {card_border} !important; border-radius: 8px !important; }}
-    .stSelectbox select, .stMultiSelect select, select, .stTextInput input, .stTextArea textarea {{ background-color: {card_bg} !important; color: {text} !important; border: 1px solid {card_border} !important; }}
-    /* Dropdown caret / arrows sometimes sit on dark bg; ensure contrast */
-    .stSelectbox .css-1n0xqj3, .stSelectbox .css-1x8cf1d {{ background-color: transparent !important; color: {text} !important; }}
-
-    /* Buttons: ensure background uses accent for primary buttons but cards remain coherent */
-    .stButton>button {{ background-color: {accent} !important; color: white !important; border: none !important; box-shadow: none !important; }}
-    .stButton>button:hover {{ filter: brightness(0.95); }}
-
-    /* Ensure dropdown menus / options use card_bg and not default black */
-    .stSelectbox div[role="option"], .stMultiSelect div[role="option"], .st-Selectbox div[role="option"] {{ background-color: {card_bg} !important; color: {text} !important; }}
-
-    /* Small helper: forms and widgets inside sidebar use sidebar_bg but card-like inputs should blend with card_bg */
-    [data-testid="stSidebar"] .stSelectbox > div, [data-testid="stSidebar"] .stTextInput > div {{ background-color: {sidebar_bg} !important; border: 1px solid rgba(0,0,0,0.06) !important; }}
-
+    /* 검색 입력 상자 강조: 사용자 요청으로 가독성 향상용 추가 스타일입니다. */
+    input[type="text"], .stTextInput>div>div>input {{
+        background-color: rgba(255,255,255,0.9) !important;
+        border: 1.5px solid {accent} !important;
+        box-shadow: 0 4px 10px rgba(11,102,255,0.08) !important;
+        padding: 10px 12px !important;
+        border-radius: 10px !important;
+        font-size: 14px !important;
+        color: {text} !important;
+    }}
+    /* 사이드바 내 입력과 플레이스홀더 대비 개선 */
+    [data-testid="stSidebar"] input[type="text"] {{ background-color: rgba(255,255,255,0.92) !important; }}
+    input::placeholder, textarea::placeholder {{ color: rgba(0,0,0,0.38) !important; font-weight: 500 !important; }}
     </style>
     """
     try:
@@ -563,22 +606,7 @@ def _cached_highlight_path(a_path: str, b_path: str, color: Tuple[int, int, int]
     return _write_cached_image(arr, dst, fmt='PNG')
 
 
-def _create_fade_gif(a_path: str, b_path: str, steps: int = 20, duration_ms: int = 50) -> Optional[str]:
-    key = _comp_cache_key(a_path, b_path, 'fade_gif', {'steps': steps, 'dur': duration_ms})
-    dst = os.path.join(THUMB_DIR, f"cmp_fade_anim_{key}.gif")
-    if os.path.exists(dst) and _file_mtime(dst) >= max(_file_mtime(a_path), _file_mtime(b_path)):
-        return dst
-    try:
-        frames = []
-        for i in range(steps + 1):
-            alpha = i / steps
-            arr = _blend_images_rgb(a_path, b_path, alpha=alpha)
-            frames.append(Image.fromarray(arr))
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        frames[0].save(dst, format='GIF', save_all=True, append_images=frames[1:], duration=duration_ms, loop=0)
-        return dst
-    except Exception:
-        return None
+# GIF creation support removed: Fade now uses static blend only via _cached_blend_path/_blend_images_rgb
 
 # ===== 모달(미리보기) 지원: Streamlit 1.34+ =====
 _HAS_DIALOG = hasattr(st, "dialog")
@@ -705,9 +733,21 @@ with tab2:
             rpt = df[df['상태'] == '유사 후보'] if isinstance(df, pd.DataFrame) else pd.DataFrame()
             for _, row in rpt.iterrows():
                 a, b = str(row.get('파일1', '')), str(row.get('파일2', ''))
+                # report '유사도' 컬럼을 읽어 사이드바의 min_sim 이하 항목은 후보에서 제외
+                try:
+                    sim = float(row.get('유사도', 0.0))
+                except Exception:
+                    sim = float(row.get('유사도', 0.0) or 0.0)
+                try:
+                    # min_sim은 사이드바 위젯에서 정의되며 문자열/숫자 모두 올 수 있음
+                    if float(sim) < float(locals().get('min_sim', 0)):
+                        continue
+                except Exception:
+                    # 변환 실패 시 필터링을 적용하지 않음
+                    pass
                 pa = resolve_image_path(a) or os.path.join(OUTPUT_DIR, a)
                 pb = resolve_image_path(b) or os.path.join(OUTPUT_DIR, b)
-                report_dups.append((pa, pb, float(row.get('유사도', 0.0))))
+                report_dups.append((pa, pb, sim))
     except Exception:
         report_dups = []
 
@@ -815,18 +855,32 @@ with tab2:
                 )
 
         # Parameter controls per mode. 'Compare' shows no extra controls.
+        # Ensure these variables exist even if a widget isn't rendered (prevents NameError on reruns)
+        # Provide sensible defaults; Streamlit will override when widgets are shown.
+        if 'diff_blur_top' not in st.session_state:
+            st.session_state['diff_blur_top'] = 3
+        if 'diff_thresh_top' not in st.session_state:
+            st.session_state['diff_thresh_top'] = 10
+        if 'hl_color_top' not in st.session_state:
+            st.session_state['hl_color_top'] = 'Yellow'
+        if 'hl_thresh_top' not in st.session_state:
+            st.session_state['hl_thresh_top'] = 20
+        # Fade (blend) defaults
+        if 'fade_alpha' not in st.session_state:
+            st.session_state['fade_alpha'] = 0.5
+
+        # Render mode-specific widgets (they will update session_state keys)
         if cmp_mode_top == "Compare":
             # No parameters for simple side-by-side compare
             pass
-        elif cmp_mode_top == "Fade":
-            alpha_top = st.slider("Fade: 앞쪽 이미지 투명도 (A)", 0.0, 1.0, 0.5, 0.01, key="alpha_top")
-            play_anim = st.checkbox("Play fade animation", key="play_fade_anim")
         elif cmp_mode_top == "Difference":
-            diff_blur_top = st.slider("Difference: Blur 강도(odd kernel)", 1, 11, 3, 2, key="diff_blur_top")
-            diff_thresh_top = st.slider("Difference: 강조 임계값", 0, 255, 10, 1, key="diff_thresh_top")
+            diff_blur_top = st.slider("Difference: Blur 강도(odd kernel)", 1, 11, st.session_state.get('diff_blur_top', 3), 2, key="diff_blur_top")
+            diff_thresh_top = st.slider("Difference: 강조 임계값", 0, 255, st.session_state.get('diff_thresh_top', 10), 1, key="diff_thresh_top")
+        elif cmp_mode_top == "Fade":
+            fade_alpha = st.slider("Fade: A 이미지 알파", 0.0, 1.0, float(st.session_state.get('fade_alpha', 0.5)), 0.05, key='fade_alpha')
         elif cmp_mode_top == "Highlighter":
-            hl_color_top = st.selectbox("Highlighter 색상", ["Yellow", "Red", "Lime", "Cyan"], index=0, key="hl_color_top")
-            hl_thresh_top = st.slider("Highlighter: 임계값", 1, 100, 20, 1, key="hl_thresh_top")
+            hl_color_top = st.selectbox("Highlighter 색상", ["Yellow", "Red", "Lime", "Cyan"], index=["Yellow", "Red", "Lime", "Cyan"].index(st.session_state.get('hl_color_top', 'Yellow')), key="hl_color_top")
+            hl_thresh_top = st.slider("Highlighter: 임계값", 1, 100, st.session_state.get('hl_thresh_top', 20), 1, key="hl_thresh_top")
 
         if len(sel_exist_top) == 1:
             bigp = make_display_image(sel_exist_top[0], size=max(1400, group_large_px), fmt=disp_fmt, quality=disp_quality)
@@ -844,25 +898,7 @@ with tab2:
                     st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
             else:
                 try:
-                    # For non-Compare modes, create or retrieve a single merged image and display it full-width
-                    if cmp_mode_top == "Fade":
-                        cached = _cached_blend_path(a_path, b_path, alpha=alpha_top)
-                        if play_anim:
-                            gif = _create_fade_gif(a_path, b_path, steps=24, duration_ms=40)
-                            if gif and os.path.exists(gif):
-                                st.image(gif, caption=f"Fade animation — {os.path.basename(b_path)}", use_column_width=True)
-                            elif cached:
-                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
-                            else:
-                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
-                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
-                        else:
-                            if cached:
-                                st.image(cached, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
-                            else:
-                                blended = _blend_images_rgb(a_path, b_path, alpha=alpha_top)
-                                st.image(blended, caption=f"Fade (A alpha={alpha_top:.2f})", use_container_width=True)
-                    elif cmp_mode_top == "Difference":
+                    if cmp_mode_top == "Difference":
                         cached = _cached_diff_path(a_path, b_path, blur=diff_blur_top, thresh=diff_thresh_top)
                         if cached:
                             st.image(cached, caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
@@ -878,15 +914,27 @@ with tab2:
                             diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
                             heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
                             st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption=f"Difference (thresh={diff_thresh_top})", use_container_width=True)
+                    elif cmp_mode_top == "Fade":
+                        fade_alpha_val = float(st.session_state.get('fade_alpha', 0.5))
+                        blendp = _cached_blend_path(a_path, b_path, alpha=fade_alpha_val)
+                        if blendp:
+                            st.image(blendp, caption=f"Fade (alpha={fade_alpha_val:.2f})", use_container_width=True)
+                        else:
+                            arr = _blend_images_rgb(a_path, b_path, alpha=fade_alpha_val)
+                            st.image(arr, caption=f"Fade (alpha={fade_alpha_val:.2f})", use_container_width=True)
+
                     else:
                         color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
-                        col_bgr = color_map.get(hl_color_top, (0, 255, 255))
-                        cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
+                        # read from session_state with sensible defaults to avoid NameError
+                        hl_color = st.session_state.get('hl_color_top', 'Yellow')
+                        hl_thresh = st.session_state.get('hl_thresh_top', 20)
+                        col_bgr = color_map.get(hl_color, (0, 255, 255))
+                        cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh)
                         if cached:
-                            st.image(cached, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                            st.image(cached, caption=f"Highlighter ({hl_color}, thresh={hl_thresh})", use_container_width=True)
                         else:
-                            highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh_top)
-                            st.image(highlighted, caption=f"Highlighter ({hl_color_top}, thresh={hl_thresh_top})", use_container_width=True)
+                            highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh)
+                            st.image(highlighted, caption=f"Highlighter ({hl_color}, thresh={hl_thresh})", use_container_width=True)
                 except Exception as e:
                     st.info(f"비교 렌더 실패: {e}")
 
@@ -1086,9 +1134,9 @@ with tab4:
     colq1, colq2, colq3 = st.columns([1.3, 1.1, 1.6])
     with colq1:
         quality_profile = st.radio(
-            "화질 프로파일", ["빠름", "균형", "선명", "사용자지정"],
+            "화질 프로파일", ["빠름", "균형", "선명"],
             index=1, horizontal=True,
-            help="빠름(512px), 균형(1024px), 선명(1600px), 사용자지정(슬라이더)"
+            help="빠름(512px), 균형(1024px), 선명(1600px)"
         )
     with colq2:
         render_mode = st.radio(
