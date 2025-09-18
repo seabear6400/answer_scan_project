@@ -5,6 +5,9 @@ import threading
 import shutil
 import stat
 from typing import Optional, Tuple
+import time
+import subprocess
+import os
 
 # 가능한 한 일찍 백그라운드 스레드에서 tkinter를 예열하여
 # 폴더 선택 대화상자가 요청될 때 더 빠르게 열리도록 합니다.
@@ -95,6 +98,9 @@ def main():
     except Exception:
         print("파일 선택 UI를 초기화하지 못했습니다.")
         sel = ()
+    # 사용자가 폴더를 선택한 직후의 타임스탬프를 기록합니다.
+    # (요구사항: "폴더 선택 시점 → 대시보드 준비 완료"의 실제 경과를 측정)
+    selection_ts = time.time() if sel else None
     # 안전한 초기화: output 하위의 기존 내용을 삭제(읽기전용 파일 처리)한 뒤 재생성합니다.
     def _handle_remove_readonly(func, path, exc_info):
         try:
@@ -161,22 +167,7 @@ def main():
         roi_ratio=tuple(args.roi),
     )
 
-    # 간단한 규칙 기반/샘플링 예측 출력
-    try:
-        est = None
-        try:
-            est = __import__('detector_pipeline').estimate_pipeline_time(sel, cfg, recursive=args.recursive)
-        except Exception:
-            # 패키지 상대 임포트로 불러온 경우
-            from . import detector_pipeline as _dp
-            est = _dp.estimate_pipeline_time(sel, cfg, recursive=args.recursive)
-        if est:
-            total = est.get('total_s', 0.0)
-            n = est.get('n_images', 0)
-            notes = est.get('notes', '')
-            print(f"예상: 이미지 {n}장, 총 약 {total:.1f}초 ({notes})")
-    except Exception:
-        pass
+    # (예상 시간 계산 코드는 제거됨 — 요청에 따라 출력에서 제외합니다)
 
     # progress callback: 콘솔에 단계/퍼센트/메시지를 출력
     def progress_printer(stage: str, pct: float = 0.0, msg: str = ""):
@@ -186,6 +177,36 @@ def main():
             pct_s = str(pct)
         print(f"[진행] {stage} | {pct_s} | {msg}")
 
+    # 사전 검사: 선택된 폴더에 지원 이미지 확장자가 있는지 확인합니다.
+    exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+    detected = []
+    try:
+        if args.recursive:
+            for root, _dirs, files in os.walk(sel):
+                for fn in files:
+                    if fn.lower().endswith(exts):
+                        detected.append(os.path.join(root, fn))
+        else:
+            for fn in sorted(os.listdir(sel)):
+                if fn.lower().endswith(exts):
+                    detected.append(os.path.join(sel, fn))
+    except Exception as e:
+        print(f"폴더 검사 중 예외: {e}")
+
+    if not detected:
+        print("오류: 선택한 폴더에 지원 이미지 파일이 없습니다.")
+        print(f"선택 폴더: {sel}")
+        try:
+            entries = sorted(os.listdir(sel))[:20]
+            print(f"폴더 상위 항목(최대 20개): {entries}")
+        except Exception:
+            pass
+        print("확인 및 해결:")
+        print(" - 이미지 확장자가 jpg/png/tif 등인지 확인하세요.")
+        print(" - OneDrive가 파일을 '온라인 전용'으로 만들었는지 확인하세요(파일을 로컬로 동기화).")
+        print(" - 하위 폴더의 이미지를 포함하려면 --recursive 옵션을 사용하세요.")
+        return
+
     detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer)
     print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
@@ -193,11 +214,38 @@ def main():
     # input_dir 인자도 함께 전달하여 사용자가 선택한 입력 폴더가 대시보드에서 인식되도록 함
     cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--",
            f"--output_dir={args.output_dir}"]
+    # 기준 시점: 사용자가 폴더를 선택한 시점을 우선 사용, 없으면 지금부터 측정
+    start_to_dashboard = selection_ts or time.time()
+
+    def _wait_streamlit_ready_and_report(proc, timeout: int = 90):
+        ready_patterns = ("Local URL:", "Network URL:", "You can now view your Streamlit app", "Running on")
+        t0 = time.time()
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                print(f"[streamlit] {line}")
+                if any(p in line for p in ready_patterns):
+                    elapsed = time.time() - start_to_dashboard
+                    print(f"🎉 대시보드 준비 완료 (선택→표시): {elapsed:.2f}s")
+                    return elapsed
+                if time.time() - t0 > timeout:
+                    print(f"⚠️ Streamlit 준비 대기 타임아웃({timeout}s)")
+                    return None
+        except Exception as e:
+            print(f"Streamlit 모니터링 예외: {e}")
+            return None
+
     try:
-        if args.detach and os.name == 'nt':   
+        if args.detach and os.name == 'nt':
+            # 윈도우에서 새 창으로 띄우는 경우에는 stdout 캡처가 어렵고 start 명령으로 즉시 반환됩니다.
             subprocess.Popen(["cmd", "/c", "start"] + cmd)
+            print(f"대시보드 프로세스 시작 (detach). 경과(근사): {time.time() - start_to_dashboard:.2f}s")
         else:
-            subprocess.run(cmd)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
+            _wait_streamlit_ready_and_report(proc, timeout=90)
     except KeyboardInterrupt:
         print("중단: 사용자가 실행을 취소했습니다.")
     except Exception as e:

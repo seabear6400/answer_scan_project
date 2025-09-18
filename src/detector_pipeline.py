@@ -25,28 +25,28 @@ from torchvision.models import resnet18, ResNet18_Weights
 import concurrent.futures
 import hashlib
 
-# Optional: timm (DINOv2)
+# 선택적: timm (DINOv2)
 try:
     import timm
     _HAS_TIMM = True
 except Exception:
     _HAS_TIMM = False
 
-# Optional: FAISS
+# 선택적: FAISS
 try:
     import faiss  # type: ignore
     _HAS_FAISS = True
 except Exception:
     _HAS_FAISS = False
 
-# Optional: HNSW
+# 선택적: HNSW
 try:
     import hnswlib
     _HAS_HNSW = True
 except Exception:
     _HAS_HNSW = False
 
-# Optional: LPIPS
+# 선택적: LPIPS
 try:
     import lpips
     
@@ -54,14 +54,14 @@ try:
 except Exception:
     _HAS_LPIPS = False
 
-# Optional: PDQ hash
+# 선택적: PDQ 해시
 try:
     import pdqhash  # may be missing on some platforms
     _HAS_PDQ = True
 except Exception:
     _HAS_PDQ = False
 
-# Optional: OCR + RapidFuzz
+# 선택적: OCR + RapidFuzz
 try:
     from paddleocr import PaddleOCR
     _HAS_OCR = True
@@ -74,14 +74,14 @@ try:
 except Exception:
     _HAS_RAPIDFUZZ = False
 
-# Optional: Sauvola
+# 선택적: Sauvola
 try:
     from skimage.filters import threshold_sauvola
     _HAS_SAUVOLA = True
 except Exception:
     _HAS_SAUVOLA = False
 
-# Optional: NetworkX (Blossom matching)
+# 선택적: NetworkX (Blossom 매칭)
 try:
     import networkx as nx
     _HAS_NX = True
@@ -90,7 +90,7 @@ except Exception:
 
 from sklearn.neighbors import NearestNeighbors
 
-# module logger
+# 모듈 로거
 import logging
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -99,46 +99,46 @@ if not logger.handlers:
 
 @dataclass
 class DetectorConfig:
-    # Backends
+    # 백엔드
     embed_backend: str = "dinov2"  # or resnet18
     ann_backend: str = "auto"       # auto/brute/faiss/hnsw
 
-    # ANN params
+    # ANN 파라미터
     k: int = 20
     hnsw_M: int = 32
     hnsw_efC: int = 200
     hnsw_efS: int = 64
 
-    # Prefilters
+    # 사전 필터 설정
     prefilter: str = "phash"        # phash/pdq/both
     phash_thresh: int = 10
     pdq_thresh: int = 80
     density_diff_thresh: float = 0.15
 
-    # Similarity thresholds
+    # 유사도 임계값
     cnn_thresh: float = 0.99
     suspect_low: float = 0.95
 
-    # Blank detection
+    # 공백(빈칸) 감지
     blank_method: str = "sauvola"   # otsu/sauvola
     blank_density_thresh: float = 0.02
 
-    # Re-ranking / OCR
+    # 재정렬 / OCR
     use_lpips: bool = False
     lpips_thresh: float = 0.2
     use_ocr: bool = False
     text_sim_thresh: float = 0.85
 
-    # Alignment(현재 그룹핑엔 미사용, main.py 호환용)
+    # 정렬(Alignment) (현재 그룹핑에 사용되지 않음, main.py 호환용)
     use_alignment: bool = False
 
-    # Embedding
+    # 임베딩 설정
     batch_size: int = 64
     num_workers: int = 0
     roi_ratio: Tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)
 
 
-# ---------------------- Performance logging utilities ----------------------
+# ---------------------- 성능 로깅 유틸리티 ----------------------
 import csv
 import platform
 try:
@@ -149,9 +149,9 @@ except Exception:
 
 
 def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Dict[str, float]) -> Dict:
-    """Collect a small set of features about the run for perf logging.
+    """실행에 대한 간단한 특성(피처)을 수집하여 성능 로깅에 사용합니다.
 
-    Returns a flat dict suitable for CSV append.
+    CSV에 바로 추가할 수 있는 평탄한 딕셔너리를 반환합니다.
     """
     sizes = []
     widths = []
@@ -192,7 +192,7 @@ def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Di
             feat.update({"mem_total": 0, "cpu_count": int(os.cpu_count() or 0)})
     except Exception:
         feat.update({"mem_total": 0, "cpu_count": int(os.cpu_count() or 0)})
-    # add measured times
+    # 측정된 시간들을 추가
     feat.update(times)
     return feat
 
@@ -213,7 +213,7 @@ def _append_perf_csv(output_dir: str, row: Dict):
         logger.warning("perf_runs.csv 기록 실패")
 
 
-# -------------------------- ROI / Helpers --------------------------
+# -------------------------- ROI / 헬퍼 --------------------------
 def crop_roi(img: Image.Image, roi_ratio: Tuple[float, float, float, float]):
     w, h = img.size
     l, t, r, b = roi_ratio
@@ -240,7 +240,7 @@ def read_gray(path: str):
         return None
 
 
-# -------------------------- Prefilters ------------------------------
+# -------------------------- 사전 필터 ------------------------------
 def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> imagehash.ImageHash:
     try:
         img = Image.open(path)
@@ -291,7 +291,7 @@ def ink_density(path: str, roi_ratio: Tuple[float, float, float, float], method:
     return float(np.count_nonzero(binary)) / binary.size
 
 
-# -------------------------- Dataset / Embedding ----------------------
+# -------------------------- 데이터셋 / 임베딩 ----------------------
 class ImgDataset(Dataset):
     def __init__(self, paths: List[str], roi_ratio: Tuple[float, float, float, float], backend: str):
         self.paths = paths
@@ -354,7 +354,12 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=(device.type == "cuda")
     )
+    # 모델 로드 시간을 별도로 측정하여 시작업(가중치 로드) 비용과
+    # 이미지당 전방 전달 비용을 분리해 진단할 수 있도록 합니다.
+    t_model0 = time.time()
     model = load_model(device, backend)
+    t_model1 = time.time()
+    model_load_s = float(t_model1 - t_model0)
 
     embs = []
     ordered_paths = []
@@ -373,7 +378,7 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
             except Exception as e:
                 logger.warning(f"임베딩 배치 처리 실패(일부 배치 건너뜀): {e}")
                 continue
-    # Stack collected outputs; if none, attempt to infer model output dimensionality
+    # 수집된 출력들을 스택으로 쌓습니다. 없으면 모델 출력 차원 수를 추정합니다.
     if len(embs):
         embs = np.vstack(embs)
     else:
@@ -388,10 +393,10 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         except Exception:
             D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
         embs = np.zeros((0, D_out), dtype=np.float32)
-    return embs, ordered_paths
+    return embs, ordered_paths, model_load_s
 
 
-# -------------------------- ANN building -----------------------------
+# -------------------------- ANN 구성 -----------------------------
 def l2_normalize(mat: np.ndarray) -> np.ndarray:
     # 빈 행렬 처리
     if mat.size == 0:
@@ -422,7 +427,7 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
         else:
             backend = "brute"
 
-    # For cosine-based backends normalize once
+    # 코사인(유사도) 기반 백엔드의 경우 한 번 정규화합니다.
     use_cosine = backend in ("faiss", "hnsw", "brute")
     mat = embs.astype(np.float32)
     if use_cosine and mat.size:
@@ -430,7 +435,7 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
 
     if backend == "faiss" and _HAS_FAISS:
         xb = mat
-        index = faiss.IndexFlatIP(D)  # inner product == cosine on normalized vectors
+        index = faiss.IndexFlatIP(D)  # 내적 == 정규화된 벡터에서의 코사인 유사도
         index.add(xb)
         sims, idxs = index.search(xb, min(k + 1, N))
         return idxs, sims, "faiss"
@@ -451,7 +456,7 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
     return idxs, sims, "brute"
 
 
-# -------------------------- LPIPS / OCR -------------------
+# -------------------------- LPIPS / OCR (선택) -------------------
 _lpips_model = None
 def lpips_distance(a_path: str, b_path: str) -> Optional[float]:
     global _lpips_model
@@ -501,7 +506,7 @@ def text_similarity(a: str, b: str) -> float:
     return token_set_ratio(a, b) / 100.0
 
 
-# -------------------------- Utils -------------------
+# -------------------------- 유틸 -------------------
 def _handle_remove_readonly(func, path, exc_info):
     # 읽기 전용 파일도 강제 삭제
     os.chmod(path, stat.S_IWRITE)
@@ -547,7 +552,7 @@ def _safe_recreate_dir(path: str, retries: int = 3, delay: float = 0.5):
     return False
 
 
-# ---------------------- artifacts / parallel helpers ----------------------
+# ---------------------- 아티팩트 / 병렬 헬퍼 ----------------------
 def _max_mtime(paths: List[str]) -> float:
     try:
         return max(os.path.getmtime(p) for p in paths)
@@ -565,7 +570,7 @@ def _is_fresh(artifact_path: str, paths: List[str]) -> bool:
 
 
 def _metadata_worker(args):
-    # Worker executed in ThreadPoolExecutor for IO-bound metadata tasks
+    # IO 중심의 메타데이터 작업을 위해 ThreadPoolExecutor에서 실행되는 워커
     f, p, cfg = args
     ph = None
     pdq = None
@@ -593,7 +598,7 @@ def _metadata_worker(args):
     return f, ph, pdq, float(dens), txt
 
 
-# -------------------------- Main pipeline ------------------------------
+# -------------------------- 메인 파이프라인 ------------------------------
 def detect_pipeline(input_dir: str, output_dir: str,
                     config: Optional[DetectorConfig] = None,
                     filter_func: Optional[callable] = None,
@@ -655,7 +660,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     texts: Dict[str, str] = {}
 
     images_summary_path = os.path.join(output_dir, "images_summary.csv")
-    # If existing summary is fresh relative to input files, load densities to skip recompute
+    # 기존 요약 파일(images_summary.csv)이 최신이면 밀도 계산을 건너뛸 수 있도록 로드합니다
     if _is_fresh(images_summary_path, paths):
         try:
             img_df_prev = pd.read_csv(images_summary_path)
@@ -667,7 +672,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
         except Exception:
             pass
 
-    # Prepare worker args and run in ThreadPoolExecutor (IO-bound workloads)
+    # 워커 인자 준비 및 ThreadPoolExecutor에서 실행 (IO 바운드 작업)
     worker_args = [(f, p, cfg) for f, p in zip(files, paths)]
     # prefer explicit cfg.num_workers when set; otherwise scale reasonably for IO-bound
     if cfg.num_workers and cfg.num_workers > 0:
@@ -680,13 +685,13 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 phashes[f] = ph
             if pdqv is not None:
                 pdqs[f] = pdqv
-            # only override density if not loaded from fresh summary
+            # 새 요약에서 로드된 값이 없을 때만 density를 덮어씌움
             if f not in densities or densities.get(f, 0.0) == 0.0:
                 densities[f] = dens
             if txt:
                 texts[f] = txt
 
-    # persist images_summary.csv (density + blank flag) for faster subsequent runs
+    # images_summary.csv를 보존(밀도 + 빈칸 플래그)하여 이후 실행을 빠르게 함
     try:
         img_df = pd.DataFrame({
             "파일": files,
@@ -728,7 +733,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
             ordered_paths = None
 
     if embs is None:
-        embs, ordered_paths = compute_embeddings(paths, device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+        embs, ordered_paths, model_load_s = compute_embeddings(paths, device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
         try:
             np.save(emb_art, embs)
             with open(opaths_art, "w", encoding="utf-8") as fw:
@@ -769,11 +774,11 @@ def detect_pipeline(input_dir: str, output_dir: str,
     all_pair_records: List[Tuple[str, str, float]] = []
     confirmed_edges: List[Tuple[int, int, float]] = []
 
-    # gather all candidate pairs and confirmed edges across all rows
+    # 모든 행에서 후보 페어와 확인된 엣지를 수집
     for i in range(n):
         if idxs.shape[1] == 0:
             continue
-        for col in range(1, idxs.shape[1]):  # skip self
+    for col in range(1, idxs.shape[1]):  # self(자기 자신) 열은 건너뜀
             j = int(idxs[i, col])
             if j <= i:
                 continue
@@ -811,7 +816,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 if votes > 0:
                     confirmed = True
 
-            # confirmed 여부가 True이면 edges 목록에 추가
+            # confirmed가 True이면 엣지 목록에 추가
             if confirmed:
                 confirmed_edges.append((i, j, sim))
 
@@ -821,10 +826,10 @@ def detect_pipeline(input_dir: str, output_dir: str,
     groups: Dict[str, List[str]] = {}
     gid_counter = 1
     if confirmed_edges:
-        # union-find init only for nodes that appear
+    # 등장한 노드들만 대상으로 union-find 초기화
         parents: Dict[int, int] = {}
         def find(x: int) -> int:
-            # path compression
+            # 경로 압축
             while parents[x] != x:
                 parents[x] = parents[parents[x]]
                 x = parents[x]
@@ -835,18 +840,18 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 return
             parents[rb] = ra
 
-        # initialize parents
+    # 부모 테이블 초기화
         nodes = set()
         for u, v, _w in confirmed_edges:
             nodes.add(u); nodes.add(v)
         for node in nodes:
             parents[node] = node
 
-        # union all edges
+    # 모든 엣지에 대해 union 수행
         for u, v, _w in confirmed_edges:
             union(u, v)
 
-        # collect groups by root
+    # 루트 기준으로 그룹 수집
         comps: Dict[int, List[int]] = {}
         for node in nodes:
             root = find(node)
@@ -889,7 +894,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     df_pairs.to_csv(csv_path, index=False, encoding="utf-8-sig")
     pl.from_pandas(df_pairs).write_parquet(parquet_path)
 
-    # Image summary (density/blank)
+    # 이미지 요약(밀도/빈칸)
     img_df = pd.DataFrame({
         "파일": files,
         "밀도": [densities.get(f, 0.0) for f in files],
@@ -897,7 +902,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     })
     img_df.to_csv(os.path.join(output_dir, "images_summary.csv"), index=False, encoding="utf-8-sig")
 
-    # Copy grouped
+    # 그룹화된 파일 복사
     for gid, members in groups.items():
         gdir = os.path.join(output_dir, "grouped", gid)
         for m in members:
@@ -936,7 +941,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     t_io1 = time.time()
     _cb("save", 0.98, f"저장 완료 ({round(t_io1 - t_io0, 2)}s)")
 
-    # Artifacts (덮어쓰기)
+    # 아티팩트 저장(덮어쓰기)
     try:
         np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
         with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
@@ -945,11 +950,19 @@ def detect_pipeline(input_dir: str, output_dir: str,
         pass
 
     _cb("finalizing", 0.995, "최종 정리 중")
-    # Perf logging: collect times and append to CSV
+    # 성능 로깅: 시간 수집 및 CSV에 추가
     try:
+            # 임베딩이 캐시에서 로드된 경우 model_load_s가 설정되지 않을 수 있으므로 0으로 디폴트
+        model_load_s_val = float(locals().get('model_load_s', 0.0))
+    # embed_forward_s: 전방 전달에 소요된 시간(임베딩 전체 시간에서 모델 로드 시간 제외)
+        total_embed_s = round(float(t_emb1 - t_emb0), 4) if 't_emb0' in locals() and 't_emb1' in locals() else 0.0
+        embed_forward_s = max(0.0, total_embed_s - model_load_s_val)
         times = {
             "meta_s": round(float(t_meta1 - t_meta0), 4) if 't_meta0' in locals() and 't_meta1' in locals() else 0.0,
-            "embed_s": round(float(t_emb1 - t_emb0), 4) if 't_emb0' in locals() and 't_emb1' in locals() else 0.0,
+            # include both model load and forward pass separated
+            "model_load_s": round(model_load_s_val, 4),
+            "embed_forward_s": round(embed_forward_s, 4),
+            "embed_s": round(total_embed_s, 4),
             "ann_s": round(float(t_ann1 - t_ann0), 4) if 't_ann0' in locals() and 't_ann1' in locals() else 0.0,
             "io_s": round(float(t_io1 - t_io0), 4) if 't_io0' in locals() and 't_io1' in locals() else 0.0,
             "total_s": round(float(time.time() - t_meta0), 4) if 't_meta0' in locals() else 0.0,
@@ -969,7 +982,7 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
     Returns a dict with stage estimates: n_images, meta_s, embed_s, ann_s, io_s, total_s, notes
     """
     cfg = cfg or DetectorConfig()
-    # Resolve input paths
+    # 입력 경로(디렉터리 또는 파일 리스트) 해석
     paths: List[str] = []
     exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
     if isinstance(input_dir_or_paths, (list, tuple)):
@@ -994,7 +1007,7 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
     if N == 0:
         return {"n_images": 0, "meta_s": 0.0, "embed_s": 0.0, "ann_s": 0.0, "io_s": 0.0, "total_s": 0.0, "notes": "no images"}
 
-    # Heuristics (per-image seconds)
+    # 휴리스틱(이미지당 예상 초)
     meta_per = 0.02
     if getattr(cfg, 'use_ocr', False):
         meta_per += 0.25
@@ -1015,29 +1028,50 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
     io_per = 0.008
     notes = 'heuristic'
 
-    # Optional sampling to refine embedding throughput
+    # 임베딩 처리량을 개선하기 위한 선택적 샘플링
     try:
-        sample_n = min(sample_size, max(1, int(N * 0.02)))
+        # 샘플 수 결정: 기본적으로 더 큰 샘플을 사용 (최대 64), 최소 4
+        default_cap = min(64, N)
+        sample_n = int(min(max(4, sample_size), default_cap))
         if sample_n >= 1 and N >= sample_n:
+            # 데이터셋 전체에서 균등하게 샘플 선택
             step = max(1, N // sample_n)
             sample_paths = [paths[i] for i in range(0, N, step)][:sample_n]
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            model = load_model(device, backend)
 
-            ds = ImgDataset(sample_paths, getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend)
-            dl = DataLoader(ds, batch_size=min(getattr(cfg, 'batch_size', 32), sample_n), shuffle=False, num_workers=0)
+            # 샘플 이미지에 대해 모델 로드 + 임베딩(전방 전달) 시간을 측정
             import time as _time
             t0 = _time.time()
-            model.eval()
-            with torch.no_grad():
-                for x, _p in dl:
-                    x = x.to(device)
-                    _ = model(x)
-            t_elapsed = _time.time() - t0
-            measured = t_elapsed / max(1, len(sample_paths))
-            if measured > 0:
-                emb_per = measured
-                notes = f'sampled {len(sample_paths)} imgs'
+            try:
+                # 모델을 한 번 로드(가능한 timm/resnet 오버헤드 포함)
+                _model = load_model(device, backend)
+                # DataLoader 준비 및 전방 전달 실행
+                ds = ImgDataset(sample_paths, getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend)
+                dl = DataLoader(ds, batch_size=min(getattr(cfg, 'batch_size', 32), sample_n), shuffle=False, num_workers=0)
+                _model.eval()
+                with torch.no_grad():
+                    for x, _p in dl:
+                        x = x.to(device)
+                        _ = _model(x)
+                t_elapsed = _time.time() - t0
+                measured = t_elapsed / max(1, len(sample_paths))
+                if measured > 0:
+                    emb_per = measured
+                    notes = f'sampled {len(sample_paths)} imgs; device={device.type}'
+            except Exception as e:
+                # 폴백: 보수적으로 순수 I/O 로드 시간만 측정
+                notes = f'fallback_io_only due to {type(e).__name__}'
+                io_t0 = _time.time()
+                from PIL import Image
+                for pth in sample_paths:
+                    try:
+                        img = Image.open(pth)
+                        img.load()
+                    except Exception:
+                        pass
+                measured = _time.time() - io_t0
+                if measured > 0:
+                    emb_per = measured / max(1, len(sample_paths))
     except Exception:
         pass
 
@@ -1048,7 +1082,7 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
 
     result = {"n_images": N, "meta_s": float(meta_s), "embed_s": float(embed_s), "ann_s": float(ann_s), "io_s": float(io_s), "total_s": float(total_s), "notes": notes}
 
-    # If a trained perf model exists, try to load and predict a corrected total time
+    # 학습된 성능 모델이 있으면 불러와서 전체 시간을 보정 예측 시도
     try:
         art_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "artifacts")
         model_path = os.path.join(art_dir, "perf_model.pkl")
@@ -1056,7 +1090,7 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
             try:
                 import joblib
                 mdl = joblib.load(model_path)
-                # build feature row consistent with training script
+                # 학습 스크립트와 일치하는 특성 행 구성
                 feat = {
                     "n_images": N,
                     "mean_size": 0.0,
@@ -1074,7 +1108,7 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
                     "platform": platform.system(),
                     "embed_backend": getattr(cfg, 'embed_backend', 'dinov2')
                 }
-                # model expects columns in training order; use a single-row DataFrame-like dict
+                # 모델은 학습 시 컬럼 순서를 기대함; 단일 행 DataFrame 형태로 전달
                 import pandas as _pd
                 Xpred = _pd.DataFrame([feat])
                 ypred = mdl.predict(Xpred)
@@ -1175,7 +1209,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             ordered_paths = None
 
     if embs is None:
-        embs, ordered_paths = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+        embs, ordered_paths, model_load_s = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
         try:
             np.save(emb_art, embs)
             with open(opaths_art, "w", encoding="utf-8") as fw:
@@ -1363,5 +1397,4 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     except Exception:
         pass
 
-    _cb("done", 1.0, "검사 완료")
     return pair_rows, groups
