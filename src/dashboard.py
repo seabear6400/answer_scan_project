@@ -438,7 +438,7 @@ with st.sidebar.expander('기본', expanded=True):
     group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
     group_filter = st.selectbox("특정 그룹만 보기(재스캔 필요)", ["전체"] + group_list)
     # 그리드 열 개수는 자주 쓰는 기본 옵션으로 노출
-    grid_cols = st.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
+    grid_cols = st.slider("그리드 열 개수", 2, 8, 5, help="정상/공백 답안 탭에서 한 줄에 몇 장씩 볼지 선택")
 
 with st.sidebar.expander('고급', expanded=False):
     st.markdown("고급 설정: 성능/품질 관련 옵션입니다. 기본 설정으로도 대부분의 경우 충분합니다.")

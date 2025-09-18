@@ -1,0 +1,2 @@
+timestamp,platform,n_images,mean_size,mean_w,mean_h,batch_size,num_workers,use_ocr,use_lpips,embed_backend,gpu,mem_total,cpu_count,meta_s,embed_s,ann_s,io_s,total_s
+1758164972,Windows,116,1655585.4827586208,1757.2758620689656,2482.7844827586205,64,0,0,0,dinov2,0,16973877248,12,13.822,10.2712,0.0046,0.3806,24.5198
