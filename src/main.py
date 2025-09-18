@@ -161,7 +161,32 @@ def main():
         roi_ratio=tuple(args.roi),
     )
 
-    detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive)
+    # 간단한 규칙 기반/샘플링 예측 출력
+    try:
+        est = None
+        try:
+            est = __import__('detector_pipeline').estimate_pipeline_time(sel, cfg, recursive=args.recursive)
+        except Exception:
+            # 패키지 상대 임포트로 불러온 경우
+            from . import detector_pipeline as _dp
+            est = _dp.estimate_pipeline_time(sel, cfg, recursive=args.recursive)
+        if est:
+            total = est.get('total_s', 0.0)
+            n = est.get('n_images', 0)
+            notes = est.get('notes', '')
+            print(f"예상: 이미지 {n}장, 총 약 {total:.1f}초 ({notes})")
+    except Exception:
+        pass
+
+    # progress callback: 콘솔에 단계/퍼센트/메시지를 출력
+    def progress_printer(stage: str, pct: float = 0.0, msg: str = ""):
+        try:
+            pct_s = f"{pct*100:.0f}%" if 0.0 <= pct <= 1.0 else f"{pct:.2f}"
+        except Exception:
+            pct_s = str(pct)
+        print(f"[진행] {stage} | {pct_s} | {msg}")
+
+    detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer)
     print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
     print("🌐 대시보드 실행…")

@@ -9,6 +9,10 @@ polars
 streamlit
 networkx>=3.2
 
+# Perf model helpers
+psutil
+joblib
+
 # 대시보드 확장
 git+https://github.com/vgilabert94/streamlit-image-zoom.git
 streamlit-image-comparison

@@ -138,6 +138,81 @@ class DetectorConfig:
     roi_ratio: Tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)
 
 
+# ---------------------- Performance logging utilities ----------------------
+import csv
+import platform
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except Exception:
+    _HAS_PSUTIL = False
+
+
+def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Dict[str, float]) -> Dict:
+    """Collect a small set of features about the run for perf logging.
+
+    Returns a flat dict suitable for CSV append.
+    """
+    sizes = []
+    widths = []
+    heights = []
+    for p in input_paths:
+        try:
+            sizes.append(os.path.getsize(p))
+        except Exception:
+            sizes.append(0)
+        try:
+            with Image.open(p) as im:
+                w, h = im.size
+                widths.append(w)
+                heights.append(h)
+        except Exception:
+            widths.append(0)
+            heights.append(0)
+    n = len(input_paths)
+    feat = {
+        "timestamp": int(time.time()),
+        "platform": platform.system(),
+        "n_images": n,
+        "mean_size": float(np.mean(sizes)) if n else 0.0,
+        "mean_w": float(np.mean(widths)) if n else 0.0,
+        "mean_h": float(np.mean(heights)) if n else 0.0,
+        "batch_size": int(getattr(cfg, "batch_size", 0)),
+        "num_workers": int(getattr(cfg, "num_workers", 0)),
+        "use_ocr": int(bool(getattr(cfg, "use_ocr", False))),
+        "use_lpips": int(bool(getattr(cfg, "use_lpips", False))),
+        "embed_backend": str(getattr(cfg, "embed_backend", "")),
+        "gpu": int(torch.cuda.is_available()),
+    }
+    try:
+        if _HAS_PSUTIL:
+            vm = psutil.virtual_memory()
+            feat.update({"mem_total": int(vm.total), "cpu_count": int(psutil.cpu_count(logical=True))})
+        else:
+            feat.update({"mem_total": 0, "cpu_count": int(os.cpu_count() or 0)})
+    except Exception:
+        feat.update({"mem_total": 0, "cpu_count": int(os.cpu_count() or 0)})
+    # add measured times
+    feat.update(times)
+    return feat
+
+
+def _append_perf_csv(output_dir: str, row: Dict):
+    art = os.path.join(output_dir, "artifacts")
+    os.makedirs(art, exist_ok=True)
+    csvf = os.path.join(art, "perf_runs.csv")
+    header = list(row.keys())
+    write_header = not os.path.exists(csvf)
+    try:
+        with open(csvf, "a", newline="", encoding="utf-8") as fw:
+            writer = csv.DictWriter(fw, fieldnames=header)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception:
+        logger.warning("perf_runs.csv 기록 실패")
+
+
 # -------------------------- ROI / Helpers --------------------------
 def crop_roi(img: Image.Image, roi_ratio: Tuple[float, float, float, float]):
     w, h = img.size
@@ -523,9 +598,19 @@ def detect_pipeline(input_dir: str, output_dir: str,
                     config: Optional[DetectorConfig] = None,
                     filter_func: Optional[callable] = None,
                     recursive: bool = False,
+                    progress_callback: Optional[callable] = None,
                     **_deprecated_kwargs):
     cfg = config or DetectorConfig()
 
+    def _cb(stage: str, pct: float = 0.0, msg: str = ""):
+        # 안전하게 progress callback 호출
+        try:
+            if callable(progress_callback):
+                progress_callback(stage=stage, pct=float(pct), msg=str(msg))
+        except Exception:
+            pass
+
+    _cb("init", 0.01, "출력 폴더 초기화 중")
     # ✅ output 폴더 전체를 완전히 삭제 후 재생성 (모든 하위 폴더/파일 초기화)
     ok = _safe_recreate_dir(output_dir, retries=5, delay=0.5)
     if not ok:
@@ -538,6 +623,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
             warnings.warn(f"Proceeding despite failing to create subdir: {subp}")
     if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=3, delay=0.2):
         warnings.warn("Failed to create thumbnails dir; continuing")
+    _cb("init", 0.03, "하위 폴더 생성 완료")
 
     # 1) Collect image files (optionally recursive)
     exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
@@ -560,7 +646,9 @@ def detect_pipeline(input_dir: str, output_dir: str,
         raise FileNotFoundError(f"No images under {input_dir} (필터 적용됨)")
 
     # 2) Metadata: prefilters + density + (optional) OCR text
+    _cb("meta", 0.05, "메타데이터 수집 시작 (pHash/PDQ + density)")
     logger.info("[1/5] Metadata (pHash/PDQ + density)")
+    t_meta0 = time.time()
     phashes: Dict[str, imagehash.ImageHash] = {}
     pdqs: Dict[str, Optional[np.ndarray]] = {}
     densities: Dict[str, float] = {}
@@ -609,8 +697,13 @@ def detect_pipeline(input_dir: str, output_dir: str,
     except Exception:
         warnings.warn("Failed to write images_summary.csv")
 
+    t_meta1 = time.time()
+    _cb("meta", 0.20, f"메타데이터 완료 ({round(t_meta1 - t_meta0, 2)}s)")
+
     # 3) Embeddings
     logger.info("[2/5] CNN/ViT embeddings …")
+    t_emb0 = time.time()
+    _cb("embed", 0.22, "임베딩 계산 시작")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # 3) Embeddings: attempt to reuse cached embeddings.npy + ordered_paths.txt
     logger.info("[2/5] CNN/ViT embeddings …")
@@ -642,16 +735,23 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 fw.write("\n".join(ordered_paths))
         except Exception:
             warnings.warn("Failed to save embedding artifacts")
+    t_emb1 = time.time()
+    _cb("embed", 0.50, f"임베딩 완료 ({round(t_emb1 - t_emb0, 2)}s)")
 
     n = len(files)
     name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
 
     # 4) ANN candidates
     logger.info("[3/5] Candidate neighbors via ANN …")
+    t_ann0 = time.time()
+    _cb("ann", 0.60, "ANN 후보 검색 시작")
     idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
+    t_ann1 = time.time()
+    _cb("ann", 0.78, f"ANN 완료 ({round(t_ann1 - t_ann0, 2)}s) via {backend_used}")
 
     # 5) Pairwise scoring → "확정 유사" 에지 만들기 → (Blossom) 최대가중치매칭으로 2장 그룹화
     logger.info("[4/5] Pair scoring + pairing (max-weight matching) …")
+    _cb("pairing", 0.80, "페어링/유사도 계산 시작")
 
     def prefilter_ok(fi: str, fj: str) -> bool:
         if cfg.prefilter in ("phash", "both"):
@@ -781,6 +881,8 @@ def detect_pipeline(input_dir: str, output_dir: str,
 
     # 6) Save reports / organize outputs
     logger.info("[5/5] Save reports / organize outputs …")
+    t_io0 = time.time()
+    _cb("save", 0.95, "리포트 저장 및 파일 분류 중")
     csv_path = os.path.join(output_dir, "report.csv")
     parquet_path = os.path.join(output_dir, "report.parquet")
     df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
@@ -831,6 +933,9 @@ def detect_pipeline(input_dir: str, output_dir: str,
             except Exception as e:
                 logger.warning(f"Failed to copy ok file {f}: {e}")
 
+    t_io1 = time.time()
+    _cb("save", 0.98, f"저장 완료 ({round(t_io1 - t_io0, 2)}s)")
+
     # Artifacts (덮어쓰기)
     try:
         np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
@@ -839,7 +944,149 @@ def detect_pipeline(input_dir: str, output_dir: str,
     except Exception:
         pass
 
+    _cb("finalizing", 0.995, "최종 정리 중")
+    # Perf logging: collect times and append to CSV
+    try:
+        times = {
+            "meta_s": round(float(t_meta1 - t_meta0), 4) if 't_meta0' in locals() and 't_meta1' in locals() else 0.0,
+            "embed_s": round(float(t_emb1 - t_emb0), 4) if 't_emb0' in locals() and 't_emb1' in locals() else 0.0,
+            "ann_s": round(float(t_ann1 - t_ann0), 4) if 't_ann0' in locals() and 't_ann1' in locals() else 0.0,
+            "io_s": round(float(t_io1 - t_io0), 4) if 't_io0' in locals() and 't_io1' in locals() else 0.0,
+            "total_s": round(float(time.time() - t_meta0), 4) if 't_meta0' in locals() else 0.0,
+        }
+        perf_row = _collect_run_features(paths, cfg, times)
+        _append_perf_csv(output_dir, perf_row)
+    except Exception:
+        logger.warning("Failed to append perf log")
+
     return pair_rows, groups
+
+
+def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = None,
+                           recursive: bool = False, sample_size: int = 8) -> Dict:
+    """Estimate pipeline wall-time (seconds) using heuristics + optional sampling.
+
+    Returns a dict with stage estimates: n_images, meta_s, embed_s, ann_s, io_s, total_s, notes
+    """
+    cfg = cfg or DetectorConfig()
+    # Resolve input paths
+    paths: List[str] = []
+    exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+    if isinstance(input_dir_or_paths, (list, tuple)):
+        for p in input_dir_or_paths:
+            if os.path.isfile(p) and p.lower().endswith(exts):
+                paths.append(p)
+    else:
+        root = input_dir_or_paths
+        if not os.path.exists(root):
+            return {"n_images": 0, "meta_s": 0.0, "embed_s": 0.0, "ann_s": 0.0, "io_s": 0.0, "total_s": 0.0, "notes": "no input"}
+        if recursive:
+            for dirpath, _dirs, files in os.walk(root):
+                for fn in files:
+                    if fn.lower().endswith(exts):
+                        paths.append(os.path.join(dirpath, fn))
+        else:
+            for fn in sorted(os.listdir(root)):
+                if fn.lower().endswith(exts):
+                    paths.append(os.path.join(root, fn))
+
+    N = len(paths)
+    if N == 0:
+        return {"n_images": 0, "meta_s": 0.0, "embed_s": 0.0, "ann_s": 0.0, "io_s": 0.0, "total_s": 0.0, "notes": "no images"}
+
+    # Heuristics (per-image seconds)
+    meta_per = 0.02
+    if getattr(cfg, 'use_ocr', False):
+        meta_per += 0.25
+
+    try:
+        has_gpu = torch.cuda.is_available()
+    except Exception:
+        has_gpu = False
+
+    backend = getattr(cfg, 'embed_backend', 'dinov2')
+    if backend == 'resnet18':
+        emb_per = 0.005 if has_gpu else 0.02
+    else:
+        emb_per = 0.02 if has_gpu else 0.12
+
+    k = getattr(cfg, 'k', 20)
+    ann_s = max(0.2, 0.00012 * N * max(1, k))
+    io_per = 0.008
+    notes = 'heuristic'
+
+    # Optional sampling to refine embedding throughput
+    try:
+        sample_n = min(sample_size, max(1, int(N * 0.02)))
+        if sample_n >= 1 and N >= sample_n:
+            step = max(1, N // sample_n)
+            sample_paths = [paths[i] for i in range(0, N, step)][:sample_n]
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = load_model(device, backend)
+
+            ds = ImgDataset(sample_paths, getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend)
+            dl = DataLoader(ds, batch_size=min(getattr(cfg, 'batch_size', 32), sample_n), shuffle=False, num_workers=0)
+            import time as _time
+            t0 = _time.time()
+            model.eval()
+            with torch.no_grad():
+                for x, _p in dl:
+                    x = x.to(device)
+                    _ = model(x)
+            t_elapsed = _time.time() - t0
+            measured = t_elapsed / max(1, len(sample_paths))
+            if measured > 0:
+                emb_per = measured
+                notes = f'sampled {len(sample_paths)} imgs'
+    except Exception:
+        pass
+
+    meta_s = meta_per * N
+    embed_s = emb_per * N
+    io_s = io_per * N
+    total_s = meta_s + embed_s + ann_s + io_s
+
+    result = {"n_images": N, "meta_s": float(meta_s), "embed_s": float(embed_s), "ann_s": float(ann_s), "io_s": float(io_s), "total_s": float(total_s), "notes": notes}
+
+    # If a trained perf model exists, try to load and predict a corrected total time
+    try:
+        art_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "artifacts")
+        model_path = os.path.join(art_dir, "perf_model.pkl")
+        if os.path.exists(model_path):
+            try:
+                import joblib
+                mdl = joblib.load(model_path)
+                # build feature row consistent with training script
+                feat = {
+                    "n_images": N,
+                    "mean_size": 0.0,
+                    "mean_w": 0.0,
+                    "mean_h": 0.0,
+                    "batch_size": int(getattr(cfg, 'batch_size', 0)),
+                    "num_workers": int(getattr(cfg, 'num_workers', 0)),
+                    "gpu": int(torch.cuda.is_available()),
+                    "mem_total": 0,
+                    "cpu_count": int(os.cpu_count() or 0),
+                    "meta_s": float(meta_s),
+                    "embed_s": float(embed_s),
+                    "ann_s": float(ann_s),
+                    "io_s": float(io_s),
+                    "platform": platform.system(),
+                    "embed_backend": getattr(cfg, 'embed_backend', 'dinov2')
+                }
+                # model expects columns in training order; use a single-row DataFrame-like dict
+                import pandas as _pd
+                Xpred = _pd.DataFrame([feat])
+                ypred = mdl.predict(Xpred)
+                if len(ypred) > 0:
+                    result['total_s'] = float(ypred[0])
+                    result['notes'] = (result.get('notes','') + ' +ml') if result.get('notes') else 'ml'
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return result
 
 
 def detect_pipeline_files(file_paths: List[str], output_dir: str,
@@ -1116,4 +1363,5 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     except Exception:
         pass
 
+    _cb("done", 1.0, "검사 완료")
     return pair_rows, groups
