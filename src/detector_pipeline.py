@@ -778,7 +778,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     for i in range(n):
         if idxs.shape[1] == 0:
             continue
-    for col in range(1, idxs.shape[1]):  # self(자기 자신) 열은 건너뜀
+        for col in range(1, idxs.shape[1]):  # self(자기 자신) 열은 건너뜀
             j = int(idxs[i, col])
             if j <= i:
                 continue
@@ -954,7 +954,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     try:
             # 임베딩이 캐시에서 로드된 경우 model_load_s가 설정되지 않을 수 있으므로 0으로 디폴트
         model_load_s_val = float(locals().get('model_load_s', 0.0))
-    # embed_forward_s: 전방 전달에 소요된 시간(임베딩 전체 시간에서 모델 로드 시간 제외)
+        # embed_forward_s: 전방 전달에 소요된 시간(임베딩 전체 시간에서 모델 로드 시간 제외)
         total_embed_s = round(float(t_emb1 - t_emb0), 4) if 't_emb0' in locals() and 't_emb1' in locals() else 0.0
         embed_forward_s = max(0.0, total_embed_s - model_load_s_val)
         times = {
