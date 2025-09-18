@@ -394,6 +394,24 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     a, .stButton>button, .css-18e3th9 a, .css-18e3th9 button {{ color: {accent} !important; }}
     .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
     img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
+
+    /* ===== Fix for selectbox / dropdown / input backgrounds that appear solid black in some themes ===== */
+    /* Streamlit uses .stSelectbox, .stMultiSelect, .stForm and various internal classes; target common patterns */
+    div[role="listbox"], .stSelectbox > div, .stMultiSelect > div, .stTextInput > div, .stTextArea > div, .stNumberInput > div {{ background-color: {card_bg} !important; color: {text} !important; border: 1px solid {card_border} !important; border-radius: 8px !important; }}
+    .stSelectbox select, .stMultiSelect select, select, .stTextInput input, .stTextArea textarea {{ background-color: {card_bg} !important; color: {text} !important; border: 1px solid {card_border} !important; }}
+    /* Dropdown caret / arrows sometimes sit on dark bg; ensure contrast */
+    .stSelectbox .css-1n0xqj3, .stSelectbox .css-1x8cf1d {{ background-color: transparent !important; color: {text} !important; }}
+
+    /* Buttons: ensure background uses accent for primary buttons but cards remain coherent */
+    .stButton>button {{ background-color: {accent} !important; color: white !important; border: none !important; box-shadow: none !important; }}
+    .stButton>button:hover {{ filter: brightness(0.95); }}
+
+    /* Ensure dropdown menus / options use card_bg and not default black */
+    .stSelectbox div[role="option"], .stMultiSelect div[role="option"], .st-Selectbox div[role="option"] {{ background-color: {card_bg} !important; color: {text} !important; }}
+
+    /* Small helper: forms and widgets inside sidebar use sidebar_bg but card-like inputs should blend with card_bg */
+    [data-testid="stSidebar"] .stSelectbox > div, [data-testid="stSidebar"] .stTextInput > div {{ background-color: {sidebar_bg} !important; border: 1px solid rgba(0,0,0,0.06) !important; }}
+
     </style>
     """
     try:
