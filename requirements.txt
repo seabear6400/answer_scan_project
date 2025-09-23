@@ -8,6 +8,7 @@ imagehash
 polars
 streamlit
 networkx>=3.2
+tqdm
 
 # Perf model helpers
 psutil
