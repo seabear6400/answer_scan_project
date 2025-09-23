@@ -348,7 +348,8 @@ def load_model(device: torch.device, backend: str) -> nn.Module:
 
 
 def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, num_workers: int,
-                       roi_ratio: Tuple[float, float, float, float], backend: str):
+                       roi_ratio: Tuple[float, float, float, float], backend: str,
+                       progress_callback: Optional[callable] = None):
     ds = ImgDataset(paths, roi_ratio, backend)
     dl = DataLoader(
         ds, batch_size=batch_size, shuffle=False,
@@ -363,6 +364,8 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
 
     embs = []
     ordered_paths = []
+    total = len(ds)
+    processed = 0
     with torch.no_grad():
         for x, pths in dl:
             try:
@@ -375,6 +378,13 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
                 out = out.astype(np.float32)
                 embs.append(out)
                 ordered_paths.extend(list(pths))
+                processed += out.shape[0]
+                if progress_callback is not None and total > 0:
+                    try:
+                        # send strict numeric "processed/total" message so ETA parsing is stable
+                        progress_callback('embed', float(processed) / float(total), f"{processed}/{total}")
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"임베딩 배치 처리 실패(일부 배치 건너뜀): {e}")
                 continue
@@ -393,6 +403,13 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         except Exception:
             D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
         embs = np.zeros((0, D_out), dtype=np.float32)
+    if progress_callback is not None:
+        try:
+            # final callback: use numeric "completed/total" format for consistency
+            progress_callback('embed', 1.0, f"{len(ordered_paths)}/{total}")
+        except Exception:
+            pass
+
     return embs, ordered_paths, model_load_s
 
 
@@ -733,7 +750,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
             ordered_paths = None
 
     if embs is None:
-        embs, ordered_paths, model_load_s = compute_embeddings(paths, device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+        embs, ordered_paths, model_load_s = compute_embeddings(paths, device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend, progress_callback=_cb)
         try:
             np.save(emb_art, embs)
             with open(opaths_art, "w", encoding="utf-8") as fw:
@@ -1124,12 +1141,24 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
 
 
 def detect_pipeline_files(file_paths: List[str], output_dir: str,
-                          config: Optional[DetectorConfig] = None):
+                          config: Optional[DetectorConfig] = None,
+                          progress_callback: Optional[callable] = None):
     """
     Similar to detect_pipeline but accepts an explicit list of image file paths.
     file_paths: list of absolute/relative paths to image files.
     """
     cfg = config or DetectorConfig()
+
+    def _cb(stage: str, pct: float = 0.0, msg: str = ""):
+        # 안전하게 외부 콜백을 래핑
+        try:
+            if progress_callback is not None:
+                progress_callback(stage, pct, msg)
+        except Exception:
+            try:
+                logger.debug(f"progress callback failed: {stage} {pct} {msg}")
+            except Exception:
+                pass
 
     # Normalize and filter existing files
     paths = [os.path.abspath(p) for p in file_paths if os.path.isfile(p)]
@@ -1209,7 +1238,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             ordered_paths = None
 
     if embs is None:
-        embs, ordered_paths, model_load_s = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend)
+        embs, ordered_paths, model_load_s = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend, progress_callback=_cb)
         try:
             np.save(emb_art, embs)
             with open(opaths_art, "w", encoding="utf-8") as fw:

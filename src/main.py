@@ -169,13 +169,125 @@ def main():
 
     # (예상 시간 계산 코드는 제거됨 — 요청에 따라 출력에서 제외합니다)
 
-    # progress callback: 콘솔에 단계/퍼센트/메시지를 출력
+    # progress callback: 콘솔에 단계/퍼센트/메시지를 출력 (진행바 + ETA 포함)
+    _progress_state = {"start": time.time(), "stages": {}}
+
+    def _format_secs(s: Optional[float]) -> str:
+        if s is None:
+            return "--:--:--"
+        s = int(round(s))
+        h, r = divmod(s, 3600)
+        m, s = divmod(r, 60)
+        if h:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
     def progress_printer(stage: str, pct: float = 0.0, msg: str = ""):
+        """
+        개선된 ETA 계산:
+        - msg에 'N/M' 형태가 있으면 우선으로 사용하여 pct를 계산합니다.
+        - pct 기반으로 순간 속도(증분 pct / dt)를 EMA로 추적하여 ETA를 산출합니다.
+        - 속도가 너무 작거나 불안정하면 elapsed*(1/pct - 1)로 폴백합니다.
+        """
         try:
-            pct_s = f"{pct*100:.0f}%" if 0.0 <= pct <= 1.0 else f"{pct:.2f}"
+            import time as _time, re as _re
+            now = _time.time()
+
+            st = _progress_state["stages"].setdefault(
+                stage,
+                {
+                    "first": now,
+                    "last": now,
+                    "last_pct": 0.0,
+                    "msg": "",
+                    "speed_ema": None,
+                },
+            )
+
+            # msg에 "processed/total" 형식이 있으면 우선으로 pct 산출
+            pct_val = None
+            try:
+                m = _re.search(r"(\d+)\s*/\s*(\d+)", str(msg or ""))
+                if m:
+                    p = int(m.group(1))
+                    q = int(m.group(2))
+                    if q > 0:
+                        pct_val = max(0.0, min(1.0, float(p) / float(q)))
+            except Exception:
+                pct_val = None
+
+            # 전달된 pct 인자를 사용해야 할 경우
+            if pct_val is None:
+                try:
+                    pct_val = float(pct)
+                    if not (0.0 <= pct_val <= 1.0):
+                        pct_val = 0.0
+                except Exception:
+                    pct_val = 0.0
+
+            # 최초 진입 시 first 설정
+            if st["last_pct"] == 0.0 and pct_val > 0.0:
+                st["first"] = st.get("first", now)
+            dt = max(1e-6, now - st.get("last", now))
+            # 순간 속도: 증분 pct / dt
+            inst_speed = None
+            try:
+                inst_speed = (pct_val - st.get("last_pct", 0.0)) / dt
+            except Exception:
+                inst_speed = None
+
+            # EMA 업데이트
+            alpha = 0.25
+            prev_ema = st.get("speed_ema", None)
+            if inst_speed is not None:
+                if prev_ema is None:
+                    speed_ema = inst_speed
+                else:
+                    speed_ema = alpha * inst_speed + (1.0 - alpha) * prev_ema
+            else:
+                speed_ema = prev_ema
+
+            # 안전 장치: 음수 또는 너무 작은 속도는 무시
+            min_speed = 1e-5
+            if speed_ema is None or speed_ema < min_speed:
+                speed_use = None
+            else:
+                speed_use = speed_ema
+
+            # ETA 계산: 남은 pct / speed
+            eta = None
+            elapsed = now - st.get("first", now)
+            try:
+                if speed_use is not None and pct_val < 0.999999:
+                    eta = (1.0 - pct_val) / speed_use
+                else:
+                    # 폴백: elapsed*(1/pct - 1)
+                    if pct_val > 1e-6:
+                        eta = elapsed * (1.0 / pct_val - 1.0)
+                    else:
+                        eta = None
+            except Exception:
+                eta = None
+
+            # 상태 갱신
+            st["last"] = now
+            st["last_pct"] = pct_val
+            st["msg"] = str(msg)
+            st["speed_ema"] = speed_ema
+
+            # 출력(콘솔 간단 로그 유지)
+            try:
+                eta_s = _format_secs(eta)
+                elapsed_s = _format_secs(elapsed)
+                print(f"[진행] {stage:12s} {pct_val*100:5.1f}%  ETA:{eta_s}  경과:{elapsed_s}  {msg}")
+            except Exception:
+                print(f"[진행] {stage} | {pct_val} | {msg}")
+
         except Exception:
-            pct_s = str(pct)
-        print(f"[진행] {stage} | {pct_s} | {msg}")
+            try:
+                print(f"[진행] {stage} | {pct} | {msg}")
+            except Exception:
+                pass
 
     # 사전 검사: 선택된 폴더에 지원 이미지 확장자가 있는지 확인합니다.
     exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
@@ -207,7 +319,176 @@ def main():
         print(" - 하위 폴더의 이미지를 포함하려면 --recursive 옵션을 사용하세요.")
         return
 
-    detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer)
+    # 파이프라인을 백그라운드 스레드에서 실행하고,
+    # 메인(UI) 스레드에서는 카톡 스타일의 토스트 창을 띄워 진행을 보여줍니다.
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+
+        class ToastToast:
+            def __init__(self, shared_state, worker_thread, width=480, height=140, stay_time=None):
+                self.shared = shared_state
+                self.worker = worker_thread
+                self.width = width
+                self.height = height
+                self.stay_time = stay_time
+                self.root = tk.Tk()
+                # 창 꾸밈: 테두리 없이 항상 위, 투명도 약간, 포커스 강제 X
+                try:
+                    self.root.overrideredirect(True)
+                except Exception:
+                    pass
+                self.root.attributes("-topmost", True)
+                try:
+                    self.root.attributes("-alpha", 0.95)
+                except Exception:
+                    pass
+
+                # 화면 중앙에 배치
+                sw = self.root.winfo_screenwidth()
+                sh = self.root.winfo_screenheight()
+                x = int((sw - self.width) / 2)
+                y = int((sh - self.height) / 2)
+                try:
+                    self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+                except Exception:
+                    pass
+
+                # 스타일/위젯
+                frm = tk.Frame(self.root, bg="#ffffff", bd=1, relief="solid")
+                frm.pack(fill="both", expand=True)
+                self.title_var = tk.StringVar(value="진행 대기...")
+                self.msg_var = tk.StringVar(value="")
+                self.eta_var = tk.StringVar(value="ETA: --:--")
+                tk.Label(frm, textvariable=self.title_var, font=("Segoe UI", 10, "bold"), bg="#ffffff").pack(anchor="w", padx=10, pady=(8,0))
+                self.pb = ttk.Progressbar(frm, orient="horizontal", length=self.width-24, mode="determinate")
+                self.pb.pack(padx=10, pady=(6,2))
+                tk.Label(frm, textvariable=self.msg_var, font=("Segoe UI", 9), bg="#ffffff").pack(anchor="w", padx=10)
+                tk.Label(frm, textvariable=self.eta_var, font=("Segoe UI", 9), bg="#ffffff").pack(anchor="w", padx=10, pady=(4,8))
+
+                # 마우스 클릭 시 최소화/닫기 처리
+                frm.bind("<Button-1>", lambda e: self._on_click())
+                # 창 드래그(이동) 지원: 마우스 드래그로 위치 변경
+                def start_move(event):
+                    try:
+                        self._drag_start_x = event.x
+                        self._drag_start_y = event.y
+                    except Exception:
+                        self._drag_start_x = None
+                        self._drag_start_y = None
+
+                def do_move(event):
+                    try:
+                        if getattr(self, '_drag_start_x', None) is None:
+                            return
+                        dx = event.x - self._drag_start_x
+                        dy = event.y - self._drag_start_y
+                        geom = self.root.geometry().split('+')
+                        if len(geom) >= 3:
+                            cur_x = int(geom[1])
+                            cur_y = int(geom[2])
+                            new_x = cur_x + dx
+                            new_y = cur_y + dy
+                            self.root.geometry(f"{self.width}x{self.height}+{new_x}+{new_y}")
+                    except Exception:
+                        pass
+
+                frm.bind('<ButtonPress-1>', start_move)
+                frm.bind('<B1-Motion>', do_move)
+                self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+                self._start_time = time.time()
+                self._update_loop()
+
+            def _format_secs(self, s: Optional[float]) -> str:
+                if s is None:
+                    return "--:--:--"
+                s = int(round(s))
+                h, r = divmod(s, 3600)
+                m, s = divmod(r, 60)
+                if h:
+                    return f"{h:02d}:{m:02d}:{s:02d}"
+                return f"{m:02d}:{s:02d}"
+
+            def _on_click(self):
+                # 클릭하면 윈도우를 닫지 않고 아이콘화(최소화) — 사용자가 보고 싶을 때 다시 표시 가능
+                try:
+                    self.root.iconify()
+                except Exception:
+                    pass
+
+            def _on_close(self):
+                # 파이프라인이 끝나기 전에는 닫지 않음(강제로 닫고 싶으면 아이콘화)
+                if self.worker.is_alive():
+                    try:
+                        self.root.iconify()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        self.root.destroy()
+                    except Exception:
+                        pass
+
+            def _update_loop(self):
+                try:
+                    stages = self.shared.get("stages", {})
+                    if stages:
+                        latest = max(stages.items(), key=lambda kv: kv[1].get("last", 0))[0]
+                        info = stages.get(latest, {})
+                        pct = info.get("last_pct", 0.0)
+                        msg = info.get("msg", "")
+                        first = info.get("first", time.time())
+                        elapsed = time.time() - first
+                        eta = None
+                        if pct > 0:
+                            try:
+                                eta = elapsed * (1.0 / pct - 1.0)
+                            except Exception:
+                                eta = None
+                        self.title_var.set(f"단계: {latest}")
+                        self.msg_var.set(str(msg) or "")
+                        self.eta_var.set(f"경과: {self._format_secs(elapsed)}  ETA: {self._format_secs(eta)}")
+                        try:
+                            self.pb['value'] = max(0.0, min(100.0, pct * 100.0))
+                        except Exception:
+                            pass
+                    # 파이프라인 완료 시 자동 닫기(짧은 딜레이 후)
+                    if not self.worker.is_alive():
+                        try:
+                            # 완료 표시 후 0.8s 뒤 닫기
+                            self.root.after(800, self.root.destroy)
+                            return
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                # 200ms마다 갱신
+                self.root.after(200, self._update_loop)
+
+            def run(self):
+                try:
+                    self.root.mainloop()
+                except Exception:
+                    pass
+
+        # 파이프라인 스레드 시작
+        pipeline_thread = threading.Thread(
+            target=lambda: detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer),
+            daemon=True
+        )
+        pipeline_thread.start()
+
+        # 토스트 창을 메인 스레드에서 실행 (blocking until closed)
+        try:
+            toast = ToastToast(_progress_state, pipeline_thread)
+            toast.run()
+        except Exception as e:
+            print(f"토스트 창 실행 실패: {e}")
+            # 실패하면 블록킹 방식으로 대체 실행
+            pipeline_thread.join()
+    except Exception:
+        # tkinter가 없거나 실패 시 기존 동기 호출로 폴백
+        detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer)
     print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
 
     print("🌐 대시보드 실행…")
