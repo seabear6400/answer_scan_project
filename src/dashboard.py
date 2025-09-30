@@ -348,16 +348,13 @@ except Exception:
 # ===== 테마 선택: 여러 디자이너 친화적 테마 제공 =====
 THEMES = {
     'Light (기본)': {
-        'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','secondary':'#475569','accent':'#0B66FF','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
-    },
-    'Soft Dark': {
-        'palette': { 'bg':'#0f1722','sidebar_bg':'#0d1620','text':'#e6eef6','sidebar_text':'#F1F5F9','secondary':'#9fb0c3','accent':'#6fb3ff','card_bg':'#0b1a24','card_border':'#14232d','shadow':'0 6px 18px rgba(3,10,18,0.45)'} ,
+        'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','sidebar_text':'#091223','secondary':'#475569','accent':'#0B66FF','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
     },
     'Warm Sepia': {
-        'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','secondary':'#6e5a4a','accent':'#b77936','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
+        'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','sidebar_text':'#2d2a26','secondary':'#6e5a4a','accent':'#b77936','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
     },
     'Gentle Mint': {
-        'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','secondary':'#4b6b64','accent':'#39b89f','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
+        'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','sidebar_text':'#082724','secondary':'#4b6b64','accent':'#39b89f','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
     }
 }
 
@@ -394,7 +391,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     .stMetric p, .stMetric span, .stMetric small {{ color: {secondary_text} !important; opacity: 0.95 !important; }}
     input, textarea, select, button {{ color: {text} !important; background-color: transparent !important; border-radius: 8px; }}
     .stApp p, .stApp span, label, .css-1v0mbdj p {{ color: {secondary_text} !important; }}
-    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {{ color: {secondary_text} !important; }}
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {{ color: {sidebar_text} !important; }}
     a, .stButton>button, .css-18e3th9 a, .css-18e3th9 button {{ color: {accent} !important; }}
     .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
     img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
@@ -409,8 +406,67 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         color: {text} !important;
     }}
     /* 사이드바 내 입력과 플레이스홀더 대비 개선 */
-    [data-testid="stSidebar"] input[type="text"] {{ background-color: rgba(255,255,255,0.92) !important; }}
+    [data-testid="stSidebar"] input[type="text"] {{ 
+        background-color: rgba(255,255,255,0.95) !important; 
+        color: {text} !important;
+    }}
     input::placeholder, textarea::placeholder {{ color: rgba(0,0,0,0.38) !important; font-weight: 500 !important; }}
+    
+    /* 사이드바 select 박스 - 심플하고 깔끔한 스타일 */
+    [data-testid="stSidebar"] .stSelectbox>div>div {{
+        background-color: rgba(255,255,255,0.98) !important;
+        border: 1px solid rgba(11,102,255,0.3) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
+        transition: border-color 0.2s ease !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox>div>div:hover {{
+        border-color: {accent} !important;
+        box-shadow: 0 2px 8px rgba(11,102,255,0.12) !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox>div>div>div {{
+        color: {text} !important;
+        font-weight: 500 !important;
+        padding: 10px 12px !important;
+        font-size: 14px !important;
+    }}
+    
+    /* select 드롭다운 화살표 스타일링 */
+    [data-testid="stSidebar"] .stSelectbox svg {{
+        color: {accent} !important;
+        opacity: 0.7 !important;
+    }}
+    
+    /* 드롭다운 옵션 리스트 스타일링 */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
+        background-color: white !important;
+        border: 1px solid rgba(11,102,255,0.2) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
+        margin-top: 2px !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
+        color: {text} !important;
+        padding: 8px 12px !important;
+        margin: 2px 4px !important;
+        border-radius: 4px !important;
+        font-size: 14px !important;
+        transition: background-color 0.15s ease !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox [role="option"]:hover {{
+        background-color: rgba(11,102,255,0.05) !important;
+        color: {accent} !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox [aria-selected="true"] {{
+        background-color: {accent} !important;
+        color: white !important;
+        font-weight: 500 !important;
+    }}
     </style>
     """
     try:
@@ -449,8 +505,7 @@ _inject_theme_css(st.session_state.get('theme','Light (기본)'))
 
 # Sidebar: 그룹화된 컨트롤 — 기본 / 고급
 with st.sidebar.expander('기본', expanded=True):
-    # 필수 필터/검색/그리드 설정
-    name_query = st.text_input("파일명 검색", value="", help="특정 파일명을 빠르게 찾고 싶을 때 입력")
+    # 필수 필터/그리드 설정
     group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
     group_filter = st.selectbox("특정 그룹만 보기(재스캔 필요)", ["전체"] + group_list)
     # 그리드 열 개수는 자주 쓰는 기본 옵션으로 노출
@@ -585,13 +640,6 @@ def filter_sort_report(_df: pd.DataFrame) -> pd.DataFrame:
     view = _df.copy()
     if group_filter != "전체" and "그룹ID" in view.columns:
         view = view[view["그룹ID"] == group_filter]
-    if name_query:
-        q = name_query.lower()
-        def _hit(row) -> bool:
-            a = str(row.get("파일1", "")).lower()
-            b = str(row.get("파일2", "")).lower()
-            return (q in a) or (q in b)
-        view = view[view.apply(_hit, axis=1)]
     # 기본 정렬: 유사도 내림차순, 그 다음 파일명
     if "유사도" in view.columns:
         view = view.sort_values(["유사도", "파일1", "파일2"], ascending=[False, True, True])
@@ -649,7 +697,6 @@ cmp_pair = _render_global_compare()
 
 # === Tab2: 재스캔 필요 ===
 with tab2:
-  
     try:
         import imagehash
         dup_pairs = []
@@ -1091,7 +1138,7 @@ with tab4:
     # ---------- 검색/필터 UX (간결) ----------
     row1 = st.columns([1.6, 1.2, 1.2])
     with row1[0]:
-        q = st.text_input("🔎 파일명/경로 검색", value=name_query, placeholder="예: 10002, scan, .png ...")
+        q = st.text_input("🔎 파일명/경로 검색", value="", placeholder="예: 10002, scan, .png ...")
     with row1[1]:
         ext_sel = st.multiselect("확장자", [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"], default=[])
     with row1[2]:
