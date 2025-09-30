@@ -454,7 +454,7 @@ with st.sidebar.expander('기본', expanded=True):
     group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
     group_filter = st.selectbox("특정 그룹만 보기(재스캔 필요)", ["전체"] + group_list)
     # 그리드 열 개수는 자주 쓰는 기본 옵션으로 노출
-    grid_cols = st.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
+    grid_cols = st.slider("그리드 열 개수", 2, 10, 5, help="한 줄에 몇 장씩 볼지 선택")
 
 with st.sidebar.expander('재스캔 필요 탭', expanded=False):
     # 재스캔 탭의 보기 모드(대형/그리드)
@@ -759,7 +759,7 @@ with tab2:
                 if pair_key not in st.session_state:
                     st.session_state[pair_key] = True
                 rec = st.checkbox("재스캔 권고", value=st.session_state.get(pair_key, True), key=pair_key)
-                if st.button("↔ 비교 선택", key=f"cmp_cand_{idx}"):
+                if st.button("↔ 비교 선택 ", key=f"cmp_cand_{idx}"):
                     # add both to comparison (toggle behavior)
                     toggle_compare(pa)
                     toggle_compare(pb)
@@ -1002,7 +1002,6 @@ with tab3:
                 label = "✔ 비교 취소" if selected else "↔ 비교 선택"
                 if st.button(label, key=f"cmp_ok_{idx}"):
                     toggle_compare(img_abs)
-                st.caption("(버튼: 클릭하면 비교 큐에 추가됩니다. 최대 2장)")
                 caption = f + ("  ✅ 선택됨" if selected else "")
                 # 작은 배지: 선택 상태가 있으면 이미지 위에 overlay 표시 (HTML 사용)
                 if selected:
@@ -1025,7 +1024,6 @@ with tab3:
                 label = "✔ 비교 취소" if selected else "↔ 비교 선택"
                 if st.button(label, key=f"cmp_blank_{idx}"):
                     toggle_compare(img_abs)
-                st.caption("(버튼: 클릭하면 비교 큐에 추가됩니다. 최대 2장)")
                 caption = f + ("  ✅ 선택됨" if selected else "")
                 if selected:
                     badge_html = f"<div style='position:relative;display:inline-block'>"
@@ -1131,7 +1129,7 @@ with tab4:
     show_paths = all_imgs[:st.session_state.gallery_limit]
     st.caption(f"1–{len(show_paths)} / {total_items}")
 
-    # ---------- 그리드 렌더 ----------
+    # ========== 이미지 그리드 섹션 ==========
     cols = st.columns(grid_cols_local)
     for idx, path in enumerate(show_paths):
         # 표시에 사용할 이미지(리샘플 or 원본)
@@ -1143,18 +1141,7 @@ with tab4:
         with cols[idx % grid_cols_local]:
             # 이미지
             img_name = os.path.basename(path)
-            selected = path in st.session_state.get("gallery_selected", [])
-            caption = img_name + ("  ✅ 선택됨" if selected else "")
-            if selected:
-                badge_html = f"<div style='position:relative;display:inline-block'>"
-                badge_html += f"<div style='position:absolute;z-index:3;right:8px;top:8px;padding:4px 6px;background:#10B981;color:white;border-radius:6px;font-size:12px;font-weight:600;'>선택됨</div>"
-                badge_html += f"</div>"
-                st.markdown(badge_html, unsafe_allow_html=True)
-            st.image(_safe_image_open(disp), caption=caption, use_container_width=True)
-            # 동작 버튼: 비교 토글만 표시 (절대 경로 전달)
-            label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-            if st.button(label, key=f"cmp_all_{idx}"):
-                toggle_compare(path)
+            st.image(_safe_image_open(disp), caption=img_name, use_container_width=True)
 
     # ---------- 더 보기 버튼 ----------
     if st.session_state.gallery_limit < total_items:
@@ -1173,47 +1160,6 @@ with tab4:
                 except Exception:
                     pass
 
-    # ---------- 선택 비교(대형 2분할) ----------
-    if st.session_state.gallery_selected:
-        st.markdown("---")
-        st.markdown("### 🔍 선택 비교 (대형)")
-        # 파일명 → 경로 복원 (BASENAME_MAP 사용)
-        # gallery_selected 변수에는 절대 경로가 포함되어야 합니다. 하지만 이전 세션의 경우 파일 이름만 저장되어 있을 수 있습니다
-        sel_paths = []
-        for n in st.session_state.gallery_selected:
-            if os.path.isfile(n):
-                sel_paths.append(n)
-            else:
-                # 파일 이름(basename) 매핑 시도
-                p = BASENAME_MAP.get(os.path.basename(n).lower())
-                if p and os.path.isfile(p):
-                    sel_paths.append(p)
-        if len(sel_paths) == 1:
-            st.info("한 장이 선택되었습니다. 한 장을 더 선택하면 2분할 비교가 표시됩니다.")
-            # 1장도 크게 보여주자 (같은 품질 파라미터로)
-            big = make_display_image(sel_paths[0], size=max(1400, target_px_eff), fmt=disp_fmt_eff, quality=disp_quality_eff) \
-                  if render_mode == "리샘플(권장)" else sel_paths[0]
-            st.image(_safe_image_open(big), caption=os.path.basename(sel_paths[0]), use_container_width=True)
-
-        elif len(sel_paths) >= 2:
-            # 2장 나란히 대형
-            a_path, b_path = sel_paths[:2]
-            big_a = make_display_image(a_path, size=max(1600, target_px_eff), fmt=disp_fmt_eff, quality=disp_quality_eff) \
-                    if render_mode == "리샘플(권장)" else a_path
-            big_b = make_display_image(b_path, size=max(1600, target_px_eff), fmt=disp_fmt_eff, quality=disp_quality_eff) \
-                    if render_mode == "리샘플(권장)" else b_path
-
-            c1, c2 = st.columns(2)
-            with c1:
-                st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
-            with c2:
-                st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
-
-        # 선택 상태 관리 버튼
-        cols_ctrl = st.columns([1, 1, 6])
-        with cols_ctrl[0]:
-            if st.button("선택 초기화"):
-                st.session_state.gallery_selected = []
     # 우선 비교 토글로 대체 — 모달형 미리보기 버튼 제거
 
     # 모달 미지원 대체 표시: 없음(직접 inline으로 대체됨)
