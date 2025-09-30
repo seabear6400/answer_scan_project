@@ -20,11 +20,6 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
 # ===== Optional metrics/components (존재하면 사용) =====
-try:
-    from skimage.metrics import structural_similarity as ssim
-    _HAS_SKIMAGE = True
-except Exception:
-    _HAS_SKIMAGE = False
 
 try:
     import lpips
@@ -473,9 +468,6 @@ with st.sidebar.expander('고급', expanded=False):
     group_large_px = 1400 # 고정값
     group_page_size = 6   # 고정값
     group_page = 1        # 고정값(페이지네이션은 필요시만)
-    # 간단 분석 토글(고급 사용자 전용)
-    show_absdiff = st.checkbox("차이 히트맵(AbsDiff) 표시", value=False, help="선택 비교 시 차이 히트맵을 표시합니다.")
-    show_ssim = st.checkbox("SSIM 맵 표시 (skimage 필요)", value=False, help="SSIM 맵을 표시하려면 skimage가 설치되어 있어야 합니다.")
 
 # ===== 유틸: 비교용 도구 =====
 def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -564,28 +556,6 @@ def _cached_blend_path(a_path: str, b_path: str, alpha: float = 0.5) -> Optional
         return dst
     arr = _blend_images_rgb(a_path, b_path, alpha=alpha)
     return _write_cached_image(arr, dst, fmt='PNG')
-
-
-def _cached_diff_path(a_path: str, b_path: str, blur: int = 3, thresh: int = 10) -> Optional[str]:
-    key = _comp_cache_key(a_path, b_path, 'diff', {'blur': blur, 'thresh': thresh})
-    dst = os.path.join(THUMB_DIR, f"cmp_diff_{key}.png")
-    if os.path.exists(dst) and _file_mtime(dst) >= max(_file_mtime(a_path), _file_mtime(b_path)):
-        return dst
-    # 차이 히트맵 생성
-    ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
-    gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
-    if ga is None or gb is None:
-        return None
-    h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
-    ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
-    gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
-    diff = cv2.absdiff(ga, gb)
-    diff = cv2.GaussianBlur(diff, (blur, blur), 0)
-    _, diff_mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_TOZERO)
-    diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
-    heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
-    rgb = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
-    return _write_cached_image(rgb, dst, fmt='PNG')
 
 
 def _cached_highlight_path(a_path: str, b_path: str, color: Tuple[int, int, int] = (0, 255, 255), thresh: int = 20) -> Optional[str]:
@@ -817,7 +787,7 @@ with tab2:
         colm1, colm2 = st.columns([3, 7])
         with colm1:
             # 내부 값(key)은 변경하지 않되, 사용자에게 보이는 라벨은 한국어로 제공합니다.
-            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["비교(좌우)","페이드(겹침)", "차이(Heatmap)", "하이라이터(오버레이)"], index=0, horizontal=True, key="cmp_mode_top")
+            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["비교(좌우)","페이드(겹침)", "하이라이터(오버레이)"], index=0, horizontal=True, key="cmp_mode_top")
         with colm2:
             # 선택된 비교 모드에 해당하는 설명만 표시
             # cmp_mode_top 내부값은 라디오의 label로 들어가므로 위젯의 라벨에 따라 분기합니다.
@@ -866,9 +836,6 @@ with tab2:
         if cmp_mode_top == "비교(좌우)":
             # 단순 좌우 비교는 별도의 파라미터 없음
             pass
-        elif cmp_mode_top == "차이(Heatmap)":
-            diff_blur_top = st.slider("Difference: Blur 강도(odd kernel)", 1, 11, st.session_state.get('diff_blur_top', 3), 2, key="diff_blur_top")
-            diff_thresh_top = st.slider("Difference: 강조 임계값", 0, 255, st.session_state.get('diff_thresh_top', 10), 1, key="diff_thresh_top")
         elif cmp_mode_top == "페이드(겹침)":
             fade_alpha = st.slider("Fade: A 이미지 알파", 0.0, 1.0, float(st.session_state.get('fade_alpha', 0.5)), 0.05, key='fade_alpha')
         elif cmp_mode_top == "하이라이터(오버레이)":
@@ -891,23 +858,7 @@ with tab2:
                     st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
             else:
                 try:
-                    if cmp_mode_top == "차이(Heatmap)":
-                        cached = _cached_diff_path(a_path, b_path, blur=diff_blur_top, thresh=diff_thresh_top)
-                        if cached:
-                            st.image(cached, caption=f"차이(임계={diff_thresh_top})", use_container_width=True)
-                        else:
-                            ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
-                            gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
-                            h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
-                            ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
-                            gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
-                            diff = cv2.absdiff(ga, gb)
-                            diff = cv2.GaussianBlur(diff, (diff_blur_top, diff_blur_top), 0)
-                            _, diff_mask = cv2.threshold(diff, diff_thresh_top, 255, cv2.THRESH_TOZERO)
-                            diff_norm = cv2.normalize(diff_mask, None, 0, 255, cv2.NORM_MINMAX)
-                            heat = cv2.applyColorMap(diff_norm.astype('uint8'), cv2.COLORMAP_JET)
-                            st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption=f"차이(임계={diff_thresh_top})", use_container_width=True)
-                    elif cmp_mode_top == "페이드(겹침)":
+                    if cmp_mode_top == "페이드(겹침)":
                         fade_alpha_val = float(st.session_state.get('fade_alpha', 0.5))
                         blendp = _cached_blend_path(a_path, b_path, alpha=fade_alpha_val)
                         if blendp:
@@ -1269,31 +1220,6 @@ with tab4:
                 st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
             with c2:
                 st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
-
-            # 옵션에 따라 간단 분석(원하면 켜서 사용)
-            if show_absdiff or show_ssim:
-                st.markdown("#### 차이 분석 (선택 사항)")
-                try:
-                    ga = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
-                    gb = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
-                    h = min(ga.shape[0], gb.shape[0]); w = min(ga.shape[1], gb.shape[1])
-                    ga = cv2.resize(ga, (w, h), interpolation=cv2.INTER_AREA)
-                    gb = cv2.resize(gb, (w, h), interpolation=cv2.INTER_AREA)
-                    if show_absdiff:
-                        diff = cv2.absdiff(ga, gb)
-                        diff = cv2.GaussianBlur(diff, (3, 3), 0)
-                        diff = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
-                        heat = cv2.applyColorMap(diff, cv2.COLORMAP_JET)
-                        st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), caption="차이 히트맵(AbsDiff)", use_container_width=True)
-                    if show_ssim and _HAS_SKIMAGE:
-                        score, ssim_img = ssim(ga, gb, full=True, data_range=255)
-                        ssim_img = (1.0 - ssim_img)
-                        ssim_img = (255 * (ssim_img / (ssim_img.max() + 1e-6))).astype(np.uint8)
-                        heat = cv2.applyColorMap(ssim_img, cv2.COLORMAP_INFERNO)
-                        st.image(cv2.cvtColor(heat, cv2.COLOR_BGR2RGB),
-                                 caption=f"SSIM 맵 (score={score:.4f})", use_container_width=True)
-                except Exception as e:
-                    st.info(f"분석 실패: {e}")
 
         # 선택 상태 관리 버튼
         cols_ctrl = st.columns([1, 1, 6])
