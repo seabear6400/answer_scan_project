@@ -17,6 +17,7 @@ import polars as pl
 
 import stat
 import time
+import threading
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -241,7 +242,7 @@ def read_gray(path: str):
 
 
 # -------------------------- 사전 필터 ------------------------------
-def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> imagehash.ImageHash:
+def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> Optional[imagehash.ImageHash]:
     try:
         img = Image.open(path)
         img = crop_roi(img, roi_ratio)
@@ -372,7 +373,6 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
                 x = x.to(device)
                 out_t = model(x)
                 out = out_t.detach().cpu().numpy()
-                # flatten spatial dims if present -> (B, D)
                 if out.ndim > 2:
                     out = out.reshape(out.shape[0], -1)
                 out = out.astype(np.float32)
@@ -381,7 +381,7 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
                 processed += out.shape[0]
                 if progress_callback is not None and total > 0:
                     try:
-                        # send strict numeric "processed/total" message so ETA parsing is stable
+                        # ETA (남은 시간) 계산의 안정성을 위해 '처리된 개수/전체 개수' 형태의 엄격한 숫자 메시지를 보냅니다.
                         progress_callback('embed', float(processed) / float(total), f"{processed}/{total}")
                     except Exception:
                         pass
@@ -403,12 +403,26 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         except Exception:
             D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
         embs = np.zeros((0, D_out), dtype=np.float32)
+
+    # 일관성 검사: ordered_paths 길이가 입력 paths와 일치하지 않으면 명확한 오류를 던집니다.
+    if len(ordered_paths) != len(paths):
+        # 일부 이미지가 배치 처리에서 누락된 경우 추후 인덱싱 오류를 방지하기 위해 예외를 던집니다.
+        raise RuntimeError(f"compute_embeddings: ordered_paths ({len(ordered_paths)}) != input paths ({len(paths)}) — 일부 이미지 처리가 실패했습니다.")
+
     if progress_callback is not None:
         try:
-            # final callback: use numeric "completed/total" format for consistency
+            # 최종 콜백: 일관성을 위해 '완료된 개수/전체 개수'의 숫자 형식을 사용합니다.
             progress_callback('embed', 1.0, f"{len(ordered_paths)}/{total}")
         except Exception:
             pass
+
+    # GPU 메모리 해제
+    try:
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
     return embs, ordered_paths, model_load_s
 
@@ -427,8 +441,7 @@ def l2_normalize(mat: np.ndarray) -> np.ndarray:
 def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
                      hnsw_M: int, hnsw_efC: int, hnsw_efS: int):
     """
-    Return (indices, sims, backend_used).
-    Indices shape (N, k+1), sims shape (N, k+1) including self at column 0.
+        반환값은 (indices, sims, backend_used) 형태입니다.
     """
     N, D = embs.shape
     if N == 0:
@@ -454,8 +467,9 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
         xb = mat
         index = faiss.IndexFlatIP(D)  # 내적 == 정규화된 벡터에서의 코사인 유사도
         index.add(xb)
-        sims, idxs = index.search(xb, min(k + 1, N))
-        return idxs, sims, "faiss"
+        # FAISS search returns (similarities, indices) for inner product
+        similarities, indices = index.search(xb, min(k + 1, N))
+        return indices, similarities, "faiss"
 
     if backend == "hnsw" and _HAS_HNSW:
         idx = hnswlib.Index(space='cosine', dim=D)
@@ -475,12 +489,14 @@ def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
 
 # -------------------------- LPIPS / OCR (선택) -------------------
 _lpips_model = None
+_lpips_lock = threading.Lock()
 def lpips_distance(a_path: str, b_path: str) -> Optional[float]:
     global _lpips_model
     if not _HAS_LPIPS:
         return None
-    if _lpips_model is None:
-        _lpips_model = lpips.LPIPS(net='vgg').eval()
+    with _lpips_lock:
+        if _lpips_model is None:
+            _lpips_model = lpips.LPIPS(net='vgg').eval()
     import torchvision.transforms as T
     tf = T.Compose([T.ToTensor()])
     Araw = cv2.imread(a_path)
@@ -500,13 +516,15 @@ def lpips_distance(a_path: str, b_path: str) -> Optional[float]:
 
 
 _ocr = None
+_ocr_lock = threading.Lock()
 def ocr_text(path: str) -> str:
     global _ocr
     if not (_HAS_OCR and _HAS_RAPIDFUZZ):
         return ""
-    if _ocr is None:
-        # 한국어 손글씨 스캔
-        _ocr = PaddleOCR(lang='korean', use_angle_cls=True, show_log=False)
+    with _ocr_lock:
+        if _ocr is None:
+            # 한국어 손글씨 스캔
+            _ocr = PaddleOCR(lang='korean', use_angle_cls=True, show_log=False)
     res = _ocr.ocr(path, cls=True)
     texts = []
     try:
@@ -537,7 +555,7 @@ def _recreate_clean_dir(path: str):
 
 
 def _copy_to_dir(src: str, dst_dir: str):
-    """Copy src file into dst_dir preserving filename; create dst_dir if needed."""
+    """원본 파일(src)을 파일 이름은 그대로 유지한 채 대상 디렉터리(dst_dir)로 복사합니다. 대상 디렉터리가 없으면 생성합니다."""
     try:
         os.makedirs(dst_dir, exist_ok=True)
         shutil.copy2(src, os.path.join(dst_dir, os.path.basename(src)))
@@ -548,10 +566,9 @@ def _copy_to_dir(src: str, dst_dir: str):
 
 
 def _safe_recreate_dir(path: str, retries: int = 3, delay: float = 0.5):
-    """Try to fully remove and recreate a directory with retries.
-
-    This addresses Windows file-locks or transient permission errors by
-    retrying a few times before giving up.
+    """
+    디렉터리(폴더)를 삭제하고 새로 만들 때 발생하는 Windows 파일 잠금이나 일시적인 권한 문제에 대비하여,
+    여러 번 재시도하는 로직을 적용합니다.
     """
     last_exc = None
     for attempt in range(1, retries + 1):
@@ -615,6 +632,225 @@ def _metadata_worker(args):
     return f, ph, pdq, float(dens), txt
 
 
+def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndarray,
+                    phashes: Dict[str, imagehash.ImageHash], pdqs: Dict[str, Optional[np.ndarray]],
+                    densities: Dict[str, float], texts: Dict[str, str], cfg: DetectorConfig,
+                    input_dir: Optional[str] = None, path_map: Optional[Dict[str, str]] = None):
+    """
+    공통의 페어링/그룹화 로직을 추출한 헬퍼.
+    name_by_row: 행 인덱스 -> 파일명 매핑
+    input_dir OR path_map 중 하나를 제공하여 추가 검사(LPIPS/OCR)를 수행함.
+    반환: pair_rows, groups
+    """
+    n = len(name_by_row)
+
+    def _get_path(fname: str) -> str:
+        if path_map is not None:
+            return path_map.get(fname, fname)
+        if input_dir is not None:
+            return os.path.join(input_dir, fname)
+        return fname
+
+    def prefilter_ok(fi: str, fj: str) -> bool:
+        if cfg.prefilter in ("phash", "both"):
+            if abs(phashes.get(fi, imagehash.hex_to_hash("0"*16)) - phashes.get(fj, imagehash.hex_to_hash("0"*16))) > cfg.phash_thresh:
+                return False
+        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
+            a = pdqs.get(fi, None); b = pdqs.get(fj, None)
+            if a is not None and b is not None:
+                if hamming_distance_bits(a, b) > cfg.pdq_thresh:
+                    return False
+        if abs(densities.get(fi, 0.0) - densities.get(fj, 0.0)) > cfg.density_diff_thresh:
+            return False
+        return True
+
+    all_pair_records: List[Tuple[str, str, float]] = []
+    confirmed_edges: List[Tuple[int, int, float]] = []
+
+    for i in range(n):
+        if idxs.shape[1] == 0:
+            continue
+        for col in range(1, idxs.shape[1]):
+            j = int(idxs[i, col])
+            if j <= i:
+                continue
+            fi, fj = name_by_row[i], name_by_row[j]
+
+            # 파일명 끝이 '2'인 쌍만 그룹화 대상
+            if not (os.path.splitext(fi)[0].endswith('2') and os.path.splitext(fj)[0].endswith('2')):
+                continue
+
+            if densities.get(fi, 0.0) <= cfg.blank_density_thresh or densities.get(fj, 0.0) <= cfg.blank_density_thresh:
+                continue
+
+            if not prefilter_ok(fi, fj):
+                continue
+
+            sim = float(sims[i, col])
+            all_pair_records.append((fi, fj, sim))
+
+            confirmed = False
+            if sim >= cfg.cnn_thresh:
+                confirmed = True
+            elif sim >= cfg.suspect_low:
+                votes = 0
+                if cfg.use_lpips and _HAS_LPIPS:
+                    d = lpips_distance(_get_path(fi), _get_path(fj))
+                    if d is not None and d <= cfg.lpips_thresh:
+                        votes += 1
+                if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
+                    ta = texts.get(fi, "") or ocr_text(_get_path(fi))
+                    tb = texts.get(fj, "") or ocr_text(_get_path(fj))
+                    if text_similarity(ta, tb) >= cfg.text_sim_thresh:
+                        votes += 1
+                if votes > 0:
+                    confirmed = True
+
+            if confirmed:
+                confirmed_edges.append((i, j, sim))
+
+    groups: Dict[str, List[str]] = {}
+    gid_counter = 1
+    if confirmed_edges:
+        parents: Dict[int, int] = {}
+
+        def find(x: int) -> int:
+            while parents[x] != x:
+                parents[x] = parents[parents[x]]
+                x = parents[x]
+            return x
+
+        def union(a: int, b: int):
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                return
+            parents[rb] = ra
+
+        nodes = set()
+        for u, v, _w in confirmed_edges:
+            nodes.add(u); nodes.add(v)
+        for node in nodes:
+            parents[node] = node
+        for u, v, _w in confirmed_edges:
+            union(u, v)
+
+        comps: Dict[int, List[int]] = {}
+        for node in nodes:
+            root = find(node)
+            comps.setdefault(root, []).append(node)
+
+        for comp_nodes in comps.values():
+            if len(comp_nodes) >= 2:
+                members = sorted([name_by_row[i] for i in comp_nodes])
+                gid = f"group_{gid_counter:03d}"
+                groups[gid] = members
+                gid_counter += 1
+
+    # pair_rows 생성
+    grouped_pairs_set = set()
+    pair_to_gid: Dict[Tuple[str, str], str] = {}
+    for gid, members in groups.items():
+        for a, b in itertools.combinations(members, 2):
+            key = tuple(sorted((a, b)))
+            grouped_pairs_set.add(key)
+            pair_to_gid[key] = gid
+
+    pair_rows: List[List] = []
+    for fi, fj, sim in all_pair_records:
+        key = tuple(sorted((fi, fj)))
+        if key in grouped_pairs_set:
+            gid = pair_to_gid.get(key, "-")
+            pair_rows.append([fi, fj, round(sim, 4), "중복/그룹", gid])
+        else:
+            status = "유사 후보" if sim >= cfg.suspect_low else "다름"
+            pair_rows.append([fi, fj, round(sim, 4), status, "-"])
+
+    return pair_rows, groups
+
+
+def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[str, float], cfg: DetectorConfig,
+                           pair_rows: List[List], groups: Dict[str, List[str]],
+                           input_dir: Optional[str] = None, path_map: Optional[Dict[str, str]] = None,
+                           embs: Optional[np.ndarray] = None, backend_used: Optional[str] = None):
+    """
+    공통 리포트 저장 및 파일 복사 로직.
+    input_dir이 주어지면 detect_pipeline 스타일 동작(빈칸 기본 복사),
+    path_map이 주어지면 detect_pipeline_files 스타일 동작(빈칸 복사 조건이 다름).
+    """
+    csv_path = os.path.join(output_dir, "report.csv")
+    parquet_path = os.path.join(output_dir, "report.parquet")
+    df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
+    try:
+        df_pairs.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        pl.from_pandas(df_pairs).write_parquet(parquet_path)
+    except Exception:
+        logger.warning("리포트 저장 실패")
+
+    # 이미지 요약
+    try:
+        img_df = pd.DataFrame({
+            "파일": files,
+            "밀도": [densities.get(f, 0.0) for f in files],
+            "빈칸여부": [densities.get(f, 0.0) <= cfg.blank_density_thresh for f in files],
+        })
+        img_df.to_csv(os.path.join(output_dir, "images_summary.csv"), index=False, encoding="utf-8-sig")
+    except Exception:
+        logger.warning("images_summary 저장 실패")
+
+    # grouped 복사
+    for gid, members in groups.items():
+        gdir = os.path.join(output_dir, "grouped", gid)
+        for m in members:
+            src = path_map[m] if path_map is not None else os.path.join(input_dir or "", m)
+            _copy_to_dir(src, gdir)
+
+    okdir = os.path.join(output_dir, "ok")
+    bdir = os.path.join(output_dir, "blank_answers")
+    os.makedirs(okdir, exist_ok=True)
+    os.makedirs(bdir, exist_ok=True)
+
+    grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
+    for f in files:
+        src = path_map[f] if path_map is not None else os.path.join(input_dir or "", f)
+        name_wo_ext = os.path.splitext(f)[0]
+        try:
+            is_blank = (pd.read_csv(os.path.join(output_dir, "images_summary.csv"))
+                        .query("파일 == @f")["빈칸여부"].iloc[0])
+        except Exception:
+            is_blank = densities.get(f, 0.0) <= cfg.blank_density_thresh
+
+        if path_map is None:
+            # detect_pipeline 동작: 기본적으로 blank는 blank_answers로, 단 파일명 끝이 '1'이면 ok로 재분류
+            if is_blank:
+                if name_wo_ext.endswith('1'):
+                    _copy_to_dir(src, okdir)
+                else:
+                    _copy_to_dir(src, bdir)
+            elif f not in grouped_set:
+                _copy_to_dir(src, okdir)
+        else:
+            # detect_pipeline_files 동작: blank는 '*2'로 끝나는 것만 bdir로 복사, '1'은 ok
+            if is_blank:
+                if name_wo_ext.endswith('2'):
+                    _copy_to_dir(src, bdir)
+                elif name_wo_ext.endswith('1'):
+                    _copy_to_dir(src, okdir)
+                else:
+                    pass
+            elif f not in grouped_set:
+                _copy_to_dir(src, okdir)
+
+    # 아티팩트 저장
+    try:
+        if embs is not None:
+            np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
+        if backend_used is not None:
+            with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
+                fw.write(backend_used)
+    except Exception:
+        pass
+
+
 # -------------------------- 메인 파이프라인 ------------------------------
 def detect_pipeline(input_dir: str, output_dir: str,
                     config: Optional[DetectorConfig] = None,
@@ -642,9 +878,9 @@ def detect_pipeline(input_dir: str, output_dir: str,
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
         subp = os.path.join(output_dir, sub)
         if not _safe_recreate_dir(subp, retries=3, delay=0.2):
-            warnings.warn(f"Proceeding despite failing to create subdir: {subp}")
+            warnings.warn(f"하위 디렉터리(서브 디렉터리/하위 폴더) 생성이 실패했음 계속 진행 : {subp}")
     if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=3, delay=0.2):
-        warnings.warn("Failed to create thumbnails dir; continuing")
+        warnings.warn("썸네일 디렉터리 생성에 실패했으나 계속 진행합니다.")
     _cb("init", 0.03, "하위 폴더 생성 완료")
 
     # 1) Collect image files (optionally recursive)
@@ -691,7 +927,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
 
     # 워커 인자 준비 및 ThreadPoolExecutor에서 실행 (IO 바운드 작업)
     worker_args = [(f, p, cfg) for f, p in zip(files, paths)]
-    # prefer explicit cfg.num_workers when set; otherwise scale reasonably for IO-bound
+    #  설정(cfg)에 num_workers 값이 명시되어 있으면 그 값을 우선 사용하고, 그렇지 않다면 I/O 바운드 작업에 맞게 적절히 조절하여 사용합니다.
     if cfg.num_workers and cfg.num_workers > 0:
         max_workers = cfg.num_workers
     else:
@@ -722,13 +958,13 @@ def detect_pipeline(input_dir: str, output_dir: str,
     t_meta1 = time.time()
     _cb("meta", 0.20, f"메타데이터 완료 ({round(t_meta1 - t_meta0, 2)}s)")
 
-    # 3) Embeddings
+    # 3) 임베딩
     logger.info("[2/5] CNN/ViT 임베딩 처리 …")
     t_emb0 = time.time()
     _cb("embed", 0.22, "임베딩 계산 시작")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 3) Embeddings: attempt to reuse cached embeddings.npy + ordered_paths.txt
-    logger.info("[2/5] CNN/ViT embeddings …")
+    # 3) 임베딩: 캐시된 embeddings.npy 및 ordered_paths.txt 재사용 시도
+    logger.info("[2/5] CNN/ViT 임베딩 …")
     emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
     opaths_art = os.path.join(output_dir, "artifacts", "ordered_paths.txt")
     embs = None
@@ -756,7 +992,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
             with open(opaths_art, "w", encoding="utf-8") as fw:
                 fw.write("\n".join(ordered_paths))
         except Exception:
-            warnings.warn("Failed to save embedding artifacts")
+            warnings.warn("임베딩 아티팩트 저장 실패")
     t_emb1 = time.time()
     _cb("embed", 0.50, f"임베딩 완료 ({round(t_emb1 - t_emb0, 2)}s)")
 
@@ -775,196 +1011,16 @@ def detect_pipeline(input_dir: str, output_dir: str,
     logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")
     _cb("pairing", 0.80, "페어링/유사도 계산 시작")
 
-    def prefilter_ok(fi: str, fj: str) -> bool:
-        if cfg.prefilter in ("phash", "both"):
-            if abs(phashes.get(fi, imagehash.hex_to_hash("0"*16)) - phashes.get(fj, imagehash.hex_to_hash("0"*16))) > cfg.phash_thresh:
-                return False
-        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-            a = pdqs.get(fi, None); b = pdqs.get(fj, None)
-            if a is not None and b is not None:
-                if hamming_distance_bits(a, b) > cfg.pdq_thresh:
-                    return False
-        if abs(densities.get(fi, 0.0) - densities.get(fj, 0.0)) > cfg.density_diff_thresh:
-            return False
-        return True
+    # 공통 페어링/그룹화 로직으로 대체
+    pair_rows, groups = _pair_and_group(name_by_row, idxs, sims, phashes, pdqs, densities, texts, cfg, input_dir=input_dir)
 
-    all_pair_records: List[Tuple[str, str, float]] = []
-    confirmed_edges: List[Tuple[int, int, float]] = []
-
-    # 모든 행에서 후보 페어와 확인된 엣지를 수집
-    for i in range(n):
-        if idxs.shape[1] == 0:
-            continue
-        for col in range(1, idxs.shape[1]):  # self(자기 자신) 열은 건너뜀
-            j = int(idxs[i, col])
-            if j <= i:
-                continue
-            fi, fj = name_by_row[i], name_by_row[j]
-
-            # 사용자 요청: 그룹핑은 파일명(확장자 제거) 끝이 '2'인 파일들끼리만 수행
-            # 예: 1000652.JPG 와 1000662.JPG 처럼 뒤에 '2'로 끝나는 페어만 그룹화 대상
-            if not (os.path.splitext(fi)[0].endswith('2') and os.path.splitext(fj)[0].endswith('2')):
-                continue
-
-            # 빈(공백) 이미지는 그룹 대상으로 삼지 않음
-            if densities.get(fi, 0.0) <= cfg.blank_density_thresh or densities.get(fj, 0.0) <= cfg.blank_density_thresh:
-                continue
-
-            if not prefilter_ok(fi, fj):
-                continue
-
-            sim = float(sims[i, col])
-            all_pair_records.append((fi, fj, sim))
-
-            confirmed = False
-            if sim >= cfg.cnn_thresh:
-                confirmed = True
-            elif sim >= cfg.suspect_low:
-                votes = 0
-                if cfg.use_lpips and _HAS_LPIPS:
-                    d = lpips_distance(os.path.join(input_dir, fi), os.path.join(input_dir, fj))
-                    if d is not None and d <= cfg.lpips_thresh:
-                        votes += 1
-                if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
-                    ta = texts.get(fi, "") or ocr_text(os.path.join(input_dir, fi))
-                    tb = texts.get(fj, "") or ocr_text(os.path.join(input_dir, fj))
-                    if text_similarity(ta, tb) >= cfg.text_sim_thresh:
-                        votes += 1
-                if votes > 0:
-                    confirmed = True
-
-            # confirmed가 True이면 엣지 목록에 추가
-            if confirmed:
-                confirmed_edges.append((i, j, sim))
-
-    # --- confirmed_edges로 유사 그래프를 구성하고 연결요소를 그룹으로 추출 ---
-    # 모든 confirmed_edges를 수집한 뒤에 한 번만 계산합니다. 여기서는 union-find(Disjoint Set)
-    # 을 사용해 더 견고하게 컴포넌트를 추출합니다.
-    groups: Dict[str, List[str]] = {}
-    gid_counter = 1
-    if confirmed_edges:
-    # 등장한 노드들만 대상으로 union-find 초기화
-        parents: Dict[int, int] = {}
-        def find(x: int) -> int:
-            # 경로 압축
-            while parents[x] != x:
-                parents[x] = parents[parents[x]]
-                x = parents[x]
-            return x
-        def union(a: int, b: int):
-            ra, rb = find(a), find(b)
-            if ra == rb:
-                return
-            parents[rb] = ra
-
-    # 부모 테이블 초기화
-        nodes = set()
-        for u, v, _w in confirmed_edges:
-            nodes.add(u); nodes.add(v)
-        for node in nodes:
-            parents[node] = node
-
-    # 모든 엣지에 대해 union 수행
-        for u, v, _w in confirmed_edges:
-            union(u, v)
-
-    # 루트 기준으로 그룹 수집
-        comps: Dict[int, List[int]] = {}
-        for node in nodes:
-            root = find(node)
-            comps.setdefault(root, []).append(node)
-
-        for comp_nodes in comps.values():
-            if len(comp_nodes) >= 2:
-                members = sorted([name_by_row[i] for i in comp_nodes])
-                gid = f"group_{gid_counter:03d}"
-                groups[gid] = members
-                gid_counter += 1
-
-    # 리포트 테이블: 그룹 내 모든 페어를 grouped로 표기
-    grouped_pairs_set = set()
-    pair_to_gid: Dict[Tuple[str, str], str] = {}
-    for gid, members in groups.items():
-        # 그룹이 2명 이상일 때 모든 조합을 그룹 페어로 추가
-        for a, b in itertools.combinations(members, 2):
-            key = tuple(sorted((a, b)))
-            grouped_pairs_set.add(key)
-            pair_to_gid[key] = gid
-
-    pair_rows: List[List] = []
-    for fi, fj, sim in all_pair_records:
-        key = tuple(sorted((fi, fj)))
-        if key in grouped_pairs_set:
-            gid = pair_to_gid.get(key, "-")
-            pair_rows.append([fi, fj, round(sim, 4), "중복/그룹", gid])
-        else:
-            status = "유사 후보" if sim >= cfg.suspect_low else "다름"
-            pair_rows.append([fi, fj, round(sim, 4), status, "-"])
-
-    # 6) Save reports / organize outputs
+    # 공통 리포트 저장/파일 복사 헬퍼 호출 (타이밍 콜백 보존)
     logger.info("[5/5] 리포트 저장 및 출력 정리 …")
     t_io0 = time.time()
     _cb("save", 0.95, "리포트 저장 및 파일 분류 중")
-    csv_path = os.path.join(output_dir, "report.csv")
-    parquet_path = os.path.join(output_dir, "report.parquet")
-    df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
-    df_pairs.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    pl.from_pandas(df_pairs).write_parquet(parquet_path)
-
-    # 이미지 요약(밀도/빈칸)
-    img_df = pd.DataFrame({
-        "파일": files,
-        "밀도": [densities.get(f, 0.0) for f in files],
-        "빈칸여부": [densities.get(f, 0.0) <= cfg.blank_density_thresh for f in files],
-    })
-    img_df.to_csv(os.path.join(output_dir, "images_summary.csv"), index=False, encoding="utf-8-sig")
-
-    # 그룹화된 파일 복사
-    for gid, members in groups.items():
-        gdir = os.path.join(output_dir, "grouped", gid)
-        for m in members:
-            _copy_to_dir(os.path.join(input_dir, m), gdir)
-
-    okdir = os.path.join(output_dir, "ok")
-    bdir = os.path.join(output_dir, "blank_answers")
-    os.makedirs(okdir, exist_ok=True)
-    os.makedirs(bdir, exist_ok=True)
-
-    grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
-    for f in files:
-        src = os.path.join(input_dir, f)
-        # 파일명(확장자 제외) 끝 문자에 따라 빈칸 파일의 최종 분류를 조정
-        name_wo_ext = os.path.splitext(f)[0]
-        if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
-            # 기본 동작: blank_answers로 복사
-            # 단, 파일명 끝이 '1'이면 blank로 감지되어도 ok로 보관
-            if name_wo_ext.endswith('1'):
-                dst = os.path.join(okdir, f)
-            else:
-                dst = os.path.join(bdir, f)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            try:
-                _copy_to_dir(src, os.path.dirname(dst))
-            except Exception as e:
-                logger.warning(f"파일 복사 실패 {f} (dst={dst}): {e}")
-        elif f not in grouped_set:
-            dst = os.path.join(okdir, f)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            try:
-                _copy_to_dir(src, os.path.dirname(dst))
-            except Exception as e:
-                logger.warning(f"정상 파일 복사 실패 {f}: {e}")
-
+    _save_reports_and_copy(output_dir, files, densities, cfg, pair_rows, groups, input_dir=input_dir, embs=embs, backend_used=backend_used)
     t_io1 = time.time()
     _cb("save", 0.98, f"저장 완료 ({round(t_io1 - t_io0, 2)}s)")
-
-    # 아티팩트 저장(덮어쓰기)
-    try:
-        np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
-        with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
-            fw.write(backend_used)
-    except Exception:
-        pass
 
     _cb("finalizing", 0.995, "최종 정리 중")
     # 성능 로깅: 시간 수집 및 CSV에 추가
@@ -994,9 +1050,10 @@ def detect_pipeline(input_dir: str, output_dir: str,
 
 def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = None,
                            recursive: bool = False, sample_size: int = 8) -> Dict:
-    """Estimate pipeline wall-time (seconds) using heuristics + optional sampling.
+    """
+    휴리스틱(Heuristics)과 선택적인 샘플링을 사용하여 파이프라인의 **실제 소요 시간(wall-time)(초)을 추정합니다.
 
-    Returns a dict with stage estimates: n_images, meta_s, embed_s, ann_s, io_s, total_s, notes
+    각 단계별 예상치를 담은 딕셔너리를 반환합니다: n_images(이미지 수), meta_s(메타데이터), embed_s(임베딩), ann_s(탐색), io_s(I/O), total_s(총합), notes(비고)
     """
     cfg = cfg or DetectorConfig()
     # 입력 경로(디렉터리 또는 파일 리스트) 해석
@@ -1144,8 +1201,8 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
                           config: Optional[DetectorConfig] = None,
                           progress_callback: Optional[callable] = None):
     """
-    Similar to detect_pipeline but accepts an explicit list of image file paths.
-    file_paths: list of absolute/relative paths to image files.
+    detect_pipeline 함수와 유사하지만, 이미지 파일 경로 목록을 직접 받습니다.
+    file_paths: 이미지 파일의 절대 또는 상대 경로 목록.
     """
     cfg = config or DetectorConfig()
 
@@ -1153,36 +1210,36 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
         # 안전하게 외부 콜백을 래핑
         try:
             if progress_callback is not None:
-                progress_callback(stage, pct, msg)
+                progress_callback(stage=stage, pct=float(pct), msg=str(msg))
         except Exception:
             try:
-                logger.debug(f"progress callback failed: {stage} {pct} {msg}")
+                logger.debug(f"프로세스 콜백 실패: {stage} {pct} {msg}")
             except Exception:
                 pass
 
     # Normalize and filter existing files
     paths = [os.path.abspath(p) for p in file_paths if os.path.isfile(p)]
     if not paths:
-        raise FileNotFoundError("No valid image files provided")
+        raise FileNotFoundError("유효한 이미지 파일이 제공되지 않았습니다.")
 
     # Prepare output dirs (same behavior as detect_pipeline)
     if not _safe_recreate_dir(output_dir, retries=3, delay=0.2):
-        raise RuntimeError(f"Failed to prepare output dir: {output_dir}")
+        raise RuntimeError(f"출력 디렉토리 준비 실패: {output_dir}")
     for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
         if not _safe_recreate_dir(os.path.join(output_dir, sub), retries=2, delay=0.1):
-            logger.warning(f"Proceeding despite failing to create subdir: {sub}")
+            logger.warning(f"하위 디렉토리 생성 실패에도 불구하고 진행합니다: {sub}")
     if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=2, delay=0.1):
-        logger.warning("Failed to create thumbnails dir; continuing")
+        logger.warning("썸네일 디렉토리 생성 실패; 계속 진행합니다")
 
-    # files: basenames (used in reports), and a map basename -> full path
+    # 파일: 파일 이름(basenames) 리스트 (보고서에 사용됨)와 '파일 이름 → 전체 경로' 매핑 정보.
     files = [os.path.basename(p) for p in paths]
     path_map = {os.path.basename(p): p for p in paths}
 
-    # The rest of the pipeline expects lists named 'files' and 'paths' where
-    # paths are full paths matching files entries. We'll reuse much of the logic
-    # from detect_pipeline by reusing variable names.
+    # 파이프라인의 나머지 부분은 **'files'**와 **'paths'라는 이름의 리스트를 기대하며, 
+    # $\text{paths}$는 $\text{files}$의 항목과 일치하는 전체 경로입니다.
+    # 변수 이름을 재사용하여 $\text{detect_pipeline}$의 로직을 상당 부분 재활용합니다.
 
-    # 2) Metadata: prefilters + density + (optional) OCR text
+    # 2) 데이터 처리 파이프라인에서 관리되는 메타데이터의 구성 요소를 설명
     logger.info(f"[1/5] Metadata (pHash/PDQ + density)")
     phashes: Dict[str, imagehash.ImageHash] = {}
     pdqs: Dict[str, Optional[np.ndarray]] = {}
@@ -1214,7 +1271,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             if txt:
                 texts[f] = txt
 
-    # 3) Embeddings
+    # 3) 임베딩
     logger.info("[2/5] CNN/ViT 임베딩 처리 …")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
@@ -1227,14 +1284,15 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             with open(opaths_art, "r", encoding="utf-8") as fr:
                 ordered_paths = [l.strip() for l in fr.readlines() if l.strip()]
             if len(ordered_paths) != len(files) or embs.shape[0] != len(files):
-                logger.warning("Artifact sizes mismatch: forcing re-compute embeddings")
+                logger.warning("아티팩트 크기 불일치: 임베딩 재계산 강제")
                 embs = None
                 ordered_paths = None
             else:
-                logger.info("Loaded cached embeddings.npy + ordered_paths.txt")
+                logger.info("캐시된 embeddings.npy + ordered_paths.txt 로드됨")
         except Exception as e:
-            logger.warning(f"Failed to load embedding artifacts: {e}; will recompute")
+            logger.warning(f"임베딩 아티팩트 로드 실패: {e}; 재계산 수행")
             embs = None
+
             ordered_paths = None
 
     if embs is None:
@@ -1244,7 +1302,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             with open(opaths_art, "w", encoding="utf-8") as fw:
                 fw.write("\n".join(ordered_paths))
         except Exception:
-            warnings.warn("Failed to save embedding artifacts")
+            warnings.warn("임베딩 아티팩트 저장 실패")
 
     n = len(files)
     name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
@@ -1256,174 +1314,10 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     # 5) Pairwise scoring → reuse same grouping logic but using path_map when needed
     logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")
 
-    def prefilter_ok(fi: str, fj: str) -> bool:
-        if cfg.prefilter in ("phash", "both"):
-            if abs(phashes.get(fi, imagehash.hex_to_hash("0"*16)) - phashes.get(fj, imagehash.hex_to_hash("0"*16))) > cfg.phash_thresh:
-                return False
-        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-            a = pdqs.get(fi, None); b = pdqs.get(fj, None)
-            if a is not None and b is not None:
-                if hamming_distance_bits(a, b) > cfg.pdq_thresh:
-                    return False
-        if abs(densities.get(fi, 0.0) - densities.get(fj, 0.0)) > cfg.density_diff_thresh:
-            return False
-        return True
+    # 공통 페어링/그룹화 로직으로 대체
+    pair_rows, groups = _pair_and_group(name_by_row, idxs, sims, phashes, pdqs, densities, texts, cfg, path_map=path_map)
 
-    all_pair_records: List[Tuple[str, str, float]] = []
-    confirmed_edges: List[Tuple[int, int, float]] = []
-
-    for i in range(n):
-        if idxs.shape[1] == 0:
-            continue
-        for col in range(1, idxs.shape[1]):
-            j = int(idxs[i, col])
-            if j <= i:
-                continue
-            fi, fj = name_by_row[i], name_by_row[j]
-
-            if not (os.path.splitext(fi)[0].endswith('2') and os.path.splitext(fj)[0].endswith('2')):
-                continue
-
-            if densities.get(fi, 0.0) <= cfg.blank_density_thresh or densities.get(fj, 0.0) <= cfg.blank_density_thresh:
-                continue
-
-            if not prefilter_ok(fi, fj):
-                continue
-
-            sim = float(sims[i, col])
-            all_pair_records.append((fi, fj, sim))
-
-            confirmed = False
-            if sim >= cfg.cnn_thresh:
-                confirmed = True
-            elif sim >= cfg.suspect_low:
-                votes = 0
-                if cfg.use_lpips and _HAS_LPIPS:
-                    d = lpips_distance(path_map[fi], path_map[fj])
-                    if d is not None and d <= cfg.lpips_thresh:
-                        votes += 1
-                if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
-                    ta = texts.get(fi, "") or ocr_text(path_map[fi])
-                    tb = texts.get(fj, "") or ocr_text(path_map[fj])
-                    if text_similarity(ta, tb) >= cfg.text_sim_thresh:
-                        votes += 1
-                if votes > 0:
-                    confirmed = True
-
-            if confirmed:
-                confirmed_edges.append((i, j, sim))
-
-    # grouping logic (copy from detect_pipeline) — use union-find here as well
-    groups: Dict[str, List[str]] = {}
-    gid_counter = 1
-    if confirmed_edges:
-        parents: Dict[int, int] = {}
-        def find2(x: int) -> int:
-            while parents[x] != x:
-                parents[x] = parents[parents[x]]
-                x = parents[x]
-            return x
-        def union2(a: int, b: int):
-            ra, rb = find2(a), find2(b)
-            if ra == rb:
-                return
-            parents[rb] = ra
-
-        nodes = set()
-        for u, v, _w in confirmed_edges:
-            nodes.add(u); nodes.add(v)
-        for node in nodes:
-            parents[node] = node
-        for u, v, _w in confirmed_edges:
-            union2(u, v)
-
-        comps: Dict[int, List[int]] = {}
-        for node in nodes:
-            root = find2(node)
-            comps.setdefault(root, []).append(node)
-        for comp_nodes in comps.values():
-            if len(comp_nodes) >= 2:
-                members = sorted([name_by_row[i] for i in comp_nodes])
-                gid = f"group_{gid_counter:03d}"
-                groups[gid] = members
-                gid_counter += 1
-
-    # build pair rows
-    grouped_pairs_set = set()
-    pair_to_gid: Dict[Tuple[str, str], str] = {}
-    for gid, members in groups.items():
-        for a, b in itertools.combinations(members, 2):
-            key = tuple(sorted((a, b)))
-            grouped_pairs_set.add(key)
-            pair_to_gid[key] = gid
-
-    pair_rows: List[List] = []
-    for fi, fj, sim in all_pair_records:
-        key = tuple(sorted((fi, fj)))
-        if key in grouped_pairs_set:
-            gid = pair_to_gid.get(key, "-")
-            pair_rows.append([fi, fj, round(sim, 4), "중복/그룹", gid])
-        else:
-            status = "유사 후보" if sim >= cfg.suspect_low else "다름"
-            pair_rows.append([fi, fj, round(sim, 4), status, "-"])
-
-    # Save reports
-    logger.info("[5/5] 리포트 저장 및 출력 정리 …")
-    csv_path = os.path.join(output_dir, "report.csv")
-    parquet_path = os.path.join(output_dir, "report.parquet")
-    df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
-    df_pairs.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    pl.from_pandas(df_pairs).write_parquet(parquet_path)
-
-    img_df = pd.DataFrame({
-        "파일": files,
-        "밀도": [densities.get(f, 0.0) for f in files],
-        "빈칸여부": [densities.get(f, 0.0) <= cfg.blank_density_thresh for f in files],
-    })
-    img_df.to_csv(os.path.join(output_dir, "images_summary.csv"), index=False, encoding="utf-8-sig")
-
-    # Copy grouped / ok / blank
-    for gid, members in groups.items():
-        gdir = os.path.join(output_dir, "grouped", gid)
-        for m in members:
-            _copy_to_dir(path_map[m], gdir)
-
-    okdir = os.path.join(output_dir, "ok")
-    bdir = os.path.join(output_dir, "blank_answers")
-    os.makedirs(okdir, exist_ok=True)
-    os.makedirs(bdir, exist_ok=True)
-
-    grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
-    for f in files:
-        src = path_map[f]
-        name_wo_ext = os.path.splitext(f)[0]
-        if img_df[img_df["파일"] == f]["빈칸여부"].iloc[0]:
-            # 기본적으로 blank_answers에는 '*2'로 끝나는 파일만 넣도록 하되,
-            # 파일명 끝이 '1'이면 blank로 감지되어도 ok로 분류합니다.
-            if name_wo_ext.endswith('2'):
-                try:
-                    _copy_to_dir(src, os.path.join(bdir))
-                except Exception as e:
-                    logger.warning(f"공백 답안 복사 실패 {f}: {e}")
-            elif name_wo_ext.endswith('1'):
-                try:
-                    _copy_to_dir(src, os.path.join(okdir))
-                except Exception as e:
-                    logger.warning(f"재분류된 정상 파일 복사 실패 {f}: {e}")
-            else:
-                # 그 외의 빈칸 감지 파일은 원래대로 복사하지 않음
-                pass
-        elif f not in grouped_set:
-            try:
-                _copy_to_dir(src, os.path.join(okdir))
-            except Exception as e:
-                logger.warning(f"정상 파일 복사 실패 {f}: {e}")
-
-    try:
-        np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
-        with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
-            fw.write(backend_used)
-    except Exception:
-        pass
+    # 공통 리포트 저장/파일 복사 헬퍼 호출
+    _save_reports_and_copy(output_dir, files, densities, cfg, pair_rows, groups, path_map=path_map, embs=embs, backend_used=backend_used)
 
     return pair_rows, groups
