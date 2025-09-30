@@ -543,7 +543,7 @@ def _copy_to_dir(src: str, dst_dir: str):
         shutil.copy2(src, os.path.join(dst_dir, os.path.basename(src)))
         return True
     except Exception as e:
-        logger.warning(f"Failed to copy {src} to {dst_dir}: {e}")
+        logger.warning(f"복사 실패 {src} -> {dst_dir}: {e}")
         return False
 
 
@@ -685,7 +685,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 fname = row.get("파일")
                 if fname in files:
                     densities[fname] = float(row.get("밀도", 0.0))
-            logger.info("Loaded fresh images_summary.csv -> skipping density recompute for cached entries")
+            logger.info("새 images_summary.csv 로드됨 -> 캐시 항목의 밀도 재계산 생략")
         except Exception:
             pass
 
@@ -723,7 +723,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     _cb("meta", 0.20, f"메타데이터 완료 ({round(t_meta1 - t_meta0, 2)}s)")
 
     # 3) Embeddings
-    logger.info("[2/5] CNN/ViT embeddings …")
+    logger.info("[2/5] CNN/ViT 임베딩 처리 …")
     t_emb0 = time.time()
     _cb("embed", 0.22, "임베딩 계산 시작")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -739,13 +739,13 @@ def detect_pipeline(input_dir: str, output_dir: str,
             with open(opaths_art, "r", encoding="utf-8") as fr:
                 ordered_paths = [l.strip() for l in fr.readlines() if l.strip()]
             if len(ordered_paths) != len(files) or embs.shape[0] != len(files):
-                logger.warning("Artifact sizes mismatch: forcing re-compute embeddings")
+                logger.warning("아티팩트 크기 불일치: 임베딩 재계산 강제")
                 embs = None
                 ordered_paths = None
             else:
-                logger.info("Loaded cached embeddings.npy + ordered_paths.txt")
+                logger.info("캐시된 embeddings.npy 및 ordered_paths.txt 로드 완료")
         except Exception as e:
-            logger.warning(f"Failed to load embedding artifacts: {e}; will recompute")
+            logger.warning(f"임베딩 아티팩트 로드 실패: {e}; 재계산 예정")
             embs = None
             ordered_paths = None
 
@@ -764,7 +764,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
 
     # 4) ANN candidates
-    logger.info("[3/5] Candidate neighbors via ANN …")
+    logger.info("[3/5] ANN을 통한 후보 이웃 검색 …")
     t_ann0 = time.time()
     _cb("ann", 0.60, "ANN 후보 검색 시작")
     idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
@@ -772,7 +772,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     _cb("ann", 0.78, f"ANN 완료 ({round(t_ann1 - t_ann0, 2)}s) via {backend_used}")
 
     # 5) Pairwise scoring → "확정 유사" 에지 만들기 → (Blossom) 최대가중치매칭으로 2장 그룹화
-    logger.info("[4/5] Pair scoring + pairing (max-weight matching) …")
+    logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")
     _cb("pairing", 0.80, "페어링/유사도 계산 시작")
 
     def prefilter_ok(fi: str, fj: str) -> bool:
@@ -902,7 +902,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
             pair_rows.append([fi, fj, round(sim, 4), status, "-"])
 
     # 6) Save reports / organize outputs
-    logger.info("[5/5] Save reports / organize outputs …")
+    logger.info("[5/5] 리포트 저장 및 출력 정리 …")
     t_io0 = time.time()
     _cb("save", 0.95, "리포트 저장 및 파일 분류 중")
     csv_path = os.path.join(output_dir, "report.csv")
@@ -946,14 +946,14 @@ def detect_pipeline(input_dir: str, output_dir: str,
             try:
                 _copy_to_dir(src, os.path.dirname(dst))
             except Exception as e:
-                logger.warning(f"Failed to copy file {f} (dst={dst}): {e}")
+                logger.warning(f"파일 복사 실패 {f} (dst={dst}): {e}")
         elif f not in grouped_set:
             dst = os.path.join(okdir, f)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             try:
                 _copy_to_dir(src, os.path.dirname(dst))
             except Exception as e:
-                logger.warning(f"Failed to copy ok file {f}: {e}")
+                logger.warning(f"정상 파일 복사 실패 {f}: {e}")
 
     t_io1 = time.time()
     _cb("save", 0.98, f"저장 완료 ({round(t_io1 - t_io0, 2)}s)")
@@ -1197,7 +1197,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
                 fname = row.get("파일")
                 if fname in files:
                     densities[fname] = float(row.get("밀도", 0.0))
-            print("Loaded fresh images_summary.csv -> skipping density recompute for cached entries")
+            print("새 images_summary.csv 로드됨 -> 캐시 항목의 밀도 재계산 생략")
         except Exception:
             pass
 
@@ -1215,7 +1215,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
                 texts[f] = txt
 
     # 3) Embeddings
-    logger.info("[2/5] CNN/ViT embeddings …")
+    logger.info("[2/5] CNN/ViT 임베딩 처리 …")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
     opaths_art = os.path.join(output_dir, "artifacts", "ordered_paths.txt")
@@ -1250,11 +1250,11 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
 
     # 4) ANN candidates
-    logger.info("[3/5] Candidate neighbors via ANN …")
+    logger.info("[3/5] ANN을 통한 후보 이웃 검색 …")
     idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
 
     # 5) Pairwise scoring → reuse same grouping logic but using path_map when needed
-    logger.info("[4/5] Pair scoring + pairing (max-weight matching) …")
+    logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")
 
     def prefilter_ok(fi: str, fj: str) -> bool:
         if cfg.prefilter in ("phash", "both"):
@@ -1368,7 +1368,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             pair_rows.append([fi, fj, round(sim, 4), status, "-"])
 
     # Save reports
-    logger.info("[5/5] Save reports / organize outputs …")
+    logger.info("[5/5] 리포트 저장 및 출력 정리 …")
     csv_path = os.path.join(output_dir, "report.csv")
     parquet_path = os.path.join(output_dir, "report.parquet")
     df_pairs = pd.DataFrame(pair_rows, columns=["파일1", "파일2", "유사도", "상태", "그룹ID"])
@@ -1404,12 +1404,12 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
                 try:
                     _copy_to_dir(src, os.path.join(bdir))
                 except Exception as e:
-                    logger.warning(f"Failed to copy blank answer {f}: {e}")
+                    logger.warning(f"공백 답안 복사 실패 {f}: {e}")
             elif name_wo_ext.endswith('1'):
                 try:
                     _copy_to_dir(src, os.path.join(okdir))
                 except Exception as e:
-                    logger.warning(f"Failed to copy reclassified ok file {f}: {e}")
+                    logger.warning(f"재분류된 정상 파일 복사 실패 {f}: {e}")
             else:
                 # 그 외의 빈칸 감지 파일은 원래대로 복사하지 않음
                 pass
@@ -1417,7 +1417,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             try:
                 _copy_to_dir(src, os.path.join(okdir))
             except Exception as e:
-                logger.warning(f"Failed to copy ok file {f}: {e}")
+                logger.warning(f"정상 파일 복사 실패 {f}: {e}")
 
     try:
         np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
