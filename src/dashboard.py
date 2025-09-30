@@ -450,17 +450,15 @@ _inject_theme_css(st.session_state.get('theme','Light (기본)'))
 # Sidebar: 그룹화된 컨트롤 — 기본 / 고급
 with st.sidebar.expander('기본', expanded=True):
     # 필수 필터/검색/그리드 설정
-    min_sim = st.slider("최소 유사도", 0.0, 1.0, 0.90, 0.01, help="유사도 임계값을 조정하세요.")
     name_query = st.text_input("파일명 검색", value="", help="특정 파일명을 빠르게 찾고 싶을 때 입력")
     group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
     group_filter = st.selectbox("특정 그룹만 보기(재스캔 필요)", ["전체"] + group_list)
     # 그리드 열 개수는 자주 쓰는 기본 옵션으로 노출
     grid_cols = st.slider("그리드 열 개수", 2, 8, 5, help="한 줄에 몇 장씩 볼지 선택")
 
-with st.sidebar.expander('고급', expanded=False):
-    st.markdown("고급 설정: 성능/품질 관련 옵션입니다. 기본 설정으로도 대부분의 경우 충분합니다.")
+with st.sidebar.expander('재스캔 필요 탭', expanded=False):
     # 재스캔 탭의 보기 모드(대형/그리드)
-    group_view_mode = st.radio("재스캔 필요 보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=1)
+    group_view_mode = st.radio("보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=1)
     # 표시 해상도/포맷/품질(내부 고정 파라미터) — 필요시 디버그용 노출
     grid_target_px = 768  # 고정값 (내부적으로 사용)
     disp_fmt = "WEBP"    # 고정값
@@ -585,8 +583,6 @@ def open_preview(img_path: str, caption: str = ""):
 # ===== 공통: 리포트 필터링 =====
 def filter_sort_report(_df: pd.DataFrame) -> pd.DataFrame:
     view = _df.copy()
-    if "유사도" in view.columns:
-        view = view[view["유사도"] >= min_sim]
     if group_filter != "전체" and "그룹ID" in view.columns:
         view = view[view["그룹ID"] == group_filter]
     if name_query:
@@ -694,18 +690,10 @@ with tab2:
             rpt = df[df['상태'] == '유사 후보'] if isinstance(df, pd.DataFrame) else pd.DataFrame()
             for _, row in rpt.iterrows():
                 a, b = str(row.get('파일1', '')), str(row.get('파일2', ''))
-                # report '유사도' 컬럼을 읽어 사이드바의 min_sim 이하 항목은 후보에서 제외
                 try:
                     sim = float(row.get('유사도', 0.0))
                 except Exception:
                     sim = float(row.get('유사도', 0.0) or 0.0)
-                try:
-                    # min_sim은 사이드바 위젯에서 정의되며 문자열/숫자 모두 올 수 있음
-                    if float(sim) < float(locals().get('min_sim', 0)):
-                        continue
-                except Exception:
-                    # 변환 실패 시 필터링을 적용하지 않음
-                    pass
                 pa = resolve_image_path(a) or os.path.join(OUTPUT_DIR, a)
                 pb = resolve_image_path(b) or os.path.join(OUTPUT_DIR, b)
                 report_dups.append((pa, pb, sim))
