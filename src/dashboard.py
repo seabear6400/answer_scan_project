@@ -533,11 +533,30 @@ def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarr
     b = cv2.resize(b, (w, h), interpolation=cv2.INTER_AREA)
     return a, b
 
-def _absdiff_heatmap(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _absdiff_heatmap(a: np.ndarray, b: np.ndarray, blur_size: int = 3, threshold: int = 10) -> np.ndarray:
+    """두 그레이스케일 이미지의 절대차이를 heatmap으로 변환합니다.
+    
+    Args:
+        a, b: 그레이스케일 이미지 배열
+        blur_size: 가우시안 블러 크기 (홀수, 기본값 3)
+        threshold: 차이 임계값 (기본값 10)
+    
+    Returns:
+        RGB heatmap 배열
+    """
     diff = cv2.absdiff(a, b)
-    diff = cv2.GaussianBlur(diff, (3, 3), 0)
-    diff = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
-    heat = cv2.applyColorMap(diff, cv2.COLORMAP_JET)
+    
+    # 임계값 적용하여 노이즈 제거
+    _, diff_thresh = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+    
+    # 블러 적용 (홀수만 허용)
+    if blur_size > 1:
+        blur_size = blur_size if blur_size % 2 == 1 else blur_size + 1
+        diff_thresh = cv2.GaussianBlur(diff_thresh, (blur_size, blur_size), 0)
+    
+    # 정규화 및 컬러맵 적용
+    diff_norm = cv2.normalize(diff_thresh, None, 0, 255, cv2.NORM_MINMAX)
+    heat = cv2.applyColorMap(diff_norm, cv2.COLORMAP_JET)
     return cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
 
 
@@ -609,6 +628,21 @@ def _cached_blend_path(a_path: str, b_path: str, alpha: float = 0.5) -> Optional
         return dst
     arr = _blend_images_rgb(a_path, b_path, alpha=alpha)
     return _write_cached_image(arr, dst, fmt='PNG')
+
+
+def _cached_heatmap_path(a_path: str, b_path: str, blur_size: int = 3, threshold: int = 10) -> Optional[str]:
+    """차이 heatmap을 캐시에 생성하고 경로를 반환합니다."""
+    key = _comp_cache_key(a_path, b_path, 'heatmap', {'blur': blur_size, 'thresh': threshold})
+    dst = os.path.join(THUMB_DIR, f"cmp_heatmap_{key}.png")
+    if os.path.exists(dst) and _file_mtime(dst) >= max(_file_mtime(a_path), _file_mtime(b_path)):
+        return dst
+    try:
+        a_gray, b_gray = _read_gray_same_size(a_path, b_path)
+        arr = _absdiff_heatmap(a_gray, b_gray, blur_size=blur_size, threshold=threshold)
+        return _write_cached_image(arr, dst, fmt='PNG')
+    except Exception as e:
+        logger.warning(f"heatmap 캐시 생성 실패 {a_path} vs {b_path}: {e}")
+        return None
 
 
 def _cached_highlight_path(a_path: str, b_path: str, color: Tuple[int, int, int] = (0, 255, 255), thresh: int = 20) -> Optional[str]:
@@ -806,10 +840,11 @@ with tab2:
                 if pair_key not in st.session_state:
                     st.session_state[pair_key] = True
                 rec = st.checkbox("재스캔 권고", value=st.session_state.get(pair_key, True), key=pair_key)
-                if st.button("↔ 비교 선택 ", key=f"cmp_cand_{idx}"):
+                if st.button("↔ 비교 추가", key=f"cmp_cand_{idx}", help="이 두 이미지를 비교 선택에 추가"):
                     # add both to comparison (toggle behavior)
                     toggle_compare(pa)
                     toggle_compare(pb)
+                    st.rerun()
 
     # ----- 즉시 비교 패널: 사용자가 아래 그리드에서 '↔ 비교 선택' 버튼을 클릭하면
     # rescan 탭의 상단에 바로 비교 옵션과 결과가 표시되도록 함
@@ -818,11 +853,21 @@ with tab2:
     if sel_exist_top:
         st.markdown("---")
         st.markdown("### 🔍 즉시 비교 (재스캔 탭)")
+        
+        # 현재 선택된 이미지 정보 표시
+        if len(sel_exist_top) == 1:
+            st.info(f"📁 선택된 이미지: **{os.path.basename(sel_exist_top[0])}**")
+        elif len(sel_exist_top) >= 2:
+            a_name, b_name = os.path.basename(sel_exist_top[0]), os.path.basename(sel_exist_top[1])
+            st.info(f"📁 비교 대상: **A**: {a_name} ↔ **B**: {b_name}")
+            if len(sel_exist_top) > 2:
+                st.caption(f"추가로 {len(sel_exist_top)-2}개 이미지가 더 선택되어 있습니다. (최대 2개까지 비교)")
+    
     # 공통: 모드 선택 + 도움말 옆에 배치
         colm1, colm2 = st.columns([3, 7])
         with colm1:
             # 내부 값(key)은 변경하지 않되, 사용자에게 보이는 라벨은 한국어로 제공합니다.
-            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["비교(좌우)","페이드(겹침)", "하이라이터(오버레이)"], index=0, horizontal=True, key="cmp_mode_top")
+            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["비교(좌우)","페이드(겹침)", "차이(Heatmap)", "하이라이터(오버레이)"], index=0, horizontal=True, key="cmp_mode_top")
         with colm2:
             # 선택된 비교 모드에 해당하는 설명만 표시
             # cmp_mode_top 내부값은 라디오의 label로 들어가므로 위젯의 라벨에 따라 분기합니다.
@@ -852,9 +897,9 @@ with tab2:
                     "- 권장: Threshold = 15, 색상 = Yellow\n"
                 )
 
-    # 모드별 파라미터 제어. '비교'는 추가 컨트롤이 없습니다.
-    # 위젯이 렌더되지 않더라도 해당 변수가 존재하도록 보장(재실행 시 NameError 방지)
-    # 기본값을 제공; 실제 위젯 선택 시 Streamlit이 세션 상태를 갱신합니다.
+        # 모드별 파라미터 제어. '비교'는 추가 컨트롤이 없습니다.
+        # 위젯이 렌더되지 않더라도 해당 변수가 존재하도록 보장(재실행 시 NameError 방지)
+        # 기본값을 제공; 실제 위젯 선택 시 Streamlit이 세션 상태를 갱신합니다.
         if 'diff_blur_top' not in st.session_state:
             st.session_state['diff_blur_top'] = 3
         if 'diff_thresh_top' not in st.session_state:
@@ -863,59 +908,124 @@ with tab2:
             st.session_state['hl_color_top'] = 'Yellow'
         if 'hl_thresh_top' not in st.session_state:
             st.session_state['hl_thresh_top'] = 20
-    # 페이드(블렌드) 기본값
-        if 'fade_alpha' not in st.session_state:
-            st.session_state['fade_alpha'] = 0.5
+        # 페이드(블렌드) 기본값
+        if 'fade_alpha_top' not in st.session_state:
+            st.session_state['fade_alpha_top'] = 0.5
 
         # 모드별 파라미터 위젯 (세션 상태를 갱신함)
+        param_cols = st.columns([2, 2, 6])
         if cmp_mode_top == "비교(좌우)":
             # 단순 좌우 비교는 별도의 파라미터 없음
             pass
         elif cmp_mode_top == "페이드(겹침)":
-            fade_alpha = st.slider("Fade: A 이미지 알파", 0.0, 1.0, float(st.session_state.get('fade_alpha', 0.5)), 0.05, key='fade_alpha')
+            with param_cols[0]:
+                fade_alpha_top = st.slider("A 이미지 알파", 0.0, 1.0, float(st.session_state.get('fade_alpha_top', 0.5)), 0.05, key='fade_alpha_top')
+        elif cmp_mode_top == "차이(Heatmap)":
+            with param_cols[0]:
+                diff_blur_top = st.slider("블러", 1, 9, st.session_state.get('diff_blur_top', 3), 2, key='diff_blur_top')
+            with param_cols[1]:
+                diff_thresh_top = st.slider("임계값", 1, 50, st.session_state.get('diff_thresh_top', 10), 1, key='diff_thresh_top')
         elif cmp_mode_top == "하이라이터(오버레이)":
-            hl_color_top = st.selectbox("하이라이터 색상", ["Yellow", "Red", "Lime", "Cyan"], index=["Yellow", "Red", "Lime", "Cyan"].index(st.session_state.get('hl_color_top', 'Yellow')), key="hl_color_top")
-            hl_thresh_top = st.slider("하이라이터: 임계값", 1, 100, st.session_state.get('hl_thresh_top', 20), 1, key="hl_thresh_top")
+            with param_cols[0]:
+                hl_color_top = st.selectbox("하이라이터 색상", ["Yellow", "Red", "Lime", "Cyan"], index=["Yellow", "Red", "Lime", "Cyan"].index(st.session_state.get('hl_color_top', 'Yellow')), key="hl_color_top")
+            with param_cols[1]:
+                hl_thresh_top = st.slider("임계값", 1, 100, st.session_state.get('hl_thresh_top', 20), 1, key="hl_thresh_top")
 
         if len(sel_exist_top) == 1:
+            # 1개 선택 시에도 해제 버튼 제공
+            clear_single_col = st.columns([1, 9])
+            with clear_single_col[0]:
+                if st.button("🗑️ 해제", key="clear_single_top", help="선택한 이미지 해제"):
+                    st.session_state["gallery_selected"] = []
+                    st.rerun()
+            
             bigp = make_display_image(sel_exist_top[0], size=max(1400, group_large_px), fmt=disp_fmt, quality=disp_quality)
             st.image(_safe_image_open(bigp), caption=os.path.basename(sel_exist_top[0]), use_container_width=True)
-        else:
+        elif len(sel_exist_top) >= 2:
             a_path, b_path = sel_exist_top[:2]
+            
+            # 선택 해제 버튼들
+            clear_cols = st.columns([1, 1, 1, 7])
+            with clear_cols[0]:
+                if st.button("🗑️ A 해제", key="clear_a_top", help="첫 번째 선택 이미지 해제"):
+                    if a_path in st.session_state["gallery_selected"]:
+                        st.session_state["gallery_selected"].remove(a_path)
+                        st.rerun()
+            with clear_cols[1]:
+                if st.button("🗑️ B 해제", key="clear_b_top", help="두 번째 선택 이미지 해제"):
+                    if b_path in st.session_state["gallery_selected"]:
+                        st.session_state["gallery_selected"].remove(b_path)
+                        st.rerun()
+            with clear_cols[2]:
+                if st.button("🗑️ 전체 해제", key="clear_all_top", help="모든 선택 이미지 해제"):
+                    st.session_state["gallery_selected"] = []
+                    st.rerun()
+            
             # 사용자가 단순 비교(좌우)를 선택하면 두 이미지를 나란히 표시; 그렇지 않으면 병합/처리된 단일 이미지를 표시
             if cmp_mode_top == "비교(좌우)":
                 big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
                 big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
                 c1t, c2t = st.columns(2)
                 with c1t:
-                    st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
+                    st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
                 with c2t:
-                    st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
+                    st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
             else:
                 try:
                     if cmp_mode_top == "페이드(겹침)":
-                        fade_alpha_val = float(st.session_state.get('fade_alpha', 0.5))
+                        fade_alpha_val = float(st.session_state.get('fade_alpha_top', 0.5))
                         blendp = _cached_blend_path(a_path, b_path, alpha=fade_alpha_val)
-                        if blendp:
-                            st.image(blendp, caption=f"페이드(알파={fade_alpha_val:.2f})", use_container_width=True)
+                        if blendp and os.path.exists(blendp):
+                            st.image(blendp, caption=f"페이드 블렌드 (A 알파={fade_alpha_val:.2f})", use_container_width=True)
                         else:
                             arr = _blend_images_rgb(a_path, b_path, alpha=fade_alpha_val)
-                            st.image(arr, caption=f"페이드(알파={fade_alpha_val:.2f})", use_container_width=True)
-
-                    else:
+                            st.image(arr, caption=f"페이드 블렌드 (A 알파={fade_alpha_val:.2f})", use_container_width=True)
+                    elif cmp_mode_top == "차이(Heatmap)":
+                        blur_val = st.session_state.get('diff_blur_top', 3)
+                        thresh_val = st.session_state.get('diff_thresh_top', 10)
+                        try:
+                            # 캐시된 heatmap 사용
+                            cached_heatmap = _cached_heatmap_path(a_path, b_path, blur_size=blur_val, threshold=thresh_val)
+                            if cached_heatmap and os.path.exists(cached_heatmap):
+                                st.image(cached_heatmap, caption=f"차이 Heatmap (블러={blur_val}, 임계={thresh_val})", use_container_width=True)
+                            else:
+                                # 캐시 실패 시 직접 생성
+                                a_gray, b_gray = _read_gray_same_size(a_path, b_path)
+                                heatmap = _absdiff_heatmap(a_gray, b_gray, blur_size=blur_val, threshold=thresh_val)
+                                st.image(heatmap, caption=f"차이 Heatmap (블러={blur_val}, 임계={thresh_val})", use_container_width=True)
+                        except Exception as he:
+                            st.error(f"Heatmap 생성 실패: {he}")
+                            # 폴백: 기본 좌우 비교
+                            big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                            big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                            c1t, c2t = st.columns(2)
+                            with c1t:
+                                st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
+                            with c2t:
+                                st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
+                    elif cmp_mode_top == "하이라이터(오버레이)":
                         color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
                         # session_state에서 값을 읽되, NameError 방지를 위해 기본값을 사용
                         hl_color = st.session_state.get('hl_color_top', 'Yellow')
                         hl_thresh = st.session_state.get('hl_thresh_top', 20)
                         col_bgr = color_map.get(hl_color, (0, 255, 255))
                         cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh)
-                        if cached:
-                            st.image(cached, caption=f"하이라이터 ({hl_color}, 임계={hl_thresh})", use_container_width=True)
+                        if cached and os.path.exists(cached):
+                            st.image(cached, caption=f"하이라이터 오버레이 ({hl_color}, 임계={hl_thresh})", use_container_width=True)
                         else:
                             highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh)
-                            st.image(highlighted, caption=f"하이라이터 ({hl_color}, 임계={hl_thresh})", use_container_width=True)
+                            st.image(highlighted, caption=f"하이라이터 오버레이 ({hl_color}, 임계={hl_thresh})", use_container_width=True)
                 except Exception as e:
-                    st.info(f"비교 렌더 실패: {e}")
+                    st.error(f"비교 렌더링 실패: {e}")
+                    # 오류 발생 시 기본 좌우 비교로 폴백
+                    st.info("기본 좌우 비교로 표시합니다.")
+                    big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                    big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                    c1t, c2t = st.columns(2)
+                    with c1t:
+                        st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
+                    with c2t:
+                        st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
 
     grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
     if os.path.isdir(grouped_dir):
@@ -1018,6 +1128,7 @@ with tab2:
                             label = "✔ 비교 취소" if selected else "↔ 비교 선택"
                             if st.button(label, key=f"cmp_rescan_{gid}_{idx}"):
                                 toggle_compare(pth)
+                                st.rerun()
                             disp = make_display_image(pth, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
                             st.image(_safe_image_open(disp), caption=f"{kind}: {name}", use_container_width=True)
                         else:
@@ -1043,20 +1154,7 @@ with tab3:
             img_path = os.path.join(ok_dir, f)
             disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
             with cols[idx % grid_cols]:
-                # 비교 토글 버튼으로 통일 (전역 gallery_selected 사용, 절대 경로 저장)
-                img_abs = os.path.join(ok_dir, f)
-                selected = img_abs in st.session_state.get("gallery_selected", [])
-                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                if st.button(label, key=f"cmp_ok_{idx}"):
-                    toggle_compare(img_abs)
-                caption = f + ("  ✅ 선택됨" if selected else "")
-                # 작은 배지: 선택 상태가 있으면 이미지 위에 overlay 표시 (HTML 사용)
-                if selected:
-                    badge_html = f"<div style='position:relative;display:inline-block'>"
-                    badge_html += f"<div style='position:absolute;z-index:3;right:8px;top:8px;padding:4px 6px;background:#10B981;color:white;border-radius:6px;font-size:12px;font-weight:600;'>선택됨</div>"
-                    badge_html += f"</div>"
-                    st.markdown(badge_html, unsafe_allow_html=True)
-                st.image(_safe_image_open(disp), caption=caption, use_container_width=True)
+                st.image(_safe_image_open(disp), caption=f, use_container_width=True)
 
     if sel in ["모두 보기", "공백만"] and os.path.isdir(blank_dir):
         st.subheader("⭕ 공백 답안")
@@ -1066,43 +1164,8 @@ with tab3:
             img_path = os.path.join(blank_dir, f)
             disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
             with cols[idx % grid_cols]:
-                img_abs = os.path.join(blank_dir, f)
-                selected = img_abs in st.session_state.get("gallery_selected", [])
-                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                if st.button(label, key=f"cmp_blank_{idx}"):
-                    toggle_compare(img_abs)
-                caption = f + ("  ✅ 선택됨" if selected else "")
-                if selected:
-                    badge_html = f"<div style='position:relative;display:inline-block'>"
-                    badge_html += f"<div style='position:absolute;z-index:3;right:8px;top:8px;padding:4px 6px;background:#10B981;color:white;border-radius:6px;font-size:12px;font-weight:600;'>선택됨</div>"
-                    badge_html += f"</div>"
-                    st.markdown(badge_html, unsafe_allow_html=True)
-                st.image(_safe_image_open(disp), caption=caption, use_container_width=True)
+                st.image(_safe_image_open(disp), caption=f, use_container_width=True)
 
-    # === Tab3: 선택된 비교 항목을 즉시 대형 비교로 표시 ===
-    if st.session_state.get('gallery_selected'):
-        st.markdown("---")
-        st.markdown("### 🔍 선택 비교 (대형) — 탭3")
-    # gallery_selected는 이미 절대 경로를 저장해야 합니다
-        sel_paths = [p for p in st.session_state.get('gallery_selected', []) if p and os.path.isfile(p)]
-        if len(sel_paths) == 1:
-            big = make_display_image(sel_paths[0], size=max(1400, grid_target_px), fmt=disp_fmt, quality=disp_quality)
-            st.image(_safe_image_open(big), caption=os.path.basename(sel_paths[0]), use_container_width=True)
-        elif len(sel_paths) >= 2:
-            a_path, b_path = sel_paths[:2]
-            big_a = make_display_image(a_path, size=max(1600, grid_target_px), fmt=disp_fmt, quality=disp_quality)
-            big_b = make_display_image(b_path, size=max(1600, grid_target_px), fmt=disp_fmt, quality=disp_quality)
-            c1, c2 = st.columns(2)
-            with c1:
-                st.image(_safe_image_open(big_a), caption=os.path.basename(a_path), use_container_width=True)
-            with c2:
-                st.image(_safe_image_open(big_b), caption=os.path.basename(b_path), use_container_width=True)
-        # 선택 초기화 버튼
-        c1, c2 = st.columns([1, 9])
-        with c1:
-            if st.button("선택 초기화", key="tab3_reset"):
-                st.session_state.gallery_selected = []
-            st.caption("(버튼: 현재 비교 선택을 모두 초기화합니다)")
 
 # === Tab4: 전체 보기 ===
 with tab4:
