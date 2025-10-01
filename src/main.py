@@ -277,7 +277,7 @@ def main():
 
             # 출력(콘솔 간단 로그 유지)
             try:
-                eta_s = _format_secs(eta)
+                etcs(eta)
                 elapsed_s = _format_secs(elapsed)
                 print(f"[진행] {stage:12s} {pct_val*100:5.1f}%  ETA:{eta_s}  경과:{elapsed_s}  {msg}")
             except Exception:
