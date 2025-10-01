@@ -1,2 +1,2 @@
-timestamp,platform,n_images,mean_size,mean_w,mean_h,batch_size,num_workers,use_ocr,use_lpips,embed_backend,gpu,mem_total,cpu_count,meta_s,model_load_s,embed_forward_s,embed_s,ann_s,io_s,total_s
-1759285135,Windows,30,1609928.7333333334,1757.6,2480.6666666666665,8,0,0,0,dinov2,0,16973877248,12,4.3121,0.2777,2.5717,2.8494,0.0021,0.1943,7.3623
+timestamp,platform,n_images,mean_size,mean_w,mean_h,batch_size,num_workers,use_ocr,use_lpips,embed_backend,gpu,gpu_count,gpu_memory_gb,gpu_name,mem_total,cpu_count,meta_s,model_load_s,embed_forward_s,embed_s,ann_s,io_s,total_s
+1759294776,Windows,116,1655585.4827586208,1757.2758620689656,2482.7844827586205,29,4,0,0,dinov2,1,1,6.0,GeForce GTX 1660 Ti,16973877248,12,17.391,9.1158,21.9469,31.0627,0.0126,0.6905,49.188
