@@ -57,7 +57,7 @@ except Exception:
 
 # 선택적: PDQ 해시
 try:
-    import pdqhash  # may be missing on some platforms
+    import pdqhash 
     _HAS_PDQ = True
 except Exception:
     _HAS_PDQ = False
@@ -98,11 +98,52 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
 
+def diagnose_gpu():
+    """GPU 상태를 진단하고 문제점을 찾습니다."""
+    print("=" * 60)
+    print("🔍 GPU 진단 시작")
+    print("=" * 60)
+    
+    print(f"PyTorch 버전: {torch.__version__}")
+    print(f"CUDA 사용 가능: {torch.cuda.is_available()}")
+    
+    if torch.cuda.is_available():
+        print(f"CUDA 버전: {torch.version.cuda}")
+        print(f"GPU 개수: {torch.cuda.device_count()}")
+        
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            print(f"GPU {i}: {props.name}")
+            print(f"  메모리: {props.total_memory / (1024**3):.1f}GB")
+            print(f"  Compute Capability: {props.major}.{props.minor}")
+            
+        try:
+            # 더 작은 테스트 텐서로 빠른 확인
+            test_tensor = torch.zeros(100, 100).cuda()
+            print("✅ GPU 텐서 생성 테스트 성공")
+            del test_tensor
+            torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"❌ GPU 텐서 생성 테스트 실패: {e}")
+    else:
+        print("❌ CUDA 사용 불가능")
+        print("가능한 원인:")
+        print("  - NVIDIA GPU 드라이버가 설치되지 않음")
+        print("  - CUDA Toolkit이 설치되지 않음")
+        print("  - PyTorch가 CPU 버전으로 설치됨")
+        
+    print("=" * 60)
+
+
 @dataclass
 class DetectorConfig:
     # 백엔드
     embed_backend: str = "dinov2"  # or resnet18
     ann_backend: str = "auto"       # auto/brute/faiss/hnsw
+
+    # GPU 사용 설정
+    force_gpu: bool = False         # GPU를 강제로 시도 (False로 변경: 안정성 우선)
+    fallback_to_cpu: bool = True    # GPU 실패 시 CPU로 fallback (항상 True)
 
     # ANN 파라미터
     k: int = 20
@@ -143,17 +184,83 @@ class DetectorConfig:
 
 
 # -------------------------- 적응적 최적화 ---------------------
-def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_has_gpu: bool = None) -> DetectorConfig:
+def get_device_info():
+    """GPU/CPU 디바이스 정보를 빠르게 조회합니다. GPU 실패 시 항상 CPU로 fallback."""
+    device_info = {
+        'has_gpu': False,
+        'gpu_count': 0,
+        'gpu_memory_gb': 0,
+        'gpu_name': '',
+        'device': torch.device('cpu')
+    }
+    
+    try:
+        # 빠른 CUDA 체크 (타임아웃 없이)
+        cuda_available = torch.cuda.is_available()
+        
+        if cuda_available:
+            gpu_count = torch.cuda.device_count()
+            
+            if gpu_count > 0:
+                # 빠른 GPU 정보 수집
+                try:
+                    props = torch.cuda.get_device_properties(0)
+                    device_info['has_gpu'] = True
+                    device_info['gpu_count'] = gpu_count
+                    device_info['gpu_memory_gb'] = props.total_memory / (1024**3)
+                    device_info['gpu_name'] = props.name
+                    device_info['device'] = torch.device('cuda:0')
+                    
+                    logger.info(f"🚀 GPU 감지: {device_info['gpu_name']} ({device_info['gpu_memory_gb']:.1f}GB)")
+                    
+                    # 매우 빠른 GPU 테스트 (작은 텐서)
+                    try:
+                        test_tensor = torch.zeros(10).cuda()
+                        del test_tensor
+                        torch.cuda.empty_cache()
+                        logger.info("✅ GPU 기본 테스트 통과")
+                    except Exception as e:
+                        logger.warning(f"⚠️ GPU 테스트 실패, CPU로 fallback: {e}")
+                        device_info['has_gpu'] = False
+                        device_info['device'] = torch.device('cpu')
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ GPU 정보 수집 실패, CPU로 fallback: {e}")
+                    device_info['has_gpu'] = False
+                    device_info['device'] = torch.device('cpu')
+            else:
+                logger.info("GPU 장치 없음 → CPU 사용")
+        else:
+            logger.info("CUDA 사용 불가 → CPU 사용")
+            
+    except Exception as e:
+        logger.warning(f"GPU 체크 실패, CPU로 fallback: {e}")
+    
+    # 최종 로깅
+    if device_info['has_gpu']:
+        logger.info(f"💪 GPU 모드: {device_info['gpu_name']}")
+    else:
+        logger.info("🖥️ CPU 모드로 실행")
+    
+    return device_info
+
+
+def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_info: dict = None) -> DetectorConfig:
     """
-    데이터 크기에 따라 설정을 적응적으로 최적화합니다.
+    데이터 크기 및 GPU 사양에 따라 설정을 적응적으로 최적화합니다.
     
     최적화 전략:
-    - 소규모 데이터(< 50): 고정 오버헤드 최소화, 단순한 백엔드 사용
-    - 중간 규모(50-500): 균형잡힌 설정
+    - GPU 우선: GTX 1660 Ti 같은 GPU가 있으면 최대한 활용
+    - 소규모 데이터(< 50): 고정 오버헤드 최소화
+    - 중간 규모(50-500): 균형잡힌 설정  
     - 대규모 데이터(> 500): 배치 처리 최적화, 고성능 백엔드 활용
     """
     if not cfg.auto_optimize:
         return cfg
+    
+    # 디바이스 정보 가져오기
+    if device_info is None:
+        device_info = get_device_info()
     
     # 새로운 설정 객체 생성 (원본 보존)
     optimized = DetectorConfig(
@@ -182,27 +289,26 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_has
         auto_optimize=cfg.auto_optimize
     )
     
-    if device_has_gpu is None:
-        try:
-            device_has_gpu = torch.cuda.is_available()
-        except Exception:
-            device_has_gpu = False
-    
     cpu_count = os.cpu_count() or 2
+    has_gpu = device_info['has_gpu']
+    gpu_memory_gb = device_info['gpu_memory_gb']
     
     if n_images < 50:
         # 소규모: 고정 오버헤드 최소화
         logger.info(f"소규모 데이터({n_images}개) 최적화: 고정 오버헤드 최소화")
         
         # 작은 배치 크기로 메모리 사용량 줄이고 즉시 시작
-        optimized.batch_size = min(8, max(1, n_images))
+        if has_gpu:
+            optimized.batch_size = min(16, max(4, n_images))  # GPU가 있으면 조금 더 큰 배치
+        else:
+            optimized.batch_size = min(8, max(1, n_images))
         
         # 단순한 워커 설정 (프로세스 생성 오버헤드 최소화)
         optimized.num_workers = 0
         
-        # 가벼운 백엔드 우선 선택
+        # 가벼운 백엔드 우선 선택 (GPU가 있어도 소규모에선 DINOv2 사용)
         if optimized.embed_backend == "auto":
-            optimized.embed_backend = "resnet18"  # 더 빠른 로딩
+            optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
         
         # ANN 백엔드를 brute force로 (인덱스 구축 오버헤드 없음)
         if optimized.ann_backend == "auto":
@@ -219,14 +325,21 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_has
         # 중간 규모: 균형잡힌 설정
         logger.info(f"중간 규모 데이터({n_images}개) 최적화: 균형잡힌 설정")
         
-        # 적당한 배치 크기
-        if device_has_gpu:
-            optimized.batch_size = min(32, max(8, n_images // 4))
+        # GPU 메모리에 따른 배치 크기 최적화
+        if has_gpu:
+            if gpu_memory_gb >= 6:  # GTX 1660 Ti급 이상
+                optimized.batch_size = min(64, max(16, n_images // 4))
+            else:  # 저메모리 GPU
+                optimized.batch_size = min(32, max(8, n_images // 6))
         else:
             optimized.batch_size = min(16, max(4, n_images // 8))
         
         # 적당한 병렬 처리
         optimized.num_workers = min(4, max(1, cpu_count // 2))
+        
+        # GPU가 있으면 DINOv2 우선, 없으면 ResNet18
+        if optimized.embed_backend == "auto":
+            optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
         
         # 효율적인 ANN 백엔드 선택
         if optimized.ann_backend == "auto":
@@ -237,18 +350,15 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_has
                 
     else:
         # 대규모: 배치 처리 최적화
-        logger.info(f"대규모 데이터({n_images}개) 최적화: 배치 처리 및 고성능 백엔드 활용")
+        logger.info(f"대규모 데이터({n_images}개) 최적화: GPU 최적화 및 고성능 백엔드 활용")
         
-        # 큰 배치 크기로 처리량 최대화
-        if device_has_gpu:
-            # GPU 메모리에 따라 배치 크기 조정
-            try:
-                gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                if gpu_memory_gb >= 8:
-                    optimized.batch_size = min(128, max(32, n_images // 10))
-                else:
-                    optimized.batch_size = min(64, max(16, n_images // 20))
-            except Exception:
+        # GPU 메모리에 따른 대용량 배치 처리
+        if has_gpu:
+            if gpu_memory_gb >= 8:  # 고사양 GPU
+                optimized.batch_size = min(128, max(32, n_images // 10))
+            elif gpu_memory_gb >= 6:  # GTX 1660 Ti급 (6GB)
+                optimized.batch_size = min(96, max(24, n_images // 15))
+            else:  # 저메모리 GPU (4GB 이하)
                 optimized.batch_size = min(64, max(16, n_images // 20))
         else:
             # CPU는 메모리를 더 보수적으로 사용
@@ -256,6 +366,10 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_has
         
         # 최대 병렬 처리
         optimized.num_workers = min(8, max(2, cpu_count))
+        
+        # GPU가 있으면 무조건 DINOv2, 없으면 ResNet18
+        if optimized.embed_backend == "auto":
+            optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
         
         # 고성능 백엔드 우선 선택
         if optimized.ann_backend == "auto":
@@ -288,7 +402,9 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_has
     # k 값이 데이터 크기보다 클 경우 조정
     optimized.k = min(optimized.k, max(1, n_images - 1))
     
-    logger.info(f"최적화 결과: batch_size={optimized.batch_size}, num_workers={optimized.num_workers}, "
+    # GPU 정보 로깅
+    gpu_info = f" [GPU: {device_info['gpu_name']}]" if has_gpu else " [CPU 모드]"
+    logger.info(f"최적화 결과{gpu_info}: batch_size={optimized.batch_size}, num_workers={optimized.num_workers}, "
                 f"ann_backend={optimized.ann_backend}, embed_backend={optimized.embed_backend}")
     
     return optimized
@@ -325,7 +441,12 @@ def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Di
         except Exception:
             widths.append(0)
             heights.append(0)
+    
     n = len(input_paths)
+    
+    # GPU 정보 상세 수집
+    device_info = get_device_info()
+    
     feat = {
         "timestamp": int(time.time()),
         "platform": platform.system(),
@@ -338,7 +459,10 @@ def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Di
         "use_ocr": int(bool(getattr(cfg, "use_ocr", False))),
         "use_lpips": int(bool(getattr(cfg, "use_lpips", False))),
         "embed_backend": str(getattr(cfg, "embed_backend", "")),
-        "gpu": int(torch.cuda.is_available()),
+        "gpu": int(device_info['has_gpu']),
+        "gpu_count": int(device_info['gpu_count']),
+        "gpu_memory_gb": round(device_info['gpu_memory_gb'], 1),
+        "gpu_name": str(device_info['gpu_name']),
     }
     try:
         if _HAS_PSUTIL:
@@ -453,14 +577,16 @@ class ImgDataset(Dataset):
         self.paths = paths
         self.roi = roi_ratio
         self.backend = backend
+        
+        # DINOv2 입력 크기 문제 해결
         if backend == "dinov2":
             self.tf = transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
+                transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.CenterCrop(224),  # DINOv2는 정확히 224x224 필요
                 transforms.ToTensor(),
-                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),  # ImageNet 정규화
             ])
-        else:
+        else:  # ResNet18
             self.tf = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
@@ -474,79 +600,263 @@ class ImgDataset(Dataset):
     def __getitem__(self, idx):
         p = self.paths[idx]
         try:
+            # 바이트 기반 로딩으로 경로 문제 해결
             with open(p, 'rb') as f:
                 data = f.read()
             img = Image.open(io.BytesIO(data)).convert("RGB")
         except Exception:
+            # 폴백: 직접 로딩
             img = Image.open(p).convert("RGB")
+        
+        # ROI 크롭
         img = crop_roi(img, self.roi)
-        return self.tf(img), p
+        
+        # 변환 적용
+        tensor = self.tf(img)
+        
+        # 디버깅: 텐서 크기 확인
+        if tensor.shape != (3, 224, 224):
+            logger.warning(f"잘못된 텐서 크기: {tensor.shape}, 경로: {p}")
+            # 강제로 224x224로 리사이즈
+            tensor = transforms.Resize((224, 224))(tensor)
+        
+        return tensor, p
 
 
-def load_model(device: torch.device, backend: str) -> nn.Module:
-    # 안전한 모델 로드: timm 실패 시 ResNet18로 폴백
-    try:
-        if backend == "dinov2" and _HAS_TIMM:
-            model = timm.create_model("vit_base_patch14_dinov2.lvd142m", pretrained=True, num_classes=0)
-            model.eval().to(device)
+def load_model(device: torch.device, backend: str, force_gpu: bool = False, fallback_to_cpu: bool = True) -> nn.Module:
+    """
+    안정적인 모델 로딩: GPU 실패 시 항상 CPU로 fallback
+    DINOv2 입력 크기 문제 해결
+    """
+    model_name = None
+    
+    # GPU 강제 사용 체크
+    if force_gpu and torch.cuda.is_available() and device.type == "cpu":
+        logger.info("💡 GPU 강제 사용 시도: CPU → GPU")
+        device = torch.device("cuda:0")
+        try:
+            torch.cuda.empty_cache()
+        except:
+            pass
+    
+    # GPU/CPU 정보 로깅
+    if device.type == "cuda":
+        try:
+            gpu_name = torch.cuda.get_device_properties(0).name
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            logger.info(f"🚀 GPU 모델 로딩: {gpu_name} ({gpu_memory:.1f}GB)")
+        except Exception as e:
+            logger.warning(f"GPU 정보 조회 실패: {e}")
+            if fallback_to_cpu:
+                device = torch.device("cpu")
+    else:
+        logger.info("🖥️ CPU 모델 로딩 중...")
+    
+    # DINOv2 시도 (입력 크기 문제 해결)
+    if backend == "dinov2" and _HAS_TIMM:
+        try:
+            logger.info("🔄 DINOv2 ViT-Base 모델 로딩...")
+            
+            # DINOv2 모델 로딩 시 정확한 설정
+            model = timm.create_model(
+                "vit_base_patch14_dinov2.lvd142m", 
+                pretrained=True, 
+                num_classes=0,  # 분류층 제거
+                img_size=224    # 명시적으로 224x224 입력 크기 설정
+            )
+            model = model.eval().to(device)
+            model_name = "DINOv2 ViT-Base"
+            
+            # 입력 크기 테스트
+            with torch.no_grad():
+                test_input = torch.randn(1, 3, 224, 224).to(device)
+                test_output = model(test_input)
+                logger.info(f"✅ {model_name} 로딩 완료 - 출력 크기: {test_output.shape}")
+                del test_input, test_output
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+            
             return model
-    except Exception as e:
-        logger.warning(f"timm 모델 로드 실패(backend={backend}): {e}. ResNet18로 폴백합니다.")
-    # ResNet 폴백
+            
+        except Exception as e:
+            logger.warning(f"❌ DINOv2 로딩 실패: {e}")
+            # GPU에서 실패했으면 CPU로 재시도
+            if device.type == "cuda" and fallback_to_cpu:
+                logger.info("🔄 CPU에서 DINOv2 재시도...")
+                device = torch.device("cpu")
+                try:
+                    model = timm.create_model(
+                        "vit_base_patch14_dinov2.lvd142m", 
+                        pretrained=True, 
+                        num_classes=0,
+                        img_size=224
+                    )
+                    model = model.eval().to(device)
+                    model_name = "DINOv2 ViT-Base"
+                    logger.info(f"✅ {model_name} CPU 로딩 완료")
+                    return model
+                except Exception as e2:
+                    logger.warning(f"❌ CPU에서도 DINOv2 실패: {e2}")
+            
+            logger.info("ResNet18로 폴백...")
+    
+    # ResNet18 폴백
     try:
+        logger.info("🔄 ResNet18 모델 로딩...")
         model = resnet18(weights=ResNet18_Weights.DEFAULT)
-        model.fc = nn.Identity()
-        model.eval().to(device)
+        model.fc = nn.Identity()  # 분류층 제거
+        model = model.eval().to(device)
+        model_name = "ResNet18"
+        
+        # 테스트
+        with torch.no_grad():
+            test_input = torch.randn(1, 3, 224, 224).to(device)
+            test_output = model(test_input)
+            logger.info(f"✅ {model_name} 로딩 완료 - 출력 크기: {test_output.shape}")
+            del test_input, test_output
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        
         return model
+        
     except Exception as e:
-        logger.error(f"ResNet18 로드 실패: {e}")
-        raise
+        logger.error(f"❌ GPU에서 ResNet18 실패: {e}")
+        # 최후의 CPU 시도
+        if device.type == "cuda" and fallback_to_cpu:
+            logger.info("🔄 최후의 CPU 시도...")
+            try:
+                device = torch.device("cpu")
+                model = resnet18(weights=ResNet18_Weights.DEFAULT)
+                model.fc = nn.Identity()
+                model = model.eval().to(device)
+                model_name = "ResNet18"
+                logger.info(f"✅ {model_name} CPU 최후 fallback 완료")
+                return model
+            except Exception as e2:
+                logger.error(f"❌ CPU에서도 ResNet18 실패: {e2}")
+        
+        raise RuntimeError(f"모든 모델 로딩 실패. 마지막 오류: {e}")
 
 
 def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, num_workers: int,
                        roi_ratio: Tuple[float, float, float, float], backend: str,
-                       progress_callback: Optional[callable] = None):
+                       progress_callback: Optional[callable] = None, force_gpu: bool = False):
+    """
+    안정적인 임베딩 계산: GPU 실패 시 자동으로 CPU fallback
+    입력 크기 검증 추가
+    """
+    # GPU 강제 사용 체크
+    if force_gpu and torch.cuda.is_available() and device.type == "cpu":
+        logger.info("💡 GPU 강제 사용: CPU → GPU 시도")
+        device = torch.device("cuda:0")
+        try:
+            torch.cuda.empty_cache()
+        except:
+            logger.warning("GPU 메모리 정리 실패, 계속 진행")
+    
     ds = ImgDataset(paths, roi_ratio, backend)
+    
+    # GPU 사용 시 pin_memory 최적화
+    pin_memory = False
+    try:
+        pin_memory = (device.type == "cuda" and torch.cuda.is_available())
+    except:
+        pin_memory = False
+    
+    logger.info(f"📊 DataLoader 설정: batch_size={batch_size}, num_workers={num_workers}, pin_memory={pin_memory}")
+    
     dl = DataLoader(
         ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=(device.type == "cuda")
+        num_workers=num_workers, pin_memory=pin_memory
     )
-    # 모델 로드 시간을 별도로 측정하여 시작업(가중치 로드) 비용과
-    # 이미지당 전방 전달 비용을 분리해 진단할 수 있도록 합니다.
+    
+    # 모델 로드
+    logger.info(f"🔄 모델 로딩 중... (backend: {backend}, device: {device})")
     t_model0 = time.time()
-    model = load_model(device, backend)
+    
+    try:
+        model = load_model(device, backend, force_gpu, fallback_to_cpu=True)
+        actual_device = next(model.parameters()).device
+        if actual_device != device:
+            logger.info(f"모델이 다른 디바이스에 로드됨: {device} → {actual_device}")
+            device = actual_device
+    except Exception as e:
+        logger.error(f"모델 로딩 실패: {e}")
+        # 최후의 CPU 시도
+        logger.info("🆘 최후의 CPU 시도...")
+        device = torch.device("cpu")
+        model = load_model(device, "resnet18", force_gpu=False, fallback_to_cpu=True)
+    
     t_model1 = time.time()
     model_load_s = float(t_model1 - t_model0)
+    logger.info(f"⏱️ 모델 로딩 시간: {model_load_s:.2f}초")
+
+    # GPU 메모리 정보 로깅
+    if device.type == "cuda":
+        try:
+            torch.cuda.empty_cache()
+            memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
+            memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+            logger.info(f"GPU 메모리 사용량: {memory_allocated:.2f}GB 할당, {memory_reserved:.2f}GB 예약")
+        except Exception:
+            pass
 
     embs = []
     ordered_paths = []
     total = len(ds)
     processed = 0
+    
+    logger.info(f"임베딩 계산 시작: {total}개 이미지, 배치 크기: {batch_size}")
+    
     with torch.no_grad():
-        for x, pths in dl:
+        for batch_idx, (x, pths) in enumerate(dl):
             try:
-                x = x.to(device)
+                # 입력 크기 검증
+                if x.shape[1:] != (3, 224, 224):
+                    logger.warning(f"배치 {batch_idx}: 잘못된 입력 크기 {x.shape}")
+                    # 크기 강제 조정
+                    x = torch.nn.functional.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+                
+                # GPU로 데이터 이동
+                if device.type == "cuda":
+                    x = x.to(device, non_blocking=True)
+                else:
+                    x = x.to(device)
+                
+                # 모델 추론
                 out_t = model(x)
                 out = out_t.detach().cpu().numpy()
+                
+                # 출력 형태 정규화
                 if out.ndim > 2:
                     out = out.reshape(out.shape[0], -1)
                 out = out.astype(np.float32)
+                
                 embs.append(out)
                 ordered_paths.extend(list(pths))
                 processed += out.shape[0]
+                
+                # 진행률 콜백
                 if progress_callback is not None and total > 0:
                     try:
-                        # ETA (남은 시간) 계산의 안정성을 위해 '처리된 개수/전체 개수' 형태의 엄격한 숫자 메시지를 보냅니다.
                         progress_callback('embed', float(processed) / float(total), f"{processed}/{total}")
                     except Exception:
                         pass
+                        
             except Exception as e:
-                logger.warning(f"임베딩 배치 처리 실패(일부 배치 건너뜀): {e}")
+                logger.error(f"임베딩 배치 {batch_idx} 처리 실패: {e}")
+                # 심각한 오류면 CPU로 재시도
+                if device.type == "cuda" and "doesn't match model" in str(e):
+                    logger.error("모델 입력 크기 불일치 - CPU로 재시도")
+                    raise e  # 상위에서 CPU 재시도하도록
                 continue
-    # 수집된 출력들을 스택으로 쌓습니다. 없으면 모델 출력 차원 수를 추정합니다.
+    
+    # 결과 정리
     if len(embs):
         embs = np.vstack(embs)
+        logger.info(f"임베딩 완료: {embs.shape[0]}개 이미지, 차원: {embs.shape[1]}")
     else:
+        # 빈 결과에 대한 차원 추정
         try:
             with torch.no_grad():
                 dummy = torch.zeros((1, 3, 224, 224), device=device)
@@ -558,20 +868,20 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         except Exception:
             D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
         embs = np.zeros((0, D_out), dtype=np.float32)
+        logger.warning("임베딩 결과가 비어있습니다.")
 
-    # 일관성 검사: ordered_paths 길이가 입력 paths와 일치하지 않으면 명확한 오류를 던집니다.
+    # 일관성 검사
     if len(ordered_paths) != len(paths):
-        # 일부 이미지가 배치 처리에서 누락된 경우 추후 인덱싱 오류를 방지하기 위해 예외를 던집니다.
         raise RuntimeError(f"compute_embeddings: ordered_paths ({len(ordered_paths)}) != input paths ({len(paths)}) — 일부 이미지 처리가 실패했습니다.")
 
+    # 최종 콜백
     if progress_callback is not None:
         try:
-            # 최종 콜백: 일관성을 위해 '완료된 개수/전체 개수'의 숫자 형식을 사용합니다.
             progress_callback('embed', 1.0, f"{len(ordered_paths)}/{total}")
         except Exception:
             pass
 
-    # GPU 메모리 해제
+    # GPU 메모리 정리
     try:
         del model
         if device.type == "cuda":
@@ -1058,9 +1368,51 @@ def detect_pipeline(input_dir: str, output_dir: str,
     if not files:
         raise FileNotFoundError(f"No images under {input_dir} (필터 적용됨)")
 
-    # 데이터 크기에 따른 설정 최적화
+    # 데이터 크기 및 GPU에 따른 설정 최적화 (안전한 방식)
     n_images = len(files)
-    cfg = optimize_config_for_data_size(cfg, n_images)
+    try:
+        device_info = get_device_info()
+    except Exception as e:
+        logger.warning(f"GPU 감지 실패, CPU 사용: {e}")
+        device_info = {
+            'has_gpu': False, 'gpu_count': 0, 'gpu_memory_gb': 0, 
+            'gpu_name': '', 'device': torch.device('cpu')
+        }
+    
+    cfg = optimize_config_for_data_size(cfg, n_images, device_info)
+    device = device_info['device']
+    
+    # �️ 안전한 디바이스 설정 (GPU 실패 시 무조건 CPU)
+    if cfg.fallback_to_cpu:
+        try:
+            # GPU 사용 가능성 재확인
+            if device.type == "cuda":
+                test_tensor = torch.zeros(1).to(device)
+                del test_tensor
+                torch.cuda.empty_cache()
+                logger.info(f"🎯 GPU 최종 확인 완료: {device}")
+        except Exception as e:
+            logger.warning(f"🛡️ GPU 테스트 실패, CPU로 안전 전환: {e}")
+            device = torch.device("cpu")
+            device_info['device'] = device
+            device_info['has_gpu'] = False
+    
+    # 강제 GPU 사용은 이제 선택적
+    if cfg.force_gpu and torch.cuda.is_available() and device.type == "cpu":
+        logger.info("🔥 GPU 강제 사용 모드 시도...")
+        try:
+            device = torch.device("cuda:0")
+            test_tensor = torch.zeros(1).to(device)
+            del test_tensor
+            torch.cuda.empty_cache()
+            device_info['device'] = device
+            device_info['has_gpu'] = True
+            logger.info("✅ GPU 강제 사용 성공")
+        except Exception as e:
+            logger.warning(f"❌ GPU 강제 사용 실패, CPU 유지: {e}")
+            device = torch.device("cpu")
+
+    logger.info(f"🎯 최종 디바이스: {device} ({'GPU' if device.type == 'cuda' else 'CPU 안전모드'})")
 
     # 2) Metadata: prefilters + density + (optional) OCR text
     _cb("meta", 0.05, "메타데이터 수집 시작 (pHash/PDQ + density)")
@@ -1121,8 +1473,8 @@ def detect_pipeline(input_dir: str, output_dir: str,
     logger.info("[2/5] CNN/ViT 임베딩 처리 …")
     t_emb0 = time.time()
     _cb("embed", 0.22, "임베딩 계산 시작")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 3) 임베딩: 캐시된 embeddings.npy 및 ordered_paths.txt 재사용 시도
+    
+    # 캐시된 embeddings.npy 및 ordered_paths.txt 재사용 시도
     logger.info("[2/5] CNN/ViT 임베딩 …")
     emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
     opaths_art = os.path.join(output_dir, "artifacts", "ordered_paths.txt")
@@ -1145,7 +1497,24 @@ def detect_pipeline(input_dir: str, output_dir: str,
             ordered_paths = None
 
     if embs is None:
-        embs, ordered_paths, model_load_s = compute_embeddings(paths, device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend, progress_callback=_cb)
+        try:
+            embs, ordered_paths, model_load_s = compute_embeddings(
+                paths, device, cfg.batch_size, cfg.num_workers, 
+                cfg.roi_ratio, cfg.embed_backend, 
+                progress_callback=_cb, force_gpu=cfg.force_gpu
+            )
+        except Exception as e:
+            logger.error(f"임베딩 계산 실패: {e}")
+            if device.type == "cuda" and cfg.fallback_to_cpu:
+                logger.info("🆘 CPU로 재시도...")
+                device = torch.device("cpu")
+                embs, ordered_paths, model_load_s = compute_embeddings(
+                    paths, device, cfg.batch_size, 0,  # num_workers=0 for stability
+                    cfg.roi_ratio, "resnet18",  # 안전한 백엔드
+                    progress_callback=_cb, force_gpu=False
+                )
+            else:
+                raise
         try:
             np.save(emb_art, embs)
             with open(opaths_art, "w", encoding="utf-8") as fw:
@@ -1210,12 +1579,14 @@ def detect_pipeline(input_dir: str, output_dir: str,
 def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = None,
                            recursive: bool = False, sample_size: int = 8) -> Dict:
     """
-    휴리스틱(Heuristics)과 선택적인 샘플링을 사용하여 파이프라인의 **실제 소요 시간(wall-time)(초)을 추정합니다.
+    휴리스틱과 선택적인 샘플링을 사용하여 파이프라인의 **실제 소요 시간(wall-time)**을 추정합니다.
+    GPU 사양을 고려하여 더 정확한 예상치를 제공합니다.
 
-    각 단계별 예상치를 담은 딕셔너리를 반환합니다: n_images(이미지 수), meta_s(메타데이터), embed_s(임베딩), ann_s(탐색), io_s(I/O), total_s(총합), notes(비고)
+    각 단계별 예상치를 담은 딕셔너리를 반환합니다: n_images, meta_s, embed_s, ann_s, io_s, total_s, notes
     """
     cfg = cfg or DetectorConfig()
-    # 입력 경로(디렉터리 또는 파일 리스트) 해석
+    
+    # 입력 경로 해석
     paths: List[str] = []
     exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
     if isinstance(input_dir_or_paths, (list, tuple)):
@@ -1240,42 +1611,59 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
     if N == 0:
         return {"n_images": 0, "meta_s": 0.0, "embed_s": 0.0, "ann_s": 0.0, "io_s": 0.0, "total_s": 0.0, "notes": "no images"}
 
-    # 휴리스틱(이미지당 예상 초)
+    # GPU 정보 기반 휴리스틱 개선
+    device_info = get_device_info()
+    has_gpu = device_info['has_gpu']
+    gpu_memory_gb = device_info['gpu_memory_gb']
+    gpu_name = device_info['gpu_name']
+    
+    # 메타데이터 처리 시간 (이미지당)
     meta_per = 0.02
     if getattr(cfg, 'use_ocr', False):
         meta_per += 0.25
 
-    try:
-        has_gpu = torch.cuda.is_available()
-    except Exception:
-        has_gpu = False
-
+    # 임베딩 처리 시간 (GPU 사양별로 세분화)
     backend = getattr(cfg, 'embed_backend', 'dinov2')
-    if backend == 'resnet18':
-        emb_per = 0.005 if has_gpu else 0.02
+    if has_gpu:
+        if 'RTX' in gpu_name or 'GTX 1660' in gpu_name:  # GTX 1660 Ti 포함
+            # 중급 GPU
+            emb_per = 0.015 if backend == 'dinov2' else 0.003
+        elif 'GTX' in gpu_name or 'RTX 20' in gpu_name:
+            # 저급~중급 GPU
+            emb_per = 0.025 if backend == 'dinov2' else 0.005
+        else:
+            # 기타 GPU
+            emb_per = 0.02 if backend == 'dinov2' else 0.005
     else:
-        emb_per = 0.02 if has_gpu else 0.12
+        # CPU only
+        emb_per = 0.12 if backend == 'dinov2' else 0.02
 
     k = getattr(cfg, 'k', 20)
     ann_s = max(0.2, 0.00012 * N * max(1, k))
     io_per = 0.008
-    notes = 'heuristic'
+    notes = f'heuristic+{gpu_name if has_gpu else "CPU"}'
 
     # 임베딩 처리량을 개선하기 위한 선택적 샘플링
     try:
-        # 샘플 수 결정: 기본적으로 더 큰 샘플을 사용 (최대 64), 최소 4
-        default_cap = min(64, N)
+        # 샘플 수 결정: GPU가 있으면 더 큰 샘플 사용
+        default_cap = min(128 if has_gpu else 32, N)
         sample_n = int(min(max(4, sample_size), default_cap))
         if sample_n >= 1 and N >= sample_n:
             # 데이터셋 전체에서 균등하게 샘플 선택
             step = max(1, N // sample_n)
             sample_paths = [paths[i] for i in range(0, N, step)][:sample_n]
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            device = device_info['device']
 
-            # 샘플 이미지에 대해 모델 로드 + 임베딩(전방 전달) 시간을 측정
+            # 샘플 이미지에 대해 모델 로드 + 임베딩 시간을 측정
             import time as _time
             t0 = _time.time()
             try:
+                logger.info(f"시간 추정을 위한 샘플링: {sample_n}개 이미지 ({gpu_name if has_gpu else 'CPU'})")
+                sample_embs, _, model_load_s = compute_embeddings(
+                    sample_paths, device, min(16, sample_n), 0, 
+                    getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend,
+                    force_gpu=getattr(cfg, 'force_gpu', True)
+                )
                 # 모델을 한 번 로드(가능한 timm/resnet 오버헤드 포함)
                 _model = load_model(device, backend)
                 # DataLoader 준비 및 전방 전달 실행
@@ -1381,9 +1769,22 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     if not paths:
         raise FileNotFoundError("유효한 이미지 파일이 제공되지 않았습니다.")
 
-    # 데이터 크기에 따른 설정 최적화
+    # 데이터 크기 및 GPU에 따른 설정 최적화
     n_images = len(paths)
-    cfg = optimize_config_for_data_size(cfg, n_images)
+    device_info = get_device_info()
+    cfg = optimize_config_for_data_size(cfg, n_images, device_info)
+    device = device_info['device']
+    
+    # 🚀 GPU 강제 사용 추가 체크
+    if cfg.force_gpu and torch.cuda.is_available() and device.type == "cpu":
+        logger.warning("🔥 GPU 강제 사용 모드: CPU에서 GPU로 전환합니다!")
+        device = torch.device("cuda:0")
+        device_info['device'] = device
+        device_info['has_gpu'] = True
+        # GPU 메모리 정리
+        torch.cuda.empty_cache()
+
+    logger.info(f"🎯 최종 디바이스: {device} ({'GTX 1660 Ti' if device.type == 'cuda' else 'CPU'})")
 
     # Prepare output dirs (same behavior as detect_pipeline)
     if not _safe_recreate_dir(output_dir, retries=3, delay=0.2):
@@ -1436,7 +1837,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
 
     # 3) 임베딩
     logger.info("[2/5] CNN/ViT 임베딩 처리 …")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 이미 device 정보는 위에서 설정됨
     emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
     opaths_art = os.path.join(output_dir, "artifacts", "ordered_paths.txt")
     embs = None
@@ -1459,7 +1860,11 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             ordered_paths = None
 
     if embs is None:
-        embs, ordered_paths, model_load_s = compute_embeddings([path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, cfg.roi_ratio, cfg.embed_backend, progress_callback=_cb)
+        embs, ordered_paths, model_load_s = compute_embeddings(
+            [path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, 
+            cfg.roi_ratio, cfg.embed_backend, 
+            progress_callback=_cb, force_gpu=cfg.force_gpu
+        )
         try:
             np.save(emb_art, embs)
             with open(opaths_art, "w", encoding="utf-8") as fw:

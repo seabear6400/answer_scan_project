@@ -811,41 +811,6 @@ with tab2:
             continue
         seen.add(key)
         deduped.append((score, pa, pb, src, meta))
-
-    # 상위 후보를 빠른 액션과 함께 표시
-    if deduped:
-        st.markdown("---")
-        st.markdown("### ⚠️ 재스캔 권장 후보 (우선순위 순)")
-    # 최대 12개의 후보를 간결하게 표시
-        for idx, (score, pa, pb, src, meta) in enumerate(deduped[:12]):
-            col_a, col_b, col_c = st.columns([4, 4, 2])
-            an = os.path.basename(pa) if pa else 'Unknown'
-            bn = os.path.basename(pb) if pb else 'Unknown'
-            with col_a:
-                if pa and os.path.exists(pa):
-                    thumb_a = make_display_image(pa, size=300, fmt=disp_fmt, quality=80)
-                    st.image(_safe_image_open(thumb_a), caption=f"A: {an}", use_container_width=True)
-                else:
-                    st.write(f"A: {an} (없음)")
-            with col_b:
-                if pb and os.path.exists(pb):
-                    thumb_b = make_display_image(pb, size=300, fmt=disp_fmt, quality=80)
-                    st.image(_safe_image_open(thumb_b), caption=f"B: {bn}", use_container_width=True)
-                else:
-                    st.write(f"B: {bn} (없음)")
-            with col_c:
-                st.write(f"우선도: {score:.3f}")
-                # 재스캔 권고 토글 (세션에 per-pair 키로 저장)
-                pair_key = f"rescan_rec_{idx}_{hashlib.md5((an+bn).encode('utf-8')).hexdigest()[:8]}"
-                if pair_key not in st.session_state:
-                    st.session_state[pair_key] = True
-                rec = st.checkbox("재스캔 권고", value=st.session_state.get(pair_key, True), key=pair_key)
-                if st.button("↔ 비교 추가", key=f"cmp_cand_{idx}", help="이 두 이미지를 비교 선택에 추가"):
-                    # add both to comparison (toggle behavior)
-                    toggle_compare(pa)
-                    toggle_compare(pb)
-                    st.rerun()
-
     # ----- 즉시 비교 패널: 사용자가 아래 그리드에서 '↔ 비교 선택' 버튼을 클릭하면
     # rescan 탭의 상단에 바로 비교 옵션과 결과가 표시되도록 함
     # 통합된 gallery_selected(경로 리스트) 사용
