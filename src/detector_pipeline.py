@@ -137,6 +137,161 @@ class DetectorConfig:
     batch_size: int = 64
     num_workers: int = 0
     roi_ratio: Tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)
+    
+    # 자동 최적화 설정
+    auto_optimize: bool = True  # 데이터 크기에 따른 자동 최적화 활성화
+
+
+# -------------------------- 적응적 최적화 ---------------------
+def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_has_gpu: bool = None) -> DetectorConfig:
+    """
+    데이터 크기에 따라 설정을 적응적으로 최적화합니다.
+    
+    최적화 전략:
+    - 소규모 데이터(< 50): 고정 오버헤드 최소화, 단순한 백엔드 사용
+    - 중간 규모(50-500): 균형잡힌 설정
+    - 대규모 데이터(> 500): 배치 처리 최적화, 고성능 백엔드 활용
+    """
+    if not cfg.auto_optimize:
+        return cfg
+    
+    # 새로운 설정 객체 생성 (원본 보존)
+    optimized = DetectorConfig(
+        embed_backend=cfg.embed_backend,
+        ann_backend=cfg.ann_backend,
+        k=cfg.k,
+        hnsw_M=cfg.hnsw_M,
+        hnsw_efC=cfg.hnsw_efC,
+        hnsw_efS=cfg.hnsw_efS,
+        prefilter=cfg.prefilter,
+        phash_thresh=cfg.phash_thresh,
+        pdq_thresh=cfg.pdq_thresh,
+        density_diff_thresh=cfg.density_diff_thresh,
+        cnn_thresh=cfg.cnn_thresh,
+        suspect_low=cfg.suspect_low,
+        blank_method=cfg.blank_method,
+        blank_density_thresh=cfg.blank_density_thresh,
+        use_lpips=cfg.use_lpips,
+        lpips_thresh=cfg.lpips_thresh,
+        use_ocr=cfg.use_ocr,
+        text_sim_thresh=cfg.text_sim_thresh,
+        use_alignment=cfg.use_alignment,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.num_workers,
+        roi_ratio=cfg.roi_ratio,
+        auto_optimize=cfg.auto_optimize
+    )
+    
+    if device_has_gpu is None:
+        try:
+            device_has_gpu = torch.cuda.is_available()
+        except Exception:
+            device_has_gpu = False
+    
+    cpu_count = os.cpu_count() or 2
+    
+    if n_images < 50:
+        # 소규모: 고정 오버헤드 최소화
+        logger.info(f"소규모 데이터({n_images}개) 최적화: 고정 오버헤드 최소화")
+        
+        # 작은 배치 크기로 메모리 사용량 줄이고 즉시 시작
+        optimized.batch_size = min(8, max(1, n_images))
+        
+        # 단순한 워커 설정 (프로세스 생성 오버헤드 최소화)
+        optimized.num_workers = 0
+        
+        # 가벼운 백엔드 우선 선택
+        if optimized.embed_backend == "auto":
+            optimized.embed_backend = "resnet18"  # 더 빠른 로딩
+        
+        # ANN 백엔드를 brute force로 (인덱스 구축 오버헤드 없음)
+        if optimized.ann_backend == "auto":
+            optimized.ann_backend = "brute"
+        
+        # k 값을 데이터 크기에 맞게 조정
+        optimized.k = min(optimized.k, max(5, n_images - 1))
+        
+        # 간단한 사전필터만 사용
+        if optimized.prefilter == "both":
+            optimized.prefilter = "phash"
+            
+    elif n_images < 500:
+        # 중간 규모: 균형잡힌 설정
+        logger.info(f"중간 규모 데이터({n_images}개) 최적화: 균형잡힌 설정")
+        
+        # 적당한 배치 크기
+        if device_has_gpu:
+            optimized.batch_size = min(32, max(8, n_images // 4))
+        else:
+            optimized.batch_size = min(16, max(4, n_images // 8))
+        
+        # 적당한 병렬 처리
+        optimized.num_workers = min(4, max(1, cpu_count // 2))
+        
+        # 효율적인 ANN 백엔드 선택
+        if optimized.ann_backend == "auto":
+            if _HAS_HNSW and n_images >= 100:
+                optimized.ann_backend = "hnsw"
+            else:
+                optimized.ann_backend = "brute"
+                
+    else:
+        # 대규모: 배치 처리 최적화
+        logger.info(f"대규모 데이터({n_images}개) 최적화: 배치 처리 및 고성능 백엔드 활용")
+        
+        # 큰 배치 크기로 처리량 최대화
+        if device_has_gpu:
+            # GPU 메모리에 따라 배치 크기 조정
+            try:
+                gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                if gpu_memory_gb >= 8:
+                    optimized.batch_size = min(128, max(32, n_images // 10))
+                else:
+                    optimized.batch_size = min(64, max(16, n_images // 20))
+            except Exception:
+                optimized.batch_size = min(64, max(16, n_images // 20))
+        else:
+            # CPU는 메모리를 더 보수적으로 사용
+            optimized.batch_size = min(32, max(8, n_images // 30))
+        
+        # 최대 병렬 처리
+        optimized.num_workers = min(8, max(2, cpu_count))
+        
+        # 고성능 백엔드 우선 선택
+        if optimized.ann_backend == "auto":
+            if _HAS_FAISS and n_images >= 1000:
+                optimized.ann_backend = "faiss"
+            elif _HAS_HNSW and n_images >= 300:
+                optimized.ann_backend = "hnsw"
+            else:
+                optimized.ann_backend = "brute"
+        
+        # HNSW 파라미터 최적화 (대규모 데이터용)
+        if n_images >= 1000:
+            optimized.hnsw_M = min(64, max(16, int(np.log2(n_images)) * 4))
+            optimized.hnsw_efC = min(400, max(100, n_images // 5))
+            optimized.hnsw_efS = min(200, max(32, n_images // 10))
+        
+        # 고급 필터링 활성화 (대규모에서 효과적)
+        if _HAS_PDQ and optimized.prefilter == "phash":
+            optimized.prefilter = "both"
+    
+    # 공통 최적화
+    
+    # OCR/LPIPS는 대규모에서만 효과적 (오버헤드 대비)
+    if n_images < 100:
+        if optimized.use_ocr and not cfg.use_ocr:  # 명시적으로 설정하지 않았다면
+            optimized.use_ocr = False
+        if optimized.use_lpips and not cfg.use_lpips:
+            optimized.use_lpips = False
+    
+    # k 값이 데이터 크기보다 클 경우 조정
+    optimized.k = min(optimized.k, max(1, n_images - 1))
+    
+    logger.info(f"최적화 결과: batch_size={optimized.batch_size}, num_workers={optimized.num_workers}, "
+                f"ann_backend={optimized.ann_backend}, embed_backend={optimized.embed_backend}")
+    
+    return optimized
 
 
 # ---------------------- 성능 로깅 유틸리티 ----------------------
@@ -903,6 +1058,10 @@ def detect_pipeline(input_dir: str, output_dir: str,
     if not files:
         raise FileNotFoundError(f"No images under {input_dir} (필터 적용됨)")
 
+    # 데이터 크기에 따른 설정 최적화
+    n_images = len(files)
+    cfg = optimize_config_for_data_size(cfg, n_images)
+
     # 2) Metadata: prefilters + density + (optional) OCR text
     _cb("meta", 0.05, "메타데이터 수집 시작 (pHash/PDQ + density)")
     logger.info("[1/5] Metadata (pHash/PDQ + density)")
@@ -1221,6 +1380,10 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     paths = [os.path.abspath(p) for p in file_paths if os.path.isfile(p)]
     if not paths:
         raise FileNotFoundError("유효한 이미지 파일이 제공되지 않았습니다.")
+
+    # 데이터 크기에 따른 설정 최적화
+    n_images = len(paths)
+    cfg = optimize_config_for_data_size(cfg, n_images)
 
     # Prepare output dirs (same behavior as detect_pipeline)
     if not _safe_recreate_dir(output_dir, retries=3, delay=0.2):
