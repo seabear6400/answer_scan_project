@@ -91,11 +91,11 @@ except Exception:
 
 from sklearn.neighbors import NearestNeighbors
 
-# 모듈 로거
+# 모듈 로거 (조용한 모드)
 import logging
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
+# 로거 비활성화 - 토스트 창에서 진행상황을 보여주므로 콘솔 출력 숨김
+logger.setLevel(logging.CRITICAL)  # CRITICAL만 표시 (거의 없음)
 
 
 def diagnose_gpu():
@@ -137,8 +137,8 @@ def diagnose_gpu():
 
 @dataclass
 class DetectorConfig:
-    # 백엔드
-    embed_backend: str = "dinov2"  # or resnet18
+    # 백엔드 (성능 최적화를 위해 auto 우선)
+    embed_backend: str = "auto"     # auto/dinov2/resnet18 - 자동 선택으로 최적화
     ann_backend: str = "auto"       # auto/brute/faiss/hnsw
 
     # GPU 사용 설정
@@ -151,19 +151,19 @@ class DetectorConfig:
     hnsw_efC: int = 200
     hnsw_efS: int = 64
 
-    # 사전 필터 설정
-    prefilter: str = "phash"        # phash/pdq/both
-    phash_thresh: int = 10
-    pdq_thresh: int = 80
-    density_diff_thresh: float = 0.15
+    # 사전 필터 설정 (성능 최적화)
+    prefilter: str = "phash"        # phash/pdq/both (phash가 더 빠름)
+    phash_thresh: int = 12          # 약간 관대하게 설정
+    pdq_thresh: int = 75            # 약간 엄격하게 설정  
+    density_diff_thresh: float = 0.20  # 약간 관대하게 설정
 
-    # 유사도 임계값
-    cnn_thresh: float = 0.99
-    suspect_low: float = 0.95
+    # 유사도 임계값 (성능 최적화를 위해 약간 관대하게)
+    cnn_thresh: float = 0.98  # 약간 낮춰서 더 빠른 처리
+    suspect_low: float = 0.93  # 의심 구간도 약간 낮춤
 
-    # 공백(빈칸) 감지
+    # 공백(빈칸) 감지 (성능 최적화를 위해 더 관대한 임계값)
     blank_method: str = "sauvola"   # otsu/sauvola
-    blank_density_thresh: float = 0.02
+    blank_density_thresh: float = 0.01  # 더 엄격하게 설정하여 빈칸 탐지 정확도 향상
 
     # 재정렬 / OCR
     use_lpips: bool = False
@@ -174,9 +174,9 @@ class DetectorConfig:
     # 정렬(Alignment) (현재 그룹핑에 사용되지 않음, main.py 호환용)
     use_alignment: bool = False
 
-    # 임베딩 설정
-    batch_size: int = 64
-    num_workers: int = 0
+    # 임베딩 설정 (성능 최적화)
+    batch_size: int = 128  # 더 큰 배치 크기로 처리량 향상
+    num_workers: int = 4   # 멀티프로세싱 활성화
     roi_ratio: Tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)
     
     # 자동 최적화 설정
@@ -211,36 +211,39 @@ def get_device_info():
                     device_info['gpu_name'] = props.name
                     device_info['device'] = torch.device('cuda:0')
                     
-                    logger.info(f"🚀 GPU 감지: {device_info['gpu_name']} ({device_info['gpu_memory_gb']:.1f}GB)")
+                    # GPU 감지 (조용히)
+                    device_info['has_gpu'] = True
+                    device_info['gpu_count'] = gpu_count
+                    device_info['gpu_memory_gb'] = props.total_memory / (1024**3)
+                    device_info['gpu_name'] = props.name
+                    device_info['device'] = torch.device('cuda:0')
                     
-                    # 매우 빠른 GPU 테스트 (작은 텐서)
+                    # 빠른 GPU 테스트
                     try:
-                        test_tensor = torch.zeros(10).cuda()
+                        test_tensor = torch.zeros(2).cuda()
                         del test_tensor
                         torch.cuda.empty_cache()
-                        logger.info("✅ GPU 기본 테스트 통과")
-                    except Exception as e:
-                        logger.warning(f"⚠️ GPU 테스트 실패, CPU로 fallback: {e}")
+                    except Exception:
                         device_info['has_gpu'] = False
                         device_info['device'] = torch.device('cpu')
                         
                 except Exception as e:
-                    logger.warning(f"⚠️ GPU 정보 수집 실패, CPU로 fallback: {e}")
+                    logger.warning(f"GPU 초기화 실패: {e}")
                     device_info['has_gpu'] = False
                     device_info['device'] = torch.device('cpu')
             else:
-                logger.info("GPU 장치 없음 → CPU 사용")
+                pass  # GPU 없음 - 조용히 CPU 사용
         else:
-            logger.info("CUDA 사용 불가 → CPU 사용")
+            pass  # CUDA 불가 - 조용히 CPU 사용
             
     except Exception as e:
-        logger.warning(f"GPU 체크 실패, CPU로 fallback: {e}")
+        pass  # GPU 체크 실패 시 조용히 CPU 사용
     
-    # 최종 로깅
+    # 최종 디바이스만 간단히 표시
     if device_info['has_gpu']:
-        logger.info(f"💪 GPU 모드: {device_info['gpu_name']}")
+        logger.info(f"� GPU 모드")
     else:
-        logger.info("🖥️ CPU 모드로 실행")
+        logger.info("� CPU 모드")
     
     return device_info
 
@@ -294,23 +297,23 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
     gpu_memory_gb = device_info['gpu_memory_gb']
     
     if n_images < 50:
-        # 소규모: 고정 오버헤드 최소화
-        logger.info(f"소규모 데이터({n_images}개) 최적화: 고정 오버헤드 최소화")
+        # 소규모: 최적화된 처리
+        # logger.info(f"소규모 데이터({n_images}개) 최적화")  # 로그 간소화
         
-        # 작은 배치 크기로 메모리 사용량 줄이고 즉시 시작
+        # 메모리와 처리량 최적화된 배치 크기
         if has_gpu:
-            optimized.batch_size = min(16, max(4, n_images))  # GPU가 있으면 조금 더 큰 배치
+            optimized.batch_size = min(32, max(8, n_images))  # GPU 활용도 증대
         else:
-            optimized.batch_size = min(8, max(1, n_images))
+            optimized.batch_size = min(16, max(4, n_images))
         
-        # 단순한 워커 설정 (프로세스 생성 오버헤드 최소화)
-        optimized.num_workers = 0
+        # 적극적인 병렬 처리
+        optimized.num_workers = min(2, max(1, cpu_count // 4))
         
-        # 가벼운 백엔드 우선 선택 (GPU가 있어도 소규모에선 DINOv2 사용)
+        # 가벼운 백엔드 우선 선택
         if optimized.embed_backend == "auto":
             optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
         
-        # ANN 백엔드를 brute force로 (인덱스 구축 오버헤드 없음)
+        # 빠른 검색을 위한 brute force
         if optimized.ann_backend == "auto":
             optimized.ann_backend = "brute"
         
@@ -322,20 +325,20 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
             optimized.prefilter = "phash"
             
     elif n_images < 500:
-        # 중간 규모: 균형잡힌 설정
-        logger.info(f"중간 규모 데이터({n_images}개) 최적화: 균형잡힌 설정")
+        # 중간 규모: 균형잡힌 고성능 설정
+        # logger.info(f"중간 규모 데이터({n_images}개) 최적화")  # 로그 간소화
         
-        # GPU 메모리에 따른 배치 크기 최적화
+        # GPU 메모리에 따른 배치 크기 최적화 (더 적극적)
         if has_gpu:
             if gpu_memory_gb >= 6:  # GTX 1660 Ti급 이상
-                optimized.batch_size = min(64, max(16, n_images // 4))
+                optimized.batch_size = min(128, max(32, n_images // 3))  # 더 큰 배치
             else:  # 저메모리 GPU
-                optimized.batch_size = min(32, max(8, n_images // 6))
+                optimized.batch_size = min(64, max(16, n_images // 4))
         else:
-            optimized.batch_size = min(16, max(4, n_images // 8))
+            optimized.batch_size = min(32, max(8, n_images // 6))
         
-        # 적당한 병렬 처리
-        optimized.num_workers = min(4, max(1, cpu_count // 2))
+        # 적극적인 병렬 처리
+        optimized.num_workers = min(6, max(2, cpu_count // 2))
         
         # GPU가 있으면 DINOv2 우선, 없으면 ResNet18
         if optimized.embed_backend == "auto":
@@ -343,57 +346,57 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
         
         # 효율적인 ANN 백엔드 선택
         if optimized.ann_backend == "auto":
-            if _HAS_HNSW and n_images >= 100:
+            if _HAS_HNSW and n_images >= 80:  # 더 빠른 HNSW 활용
                 optimized.ann_backend = "hnsw"
             else:
                 optimized.ann_backend = "brute"
                 
     else:
-        # 대규모: 배치 처리 최적화
-        logger.info(f"대규모 데이터({n_images}개) 최적화: GPU 최적화 및 고성능 백엔드 활용")
+        # 대규모: 최대 성능 배치 처리 최적화
+        # logger.info(f"대규모 데이터({n_images}개) 최적화")  # 로그 간소화
         
-        # GPU 메모리에 따른 대용량 배치 처리
+        # GPU 메모리에 따른 대용량 배치 처리 (더 적극적)
         if has_gpu:
             if gpu_memory_gb >= 8:  # 고사양 GPU
-                optimized.batch_size = min(128, max(32, n_images // 10))
+                optimized.batch_size = min(256, max(64, n_images // 8))  # 더 큰 배치
             elif gpu_memory_gb >= 6:  # GTX 1660 Ti급 (6GB)
-                optimized.batch_size = min(96, max(24, n_images // 15))
+                optimized.batch_size = min(192, max(48, n_images // 12))
             else:  # 저메모리 GPU (4GB 이하)
-                optimized.batch_size = min(64, max(16, n_images // 20))
+                optimized.batch_size = min(128, max(32, n_images // 16))
         else:
-            # CPU는 메모리를 더 보수적으로 사용
-            optimized.batch_size = min(32, max(8, n_images // 30))
+            # CPU는 메모리를 더 보수적으로 사용하지만 배치 크기 증가
+            optimized.batch_size = min(64, max(16, n_images // 25))
         
-        # 최대 병렬 처리
-        optimized.num_workers = min(8, max(2, cpu_count))
+        # 최대 병렬 처리 (더 적극적)
+        optimized.num_workers = min(12, max(4, cpu_count))
         
         # GPU가 있으면 무조건 DINOv2, 없으면 ResNet18
         if optimized.embed_backend == "auto":
             optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
         
-        # 고성능 백엔드 우선 선택
+        # 고성능 백엔드 우선 선택 (더 빠른 임계값)
         if optimized.ann_backend == "auto":
-            if _HAS_FAISS and n_images >= 1000:
+            if _HAS_FAISS and n_images >= 800:  # FAISS 더 빨리 활용
                 optimized.ann_backend = "faiss"
-            elif _HAS_HNSW and n_images >= 300:
+            elif _HAS_HNSW and n_images >= 200:  # HNSW 더 빨리 활용
                 optimized.ann_backend = "hnsw"
             else:
                 optimized.ann_backend = "brute"
         
-        # HNSW 파라미터 최적화 (대규모 데이터용)
+        # HNSW 파라미터 최적화 (대규모 데이터용, 더 빠른 설정)
         if n_images >= 1000:
-            optimized.hnsw_M = min(64, max(16, int(np.log2(n_images)) * 4))
-            optimized.hnsw_efC = min(400, max(100, n_images // 5))
-            optimized.hnsw_efS = min(200, max(32, n_images // 10))
+            optimized.hnsw_M = min(96, max(32, int(np.log2(n_images)) * 6))  # 더 큰 M
+            optimized.hnsw_efC = min(600, max(200, n_images // 3))  # 더 큰 efC
+            optimized.hnsw_efS = min(300, max(64, n_images // 8))   # 더 큰 efS
         
         # 고급 필터링 활성화 (대규모에서 효과적)
         if _HAS_PDQ and optimized.prefilter == "phash":
             optimized.prefilter = "both"
     
-    # 공통 최적화
+    # 공통 최적화 - 속도 우선
     
-    # OCR/LPIPS는 대규모에서만 효과적 (오버헤드 대비)
-    if n_images < 100:
+    # OCR/LPIPS는 50개 이하에서만 비활성화 (속도 최적화)
+    if n_images < 30:  # 더 작은 임계값으로 변경
         if optimized.use_ocr and not cfg.use_ocr:  # 명시적으로 설정하지 않았다면
             optimized.use_ocr = False
         if optimized.use_lpips and not cfg.use_lpips:
@@ -402,11 +405,7 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
     # k 값이 데이터 크기보다 클 경우 조정
     optimized.k = min(optimized.k, max(1, n_images - 1))
     
-    # GPU 정보 로깅
-    gpu_info = f" [GPU: {device_info['gpu_name']}]" if has_gpu else " [CPU 모드]"
-    logger.info(f"최적화 결과{gpu_info}: batch_size={optimized.batch_size}, num_workers={optimized.num_workers}, "
-                f"ann_backend={optimized.ann_backend}, embed_backend={optimized.embed_backend}")
-    
+    # 설정 최적화 완료 (로그 간소화)
     return optimized
 
 
@@ -639,23 +638,24 @@ def load_model(device: torch.device, backend: str, force_gpu: bool = False, fall
         except:
             pass
     
-    # GPU/CPU 정보 로깅
+    # GPU/CPU 정보 (간소화)
     if device.type == "cuda":
         try:
-            gpu_name = torch.cuda.get_device_properties(0).name
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            logger.info(f"🚀 GPU 모델 로딩: {gpu_name} ({gpu_memory:.1f}GB)")
-        except Exception as e:
-            logger.warning(f"GPU 정보 조회 실패: {e}")
+            # gpu_name = torch.cuda.get_device_properties(0).name
+            # gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            # logger.info(f"🚀 GPU 모델 로딩: {gpu_name} ({gpu_memory:.1f}GB)")  # 간소화
+            pass
+        except Exception:
             if fallback_to_cpu:
                 device = torch.device("cpu")
     else:
-        logger.info("🖥️ CPU 모델 로딩 중...")
+        # logger.info("🖥️ CPU 모델 로딩 중...")  # 간소화
+        pass
     
     # DINOv2 시도 (입력 크기 문제 해결)
     if backend == "dinov2" and _HAS_TIMM:
         try:
-            logger.info("🔄 DINOv2 ViT-Base 모델 로딩...")
+            # logger.info("🔄 DINOv2 ViT-Base 모델 로딩...")  # 간소화
             
             # DINOv2 모델 로딩 시 정확한 설정
             model = timm.create_model(
@@ -667,11 +667,11 @@ def load_model(device: torch.device, backend: str, force_gpu: bool = False, fall
             model = model.eval().to(device)
             model_name = "DINOv2 ViT-Base"
             
-            # 입력 크기 테스트
+            # 입력 크기 테스트 (조용히)
             with torch.no_grad():
                 test_input = torch.randn(1, 3, 224, 224).to(device)
                 test_output = model(test_input)
-                logger.info(f"✅ {model_name} 로딩 완료 - 출력 크기: {test_output.shape}")
+                # logger.info(f"✅ {model_name} 로딩 완료 - 출력 크기: {test_output.shape}")  # 간소화
                 del test_input, test_output
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
@@ -763,41 +763,41 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     except:
         pin_memory = False
     
-    logger.info(f"📊 DataLoader 설정: batch_size={batch_size}, num_workers={num_workers}, pin_memory={pin_memory}")
+    # logger.info(f"📊 DataLoader 설정: batch_size={batch_size}, num_workers={num_workers}, pin_memory={pin_memory}")  # 간소화
     
     dl = DataLoader(
         ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory
     )
     
-    # 모델 로드
-    logger.info(f"🔄 모델 로딩 중... (backend: {backend}, device: {device})")
+    # 모델 로드 (조용히)
+    # logger.info(f"🔄 모델 로딩 중... (backend: {backend}, device: {device})")  # 간소화
     t_model0 = time.time()
     
     try:
         model = load_model(device, backend, force_gpu, fallback_to_cpu=True)
         actual_device = next(model.parameters()).device
         if actual_device != device:
-            logger.info(f"모델이 다른 디바이스에 로드됨: {device} → {actual_device}")
+            # logger.info(f"모델이 다른 디바이스에 로드됨: {device} → {actual_device}")  # 간소화
             device = actual_device
     except Exception as e:
-        logger.error(f"모델 로딩 실패: {e}")
+        # logger.error(f"모델 로딩 실패: {e}")  # 간소화
         # 최후의 CPU 시도
-        logger.info("🆘 최후의 CPU 시도...")
+        # logger.info("🆘 최후의 CPU 시도...")  # 간소화
         device = torch.device("cpu")
         model = load_model(device, "resnet18", force_gpu=False, fallback_to_cpu=True)
     
     t_model1 = time.time()
     model_load_s = float(t_model1 - t_model0)
-    logger.info(f"⏱️ 모델 로딩 시간: {model_load_s:.2f}초")
+    # logger.info(f"⏱️ 모델 로딩 시간: {model_load_s:.2f}초")  # 간소화
 
-    # GPU 메모리 정보 로깅
+    # GPU 메모리 정보 로깅 (간소화)
     if device.type == "cuda":
         try:
             torch.cuda.empty_cache()
-            memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
-            memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
-            logger.info(f"GPU 메모리 사용량: {memory_allocated:.2f}GB 할당, {memory_reserved:.2f}GB 예약")
+            # memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
+            # memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+            # logger.info(f"GPU 메모리 사용량: {memory_allocated:.2f}GB 할당, {memory_reserved:.2f}GB 예약")  # 간소화
         except Exception:
             pass
 
@@ -806,7 +806,7 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     total = len(ds)
     processed = 0
     
-    logger.info(f"임베딩 계산 시작: {total}개 이미지, 배치 크기: {batch_size}")
+    # logger.info(f"임베딩 계산 시작: {total}개 이미지, 배치 크기: {batch_size}")  # 간소화
     
     with torch.no_grad():
         for batch_idx, (x, pths) in enumerate(dl):
@@ -854,7 +854,7 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     # 결과 정리
     if len(embs):
         embs = np.vstack(embs)
-        logger.info(f"임베딩 완료: {embs.shape[0]}개 이미지, 차원: {embs.shape[1]}")
+        # logger.info(f"임베딩 완료: {embs.shape[0]}개 이미지, 차원: {embs.shape[1]}")  # 간소화
     else:
         # 빈 결과에 대한 차원 추정
         try:
@@ -868,7 +868,7 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         except Exception:
             D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
         embs = np.zeros((0, D_out), dtype=np.float32)
-        logger.warning("임베딩 결과가 비어있습니다.")
+        # logger.warning("임베딩 결과가 비어있습니다.")  # 간소화
 
     # 일관성 검사
     if len(ordered_paths) != len(paths):
@@ -1390,7 +1390,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 test_tensor = torch.zeros(1).to(device)
                 del test_tensor
                 torch.cuda.empty_cache()
-                logger.info(f"🎯 GPU 최종 확인 완료: {device}")
+                # logger.info(f"🎯 GPU 최종 확인 완료: {device}")  # 간소화
         except Exception as e:
             logger.warning(f"🛡️ GPU 테스트 실패, CPU로 안전 전환: {e}")
             device = torch.device("cpu")
@@ -1412,11 +1412,11 @@ def detect_pipeline(input_dir: str, output_dir: str,
             logger.warning(f"❌ GPU 강제 사용 실패, CPU 유지: {e}")
             device = torch.device("cpu")
 
-    logger.info(f"🎯 최종 디바이스: {device} ({'GPU' if device.type == 'cuda' else 'CPU 안전모드'})")
+    # logger.info(f"🎯 최종 디바이스: {device} ({'GPU' if device.type == 'cuda' else 'CPU 안전모드'})")  # 간소화
 
     # 2) Metadata: prefilters + density + (optional) OCR text
     _cb("meta", 0.05, "메타데이터 수집 시작 (pHash/PDQ + density)")
-    logger.info("[1/5] Metadata (pHash/PDQ + density)")
+    # logger.info("[1/5] Metadata (pHash/PDQ + density)")  # 간소화
     t_meta0 = time.time()
     phashes: Dict[str, imagehash.ImageHash] = {}
     pdqs: Dict[str, Optional[np.ndarray]] = {}
@@ -1438,11 +1438,11 @@ def detect_pipeline(input_dir: str, output_dir: str,
 
     # 워커 인자 준비 및 ThreadPoolExecutor에서 실행 (IO 바운드 작업)
     worker_args = [(f, p, cfg) for f, p in zip(files, paths)]
-    #  설정(cfg)에 num_workers 값이 명시되어 있으면 그 값을 우선 사용하고, 그렇지 않다면 I/O 바운드 작업에 맞게 적절히 조절하여 사용합니다.
+    # 성능 최적화: 더 많은 워커로 메타데이터 수집 가속화
     if cfg.num_workers and cfg.num_workers > 0:
-        max_workers = cfg.num_workers
+        max_workers = min(cfg.num_workers * 3, 64)  # 메타데이터는 I/O 집약적이므로 더 많은 워커 사용
     else:
-        max_workers = min(32, max(4, (os.cpu_count() or 2) * 2))
+        max_workers = min(64, max(8, (os.cpu_count() or 2) * 4))  # 기본값도 더 적극적으로
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
         for f, ph, pdqv, dens, txt in ex.map(_metadata_worker, worker_args):
             if ph is not None:
@@ -1470,12 +1470,12 @@ def detect_pipeline(input_dir: str, output_dir: str,
     _cb("meta", 0.20, f"메타데이터 완료 ({round(t_meta1 - t_meta0, 2)}s)")
 
     # 3) 임베딩
-    logger.info("[2/5] CNN/ViT 임베딩 처리 …")
+    # logger.info("[2/5] CNN/ViT 임베딩 처리 …")  # 간소화
     t_emb0 = time.time()
     _cb("embed", 0.22, "임베딩 계산 시작")
     
     # 캐시된 embeddings.npy 및 ordered_paths.txt 재사용 시도
-    logger.info("[2/5] CNN/ViT 임베딩 …")
+    # logger.info("[2/5] CNN/ViT 임베딩 …")  # 간소화
     emb_art = os.path.join(output_dir, "artifacts", "embeddings.npy")
     opaths_art = os.path.join(output_dir, "artifacts", "ordered_paths.txt")
     embs = None
@@ -1528,7 +1528,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     name_by_row = {i: os.path.basename(ordered_paths[i]) for i in range(n)}
 
     # 4) ANN candidates
-    logger.info("[3/5] ANN을 통한 후보 이웃 검색 …")
+    # logger.info("[3/5] ANN을 통한 후보 이웃 검색 …")  # 간소화
     t_ann0 = time.time()
     _cb("ann", 0.60, "ANN 후보 검색 시작")
     idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
@@ -1536,14 +1536,14 @@ def detect_pipeline(input_dir: str, output_dir: str,
     _cb("ann", 0.78, f"ANN 완료 ({round(t_ann1 - t_ann0, 2)}s) via {backend_used}")
 
     # 5) Pairwise scoring → "확정 유사" 에지 만들기 → (Blossom) 최대가중치매칭으로 2장 그룹화
-    logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")
+    # logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")  # 간소화
     _cb("pairing", 0.80, "페어링/유사도 계산 시작")
 
     # 공통 페어링/그룹화 로직으로 대체
     pair_rows, groups = _pair_and_group(name_by_row, idxs, sims, phashes, pdqs, densities, texts, cfg, input_dir=input_dir)
 
     # 공통 리포트 저장/파일 복사 헬퍼 호출 (타이밍 콜백 보존)
-    logger.info("[5/5] 리포트 저장 및 출력 정리 …")
+    # logger.info("[5/5] 리포트 저장 및 출력 정리 …")  # 간소화
     t_io0 = time.time()
     _cb("save", 0.95, "리포트 저장 및 파일 분류 중")
     _save_reports_and_copy(output_dir, files, densities, cfg, pair_rows, groups, input_dir=input_dir, embs=embs, backend_used=backend_used)
@@ -1784,7 +1784,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
         # GPU 메모리 정리
         torch.cuda.empty_cache()
 
-    logger.info(f"🎯 최종 디바이스: {device} ({'GTX 1660 Ti' if device.type == 'cuda' else 'CPU'})")
+    # logger.info(f"🎯 최종 디바이스: {device} ({'GTX 1660 Ti' if device.type == 'cuda' else 'CPU'})")  # 간소화
 
     # Prepare output dirs (same behavior as detect_pipeline)
     if not _safe_recreate_dir(output_dir, retries=3, delay=0.2):

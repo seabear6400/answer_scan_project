@@ -9,6 +9,12 @@ import time
 import subprocess
 import os
 
+# OpenCV 로깅 레벨 설정 (경고 메시지 숨김)
+os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
+# timm 라이브러리 로그 숨기기
+import logging
+logging.getLogger('timm').setLevel(logging.ERROR)
+
 # 가능한 한 일찍 백그라운드 스레드에서 tkinter를 예열하여
 # 폴더 선택 대화상자가 요청될 때 더 빠르게 열리도록 합니다.
 # 모듈 레벨에서는 가벼운 임포트만 유지하여 시작 시 차단을 방지합니다.
@@ -76,7 +82,7 @@ def parse_args():
     
     p.add_argument("--detach", action="store_true", help="윈도우에서 Streamlit을 새 창으로 분리 실행합니다 (비차단).")
     # 파일 수집 재귀 옵션
-    p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir for images")
+    p.add_argument("--recursive", action="store_true", help="선택한 폴더에서 하위 폴더까지 재귀적으로 이미지를 검색합니다")
     return p.parse_args()
 
 def main():
@@ -93,7 +99,7 @@ def main():
         root = tk.Tk()
         root.attributes('-topmost', True)
         root.withdraw()
-        print("[*] 폴더 선택 대화상자를 엽니다 — 분석할 폴더를 선택하세요.")
+        print("📁 폴더를 선택하세요...")
         sel = filedialog.askdirectory(title="분석할 폴더 선택")
         try:
             root.destroy()
@@ -126,13 +132,12 @@ def main():
             pass
         os.makedirs(out_sub, exist_ok=True)
 
-# 무거운 detector pipeline은 폴더 선택 대화상자를 표시한 이후에 지연 임포트합니다.
-# 이렇게 하면 사용자가 느끼는 시작 지연이 줄어듭니다.
-    print("🔍 탐지 실행…")
+    # 무거운 detector pipeline은 폴더 선택 대화상자를 표시한 이후에 지연 임포트합니다.
+    print("🔍 탐지 시작...")
     try:
-    # 패키지(python -m src.main)로 실행할 때는 상대 임포트가 작동합니다;
-    # 스크립트(python src/main.py)로 실행할 때는 절대 임포트가 필요할 수 있습니다.
-    # 먼저 상대 임포트를 시도하고 실패하면 절대 임포트로 대체합니다.
+        # 패키지(python -m src.main)로 실행할 때는 상대 임포트가 작동합니다;
+        # 스크립트(python src/main.py)로 실행할 때는 절대 임포트가 필요할 수 있습니다.
+        # 먼저 상대 임포트를 시도하고 실패하면 절대 임포트로 대체합니다.
         try:
             from .detector_pipeline import detect_pipeline, DetectorConfig
         except Exception:
@@ -187,112 +192,50 @@ def main():
             return f"{h:02d}:{m:02d}:{s:02d}"
         return f"{m:02d}:{s:02d}"
 
-    def progress_printer(stage: str, pct: float = 0.0, msg: str = ""):
-        """
-        개선된 ETA 계산:
-        - msg에 'N/M' 형태가 있으면 우선으로 사용하여 pct를 계산합니다.
-        - pct 기반으로 순간 속도(증분 pct / dt)를 EMA로 추적하여 ETA를 산출합니다.
-        - 속도가 너무 작거나 불안정하면 elapsed*(1/pct - 1)로 폴백합니다.
-        """
+    # 진행 상황 표시 전략 선택
+    def progress_printer_silent(stage: str, pct: float = 0.0, msg: str = ""):
+        """토스트 창용 - 콘솔 출력은 숨기지만 상태는 업데이트"""
         try:
-            import time as _time, re as _re
+            import time as _time
             now = _time.time()
-
-            st = _progress_state["stages"].setdefault(
-                stage,
-                {
-                    "first": now,
-                    "last": now,
-                    "last_pct": 0.0,
-                    "msg": "",
-                    "speed_ema": None,
-                },
-            )
-
-            # msg에 "processed/total" 형식이 있으면 우선으로 pct 산출
-            pct_val = None
-            try:
-                m = _re.search(r"(\d+)\s*/\s*(\d+)", str(msg or ""))
-                if m:
-                    p = int(m.group(1))
-                    q = int(m.group(2))
-                    if q > 0:
-                        pct_val = max(0.0, min(1.0, float(p) / float(q)))
-            except Exception:
-                pct_val = None
-
-            # 전달된 pct 인자를 사용해야 할 경우
-            if pct_val is None:
-                try:
-                    pct_val = float(pct)
-                    if not (0.0 <= pct_val <= 1.0):
-                        pct_val = 0.0
-                except Exception:
-                    pct_val = 0.0
-
-            # 최초 진입 시 first 설정
-            if st["last_pct"] == 0.0 and pct_val > 0.0:
-                st["first"] = st.get("first", now)
-            dt = max(1e-6, now - st.get("last", now))
-            # 순간 속도: 증분 pct / dt
-            inst_speed = None
-            try:
-                inst_speed = (pct_val - st.get("last_pct", 0.0)) / dt
-            except Exception:
-                inst_speed = None
-
-            # EMA 업데이트
-            alpha = 0.25
-            prev_ema = st.get("speed_ema", None)
-            if inst_speed is not None:
-                if prev_ema is None:
-                    speed_ema = inst_speed
-                else:
-                    speed_ema = alpha * inst_speed + (1.0 - alpha) * prev_ema
-            else:
-                speed_ema = prev_ema
-
-            # 안전 장치: 음수 또는 너무 작은 속도는 무시
-            min_speed = 1e-5
-            if speed_ema is None or speed_ema < min_speed:
-                speed_use = None
-            else:
-                speed_use = speed_ema
-
-            # ETA 계산: 남은 pct / speed
-            eta = None
-            elapsed = now - st.get("first", now)
-            try:
-                if speed_use is not None and pct_val < 0.999999:
-                    eta = (1.0 - pct_val) / speed_use
-                else:
-                    # 폴백: elapsed*(1/pct - 1)
-                    if pct_val > 1e-6:
-                        eta = elapsed * (1.0 / pct_val - 1.0)
-                    else:
-                        eta = None
-            except Exception:
-                eta = None
-
-            # 상태 갱신
+            
+            # 상태 관리 - 토스트 창이 읽을 수 있도록 업데이트
+            st = _progress_state["stages"].setdefault(stage, {"first": now})
             st["last"] = now
-            st["last_pct"] = pct_val
+            st["last_pct"] = float(pct) if 0.0 <= pct <= 1.0 else 0.0
             st["msg"] = str(msg)
-            st["speed_ema"] = speed_ema
-
-            # 출력(콘솔 간단 로그 유지)
-            try:
-                eta_s = _format_secs(eta)
-                elapsed_s = _format_secs(elapsed)
-                print(f"[진행] {stage:12s} {pct_val*100:5.1f}%  ETA:{eta_s}  경과:{elapsed_s}  {msg}")
-            except Exception:
-                print(f"[진행] {stage} | {pct_val} | {msg}")
-
+            
         except Exception:
-            try:
-                print(f"[진행] {stage} | {pct} | {msg}")
-            except Exception:
-                pass
+            pass
+        
+    def progress_printer_console(stage: str, pct: float = 0.0, msg: str = ""):
+        """토스트 창 실패 시 콘솔 출력용"""
+        try:
+            import time as _time
+            now = _time.time()
+            
+            # 간단한 상태 관리
+            st = _progress_state["stages"].setdefault(stage, {"first": now})
+            
+            # 전달된 pct 사용
+            pct_val = float(pct) if 0.0 <= pct <= 1.0 else 0.0
+            
+            # ETA 계산
+            if pct_val > 0.01:
+                elapsed = now - st["first"]
+                eta = elapsed * (1.0 / pct_val - 1.0)
+                eta_str = f"{int(eta//60):02d}:{int(eta%60):02d}"
+            else:
+                eta_str = "--:--"
+            
+            # 간단한 출력
+            if pct_val < 1.0:
+                print(f"\r⏳ {stage}: {pct_val*100:5.1f}% (ETA: {eta_str}) - {msg}", end="", flush=True)
+            else:
+                print(f"\r✅ {stage}: 완료 - {msg}")
+                
+        except Exception:
+            print(f"⏳ {stage}: {msg}")
 
     # 사전 검사: 선택된 폴더에 지원 이미지 확장자가 있는지 확인합니다.
     exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
@@ -325,7 +268,7 @@ def main():
         return
 
     # 파이프라인을 백그라운드 스레드에서 실행하고,
-    # 메인(UI) 스레드에서는 카톡 스타일의 토스트 창을 띄워 진행을 보여줍니다.
+    # 메인(UI) 스레드에서는 토스트 창을 띄워 진행을 보여줍니다.
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -476,9 +419,9 @@ def main():
                 except Exception:
                     pass
 
-        # 파이프라인 스레드 시작
+        # 파이프라인 스레드 시작 (토스트 창용 - 조용한 모드)
         pipeline_thread = threading.Thread(
-            target=lambda: detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer),
+            target=lambda: detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer_silent),
             daemon=True
         )
         pipeline_thread.start()
@@ -487,17 +430,19 @@ def main():
         try:
             toast = ToastToast(_progress_state, pipeline_thread)
             toast.run()
+            print("\n✅ 분석 완료!")
         except Exception as e:
             print(f"토스트 창 실행 실패: {e}")
             # 실패하면 블록킹 방식으로 대체 실행
             pipeline_thread.join()
+            print("\n✅ 분석 완료!")
     except Exception:
-        # tkinter가 없거나 실패 시 기존 동기 호출로 폴백
-        detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer)
-    print("✅ 완료 → report.csv, report.parquet, images_summary.csv 생성")
+        # tkinter가 없거나 실패 시 기존 동기 호출로 폴백 (콘솔 출력 모드)
+        detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer_console)
+        print("\n✅ 분석 완료!")
 
-    print("🌐 대시보드 실행…")
-    # input_dir 인자도 함께 전달하여 사용자가 선택한 입력 폴더가 대시보드에서 인식되도록 함
+    print("🌐 대시보드 실행 중...")
+    # 사용자가 선택한 폴더를 대시보드에서 처리하도록 명령어를 구성합니다
     cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--",
            f"--output_dir={args.output_dir}"]
     # 기준 시점: 사용자가 폴더를 선택한 시점을 우선 사용, 없으면 지금부터 측정
@@ -512,30 +457,31 @@ def main():
                 if not line:
                     break
                 line = line.strip()
-                print(f"[streamlit] {line}")
+                # Streamlit 출력은 너무 많으므로 숨김
+                # print(f"[streamlit] {line}")  # 간소화
                 if any(p in line for p in ready_patterns):
                     elapsed = time.time() - start_to_dashboard
-                    print(f"🎉 대시보드 준비 완료 (선택→표시): {elapsed:.2f}s")
+                    print(f"\n✅ 대시보드 준비 완료! ({elapsed:.1f}초)")
                     return elapsed
                 if time.time() - t0 > timeout:
-                    print(f"⚠️ Streamlit 준비 대기 타임아웃({timeout}s)")
+                    print(f"⚠️ 대시보드 시작 대기 시간 초과 ({timeout}s)")
                     return None
         except Exception as e:
-            print(f"Streamlit 모니터링 예외: {e}")
+            print(f"대시보드 모니터링 오류: {e}")
             return None
 
     try:
         if args.detach and os.name == 'nt':
-            # 윈도우에서 새 창으로 띄우는 경우에는 stdout 캡처가 어렵고 start 명령으로 즉시 반환됩니다.
+            # 윈도우에서 새 창으로 띄우는 경우
             subprocess.Popen(["cmd", "/c", "start"] + cmd)
-            print(f"대시보드 프로세스 시작 (detach). 경과(근사): {time.time() - start_to_dashboard:.2f}s")
+            print(f"✅ 대시보드 시작됨 ({time.time() - start_to_dashboard:.1f}초)")
         else:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
             _wait_streamlit_ready_and_report(proc, timeout=90)
     except KeyboardInterrupt:
-        print("중단: 사용자가 실행을 취소했습니다.")
+        print("\n❌ 사용자가 실행을 취소했습니다.")
     except Exception as e:
-        print(f"대시보드 실행 중 오류가 발생했습니다: {e}")
+        print(f"❌ 대시보드 실행 오류: {e}")
 
 if __name__ == "__main__":
     main()

@@ -735,17 +735,20 @@ with tab2:
         import imagehash
         dup_pairs = []
         hashes = {}
-    # 스캔 블록이 주석 처리되어도 변수들이 존재하도록 보장
-        input_dir = locals().get('input_dir', OUTPUT_DIR)
-        scan_files = locals().get('scan_files', [])
+        # 현재는 사용자가 선택한 폴더에서 직접 스캔하지 않고 
+        # 출력 폴더의 결과만을 기반으로 분석합니다
+        scan_files = []  # 빈 리스트로 유지 (직접 스캔 없음)
         for f in scan_files:
-            p = os.path.join(input_dir, f)
+            # 이 루프는 실행되지 않습니다 (scan_files가 빈 리스트이므로)
+            # p = os.path.join(OUTPUT_DIR, f)  # 참조용 주석
             try:
+                # 이 코드는 scan_files가 비어있어서 실행되지 않습니다
                 # 안전하게 열기 (읽기 실패 파일은 건너뜀)
-                with open(p, 'rb') as fh:
-                    img = Image.open(fh).convert('L')
-                    h = imagehash.phash(img)
-                hashes[f] = h
+                # with open(p, 'rb') as fh:
+                #     img = Image.open(fh).convert('L')
+                #     h = imagehash.phash(img)
+                # hashes[f] = h
+                pass
             except Exception:
                 # 읽기 실패 파일은 무시
                 continue
