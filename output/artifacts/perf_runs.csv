@@ -1,2 +1,2 @@
 timestamp,platform,n_images,mean_size,mean_w,mean_h,batch_size,num_workers,use_ocr,use_lpips,embed_backend,gpu,gpu_count,gpu_memory_gb,gpu_name,mem_total,cpu_count,meta_s,model_load_s,embed_forward_s,embed_s,ann_s,io_s,total_s
-1759296792,Windows,116,1655585.4827586208,1757.2758620689656,2482.7844827586205,38,6,0,0,dinov2,1,1,6.0,GeForce GTX 1660 Ti,16973877248,12,13.1204,5.4545,22.6742,28.1287,0.0037,0.625,41.9081
+1759300579,Windows,116,1655585.4827586208,1757.2758620689656,2482.7844827586205,38,6,0,0,dinov2,1,1,6.0,GeForce GTX 1660 Ti,16973877248,12,12.9281,6.293,21.234,27.527,0.0114,0.6318,41.1269
