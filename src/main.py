@@ -70,6 +70,10 @@ def parse_args():
     p.add_argument("--batch", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--roi", type=float, nargs=4, default=[0.15, 0.15, 0.85, 0.85])
+    
+    # 자동 최적화
+    p.add_argument("--no_auto_optimize", action="store_true", help="데이터 크기에 따른 자동 최적화 비활성화")
+    
     p.add_argument("--detach", action="store_true", help="윈도우에서 Streamlit을 새 창으로 분리 실행합니다 (비차단).")
     # 파일 수집 재귀 옵션
     p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir for images")
@@ -165,6 +169,7 @@ def main():
         batch_size=args.batch,
         num_workers=args.num_workers,
         roi_ratio=tuple(args.roi),
+        auto_optimize=not args.no_auto_optimize,  # 기본값은 True, --no_auto_optimize 플래그로 비활성화
     )
 
     # (예상 시간 계산 코드는 제거됨 — 요청에 따라 출력에서 제외합니다)
@@ -277,7 +282,7 @@ def main():
 
             # 출력(콘솔 간단 로그 유지)
             try:
-                etcs(eta)
+                eta_s = _format_secs(eta)
                 elapsed_s = _format_secs(elapsed)
                 print(f"[진행] {stage:12s} {pct_val*100:5.1f}%  ETA:{eta_s}  경과:{elapsed_s}  {msg}")
             except Exception:
