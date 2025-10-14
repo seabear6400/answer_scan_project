@@ -3,7 +3,7 @@ import shutil
 import itertools
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable
 
 import numpy as np
 from PIL import Image
@@ -18,11 +18,12 @@ import polars as pl
 import stat
 import time
 import threading
+import contextlib
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from torchvision.models import resnet18, ResNet18_Weights
+from torchvision.models import resnet18, ResNet18_Weights, ResNet
 import concurrent.futures
 import hashlib
 
@@ -98,41 +99,53 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.CRITICAL)  # CRITICAL만 표시 (거의 없음)
 
 
-def diagnose_gpu():
-    """GPU 상태를 진단하고 문제점을 찾습니다."""
-    print("=" * 60)
-    print("🔍 GPU 진단 시작")
-    print("=" * 60)
-    
-    print(f"PyTorch 버전: {torch.__version__}")
-    print(f"CUDA 사용 가능: {torch.cuda.is_available()}")
-    
-    if torch.cuda.is_available():
-        print(f"CUDA 버전: {torch.version.cuda}")
-        print(f"GPU 개수: {torch.cuda.device_count()}")
-        
-        for i in range(torch.cuda.device_count()):
-            props = torch.cuda.get_device_properties(i)
-            print(f"GPU {i}: {props.name}")
-            print(f"  메모리: {props.total_memory / (1024**3):.1f}GB")
-            print(f"  Compute Capability: {props.major}.{props.minor}")
-            
-        try:
-            # 더 작은 테스트 텐서로 빠른 확인
-            test_tensor = torch.zeros(100, 100).cuda()
-            print("✅ GPU 텐서 생성 테스트 성공")
-            del test_tensor
-            torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"❌ GPU 텐서 생성 테스트 실패: {e}")
-    else:
-        print("❌ CUDA 사용 불가능")
-        print("가능한 원인:")
-        print("  - NVIDIA GPU 드라이버가 설치되지 않음")
-        print("  - CUDA Toolkit이 설치되지 않음")
-        print("  - PyTorch가 CPU 버전으로 설치됨")
-        
-    print("=" * 60)
+@dataclass
+class DeviceInfo:
+    """간소화된 디바이스 스냅샷."""
+    has_gpu: bool
+    gpu_count: int
+    gpu_memory_gb: float
+    gpu_name: str
+    device: torch.device
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            'has_gpu': self.has_gpu,
+            'gpu_count': self.gpu_count,
+            'gpu_memory_gb': self.gpu_memory_gb,
+            'gpu_name': self.gpu_name,
+            'device': self.device,
+        }
+
+
+def _torch_version_major() -> int:
+    try:
+        return int(torch.__version__.split('.')[0])
+    except Exception:
+        return 1
+
+
+def _should_use_compile() -> bool:
+    return _torch_version_major() >= 2
+
+
+def _maybe_run_torch_compile(model: nn.Module) -> nn.Module:
+    if not _should_use_compile():
+        return model
+    with contextlib.suppress(Exception):
+        model = torch.compile(model)  # type: ignore[attr-defined]
+    return model
+
+
+def _configure_torch_runtime(device: torch.device) -> None:
+    """GPU 환경에서 기본 런타임 튜닝을 활성화합니다."""
+    if device.type != 'cuda':
+        return
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    with contextlib.suppress(AttributeError):
+        torch.set_float32_matmul_precision('medium')
 
 
 @dataclass
@@ -184,68 +197,42 @@ class DetectorConfig:
 
 
 # -------------------------- 적응적 최적화 ---------------------
-def get_device_info():
-    """GPU/CPU 디바이스 정보를 빠르게 조회합니다. GPU 실패 시 항상 CPU로 fallback."""
-    device_info = {
-        'has_gpu': False,
-        'gpu_count': 0,
-        'gpu_memory_gb': 0,
-        'gpu_name': '',
-        'device': torch.device('cpu')
-    }
-    
+def _attempt_gpu_probe() -> DeviceInfo:
+    """GPU 사용 가능 여부를 빠르게 파악합니다."""
+    if not torch.cuda.is_available():
+        return DeviceInfo(False, 0, 0.0, '', torch.device('cpu'))
+
+    gpu_count = torch.cuda.device_count()
+    if gpu_count == 0:
+        return DeviceInfo(False, 0, 0.0, '', torch.device('cpu'))
+
     try:
-        # 빠른 CUDA 체크 (타임아웃 없이)
-        cuda_available = torch.cuda.is_available()
-        
-        if cuda_available:
-            gpu_count = torch.cuda.device_count()
-            
-            if gpu_count > 0:
-                # 빠른 GPU 정보 수집
-                try:
-                    props = torch.cuda.get_device_properties(0)
-                    device_info['has_gpu'] = True
-                    device_info['gpu_count'] = gpu_count
-                    device_info['gpu_memory_gb'] = props.total_memory / (1024**3)
-                    device_info['gpu_name'] = props.name
-                    device_info['device'] = torch.device('cuda:0')
-                    
-                    # GPU 감지 (조용히)
-                    device_info['has_gpu'] = True
-                    device_info['gpu_count'] = gpu_count
-                    device_info['gpu_memory_gb'] = props.total_memory / (1024**3)
-                    device_info['gpu_name'] = props.name
-                    device_info['device'] = torch.device('cuda:0')
-                    
-                    # 빠른 GPU 테스트
-                    try:
-                        test_tensor = torch.zeros(2).cuda()
-                        del test_tensor
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        device_info['has_gpu'] = False
-                        device_info['device'] = torch.device('cpu')
-                        
-                except Exception as e:
-                    logger.warning(f"GPU 초기화 실패: {e}")
-                    device_info['has_gpu'] = False
-                    device_info['device'] = torch.device('cpu')
-            else:
-                pass  # GPU 없음 - 조용히 CPU 사용
-        else:
-            pass  # CUDA 불가 - 조용히 CPU 사용
-            
-    except Exception as e:
-        pass  # GPU 체크 실패 시 조용히 CPU 사용
-    
-    # 최종 디바이스만 간단히 표시
-    if device_info['has_gpu']:
-        logger.info(f"� GPU 모드")
+        props = torch.cuda.get_device_properties(0)
+        device = torch.device('cuda:0')
+        with contextlib.suppress(Exception):
+            tensor = torch.zeros(1, device=device)
+            del tensor
+            torch.cuda.empty_cache()
+        return DeviceInfo(
+            has_gpu=True,
+            gpu_count=gpu_count,
+            gpu_memory_gb=props.total_memory / (1024**3),
+            gpu_name=props.name,
+            device=device,
+        )
+    except Exception as exc:
+        logger.warning(f"GPU 초기화 실패: {exc}")
+        return DeviceInfo(False, 0, 0.0, '', torch.device('cpu'))
+
+
+def get_device_info() -> Dict[str, object]:
+    """GPU/CPU 디바이스 정보를 빠르게 조회합니다."""
+    info = _attempt_gpu_probe()
+    if info.has_gpu:
+        logger.info("GPU 모드")
     else:
-        logger.info("� CPU 모드")
-    
-    return device_info
+        logger.info("CPU 모드")
+    return info.to_dict()
 
 
 def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_info: dict = None) -> DetectorConfig:
@@ -740,7 +727,8 @@ def load_model(device: torch.device, backend: str, force_gpu: bool = False, fall
 
 def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, num_workers: int,
                        roi_ratio: Tuple[float, float, float, float], backend: str,
-                       progress_callback: Optional[callable] = None, force_gpu: bool = False):
+                       progress_callback: Optional[Callable[[str, float, str], None]] = None,
+                       force_gpu: bool = False):
     """
     안정적인 임베딩 계산: GPU 실패 시 자동으로 CPU fallback
     입력 크기 검증 추가
@@ -757,18 +745,19 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     ds = ImgDataset(paths, roi_ratio, backend)
     
     # GPU 사용 시 pin_memory 최적화
-    pin_memory = False
-    try:
-        pin_memory = (device.type == "cuda" and torch.cuda.is_available())
-    except:
-        pin_memory = False
-    
-    # logger.info(f"📊 DataLoader 설정: batch_size={batch_size}, num_workers={num_workers}, pin_memory={pin_memory}")  # 간소화
-    
-    dl = DataLoader(
-        ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory
+    pin_memory = device.type == "cuda" and torch.cuda.is_available()
+
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
     )
+    if num_workers > 0:
+        per_worker = max(1, batch_size // max(num_workers, 1))
+        loader_kwargs["prefetch_factor"] = min(4, max(2, per_worker))
+    dl = DataLoader(ds, **loader_kwargs)
     
     # 모델 로드 (조용히)
     # logger.info(f"🔄 모델 로딩 중... (backend: {backend}, device: {device})")  # 간소화
@@ -790,6 +779,11 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     t_model1 = time.time()
     model_load_s = float(t_model1 - t_model0)
     # logger.info(f"⏱️ 모델 로딩 시간: {model_load_s:.2f}초")  # 간소화
+
+    _configure_torch_runtime(device)
+    should_compile = device.type == "cuda" and isinstance(model, ResNet)
+    model = _maybe_run_torch_compile(model) if should_compile else model
+    amp_enabled = device.type == "cuda"
 
     # GPU 메모리 정보 로깅 (간소화)
     if device.type == "cuda":
@@ -824,7 +818,8 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
                     x = x.to(device)
                 
                 # 모델 추론
-                out_t = model(x)
+                with torch.cuda.amp.autocast(enabled=amp_enabled):
+                    out_t = model(x)
                 out = out_t.detach().cpu().numpy()
                 
                 # 출력 형태 정규화
@@ -1135,9 +1130,11 @@ def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndar
     for i in range(n):
         if idxs.shape[1] == 0:
             continue
-        for col in range(1, idxs.shape[1]):
+        for col in range(idxs.shape[1]):
             j = int(idxs[i, col])
-            if j <= i:
+            if j == i:
+                continue  # skip self; identical vectors may reorder neighbors
+            if j < i:
                 continue
             fi, fj = name_by_row[i], name_by_row[j]
 
