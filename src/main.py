@@ -1,18 +1,16 @@
-import os
 import argparse
-import subprocess
-import threading
+import logging
+import os
 import shutil
 import stat
-from typing import Optional, Tuple
-import time
 import subprocess
-import os
+import threading
+import time
+from typing import Optional, Tuple
 
 # OpenCV 로깅 레벨 설정 (경고 메시지 숨김)
 os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 # timm 라이브러리 로그 숨기기
-import logging
 logging.getLogger('timm').setLevel(logging.ERROR)
 
 # 가능한 한 일찍 백그라운드 스레드에서 tkinter를 예열하여
@@ -182,16 +180,6 @@ def main():
     # progress callback: 콘솔에 단계/퍼센트/메시지를 출력 (진행바 + ETA 포함)
     _progress_state = {"start": time.time(), "stages": {}}
 
-    def _format_secs(s: Optional[float]) -> str:
-        if s is None:
-            return "--:--:--"
-        s = int(round(s))
-        h, r = divmod(s, 3600)
-        m, s = divmod(r, 60)
-        if h:
-            return f"{h:02d}:{m:02d}:{s:02d}"
-        return f"{m:02d}:{s:02d}"
-
     # 진행 상황 표시 전략 선택
     def progress_printer_silent(stage: str, pct: float = 0.0, msg: str = ""):
         """토스트 창용 - 콘솔 출력은 숨기지만 상태는 업데이트"""
@@ -274,12 +262,11 @@ def main():
         from tkinter import ttk
 
         class ToastToast:
-            def __init__(self, shared_state, worker_thread, width=480, height=140, stay_time=None):
+            def __init__(self, shared_state, worker_thread, width=480, height=140):
                 self.shared = shared_state
                 self.worker = worker_thread
                 self.width = width
                 self.height = height
-                self.stay_time = stay_time
                 self.root = tk.Tk()
                 # 창 꾸밈: 테두리 없이 항상 위, 투명도 약간, 포커스 강제 X
                 try:
@@ -344,7 +331,6 @@ def main():
                 frm.bind('<ButtonPress-1>', start_move)
                 frm.bind('<B1-Motion>', do_move)
                 self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-                self._start_time = time.time()
                 self._update_loop()
 
             def _format_secs(self, s: Optional[float]) -> str:
