@@ -1,2 +1,2 @@
 timestamp,platform,n_images,mean_size,mean_w,mean_h,batch_size,num_workers,use_ocr,use_lpips,embed_backend,gpu,gpu_count,gpu_memory_gb,gpu_name,mem_total,cpu_count,meta_s,model_load_s,embed_forward_s,embed_s,ann_s,io_s,total_s
-1759302027,Windows,116,1655585.4827586208,1757.2758620689656,2482.7844827586205,19,6,0,0,dinov2,0,0,0,,16973877248,12,2.3185,2.1386,35.6897,37.8283,0.0041,0.6141,40.7898
+1760405483,Windows,72,1641465.7916666667,1757.2222222222222,2483.3888888888887,12,6,0,0,dinov2,0,0,0,,16973877248,12,2.1289,2.7726,27.7184,30.491,0.0033,0.174,32.8154

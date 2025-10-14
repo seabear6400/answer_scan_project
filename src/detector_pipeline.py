@@ -164,6 +164,13 @@ class DetectorConfig:
     # 공백(빈칸) 감지 (성능 최적화를 위해 더 관대한 임계값)
     blank_method: str = "sauvola"   # otsu/sauvola
     blank_density_thresh: float = 0.01  # 더 엄격하게 설정하여 빈칸 탐지 정확도 향상
+    blank_border_trim: float = 0.02      # 공백 감지 시 가장자리 잘라내기 비율
+    blank_min_component_ratio: float = 0.0008  # 노이즈 제거를 위한 최소 컴포넌트 비율
+    blank_auto_tune: bool = True         # 데이터 기반 자동 임계값 조정
+    blank_auto_suffix: str = "2"         # 자동 임계값을 적용할 파일명 접미사
+    blank_auto_min_samples: int = 6      # 자동 임계값 계산에 필요한 최소 샘플 수
+    blank_auto_margin: float = 0.002     # 자동 임계값에 추가할 완충값
+    blank_auto_cap: float = 0.12         # 자동 임계값 상한
 
     # 재정렬 / OCR
     use_lpips: bool = False
@@ -281,6 +288,13 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
         suspect_low=cfg.suspect_low,
         blank_method=cfg.blank_method,
         blank_density_thresh=cfg.blank_density_thresh,
+        blank_border_trim=cfg.blank_border_trim,
+        blank_min_component_ratio=cfg.blank_min_component_ratio,
+        blank_auto_tune=cfg.blank_auto_tune,
+        blank_auto_suffix=cfg.blank_auto_suffix,
+        blank_auto_min_samples=cfg.blank_auto_min_samples,
+        blank_auto_margin=cfg.blank_auto_margin,
+        blank_auto_cap=cfg.blank_auto_cap,
         use_lpips=cfg.use_lpips,
         lpips_thresh=cfg.lpips_thresh,
         use_ocr=cfg.use_ocr,
@@ -552,7 +566,13 @@ def hamming_distance_bits(a_bits: np.ndarray, b_bits: np.ndarray) -> int:
     return int(np.sum(a_bits ^ b_bits))
 
 
-def ink_density(path: str, roi_ratio: Tuple[float, float, float, float], method: str = "sauvola") -> float:
+def ink_density(
+    path: str,
+    roi_ratio: Tuple[float, float, float, float],
+    method: str = "sauvola",
+    border_trim: float = 0.0,
+    min_component_ratio: float = 0.0,
+) -> float:
     gray = read_gray(path)
     if gray is None:
         logger.warning(f"ink_density: 이미지 로드 실패로 0 반환: {path}")
@@ -561,13 +581,52 @@ def ink_density(path: str, roi_ratio: Tuple[float, float, float, float], method:
     l, t, r, b = roi_ratio
     x1, y1, x2, y2 = int(l * w), int(t * h), int(r * w), int(b * h)
     roi = gray[y1:y2, x1:x2]
-    if method == "sauvola" and _HAS_SAUVOLA:
-        th = threshold_sauvola(roi, window_size=25, k=0.2)
-        binary = (roi < th).astype(np.uint8)
+    if roi.size == 0:
+        return 0.0
+
+    if border_trim > 0.0:
+        trim_x = int(border_trim * roi.shape[1])
+        trim_y = int(border_trim * roi.shape[0])
+        if trim_x * 2 < roi.shape[1] and trim_y * 2 < roi.shape[0]:
+            roi = roi[trim_y:roi.shape[0] - trim_y, trim_x:roi.shape[1] - trim_x]
+        if roi.size == 0:
+            return 0.0
+
+    if min(roi.shape[:2]) >= 5:
+        roi_proc = cv2.GaussianBlur(roi, (5, 5), 0)
     else:
-        _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        binary = (binary > 0).astype(np.uint8)
-    return float(np.count_nonzero(binary)) / binary.size
+        roi_proc = roi
+
+    if method == "sauvola" and _HAS_SAUVOLA:
+        th = threshold_sauvola(roi_proc, window_size=25, k=0.2)
+        binary = (roi_proc < th).astype(np.uint8)
+    else:
+        _, thr = cv2.threshold(roi_proc, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        binary = (thr > 0).astype(np.uint8)
+
+    if min(binary.shape) >= 3:
+        kernel = np.ones((3, 3), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    if min_component_ratio > 0.0 and binary.size:
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if num_labels > 1:
+            min_area = max(4, int(binary.size * min_component_ratio))
+            filtered = np.zeros_like(binary, dtype=np.uint8)
+            for lbl in range(1, num_labels):
+                if stats[lbl, cv2.CC_STAT_AREA] >= min_area:
+                    filtered[labels == lbl] = 1
+            binary = filtered
+
+    if binary.size == 0:
+        return 0.0
+
+    binary_density = float(np.count_nonzero(binary)) / float(binary.size)
+    mean_dark = max(0.0, 1.0 - float(np.mean(roi_proc)) / 255.0)
+    std_dark = float(np.std(roi_proc)) / 255.0
+    contrast_score = max(0.0, min(1.0, 0.6 * mean_dark + 0.4 * std_dark))
+    density = 0.7 * binary_density + 0.3 * contrast_score
+    return float(max(0.0, min(1.0, density)))
 
 
 # -------------------------- 데이터셋 / 임베딩 ----------------------
@@ -1097,14 +1156,69 @@ def _metadata_worker(args):
     return f, ph, pdq, float(dens), txt
 
 
+def _auto_blank_threshold(values: List[float], cfg: DetectorConfig) -> Optional[float]:
+    arr = np.array([v for v in values if np.isfinite(v)], dtype=np.float32)
+    if arr.size < cfg.blank_auto_min_samples:
+        return None
+    arr = arr[(arr >= 0.0) & (arr <= 1.0)]
+    if arr.size < cfg.blank_auto_min_samples:
+        return None
+
+    c1 = float(np.percentile(arr, 25))
+    c2 = float(np.percentile(arr, 75))
+    if np.isclose(c1, c2, atol=1e-4):
+        return None
+
+    for _ in range(12):
+        dist1 = np.abs(arr - c1)
+        dist2 = np.abs(arr - c2)
+        assign = dist1 <= dist2
+        if assign.all() or (~assign).all():
+            return None
+        new_c1 = float(arr[assign].mean()) if assign.any() else c1
+        new_c2 = float(arr[~assign].mean()) if (~assign).any() else c2
+        if np.isnan(new_c1) or np.isnan(new_c2):
+            return None
+        if abs(new_c1 - c1) < 1e-5 and abs(new_c2 - c2) < 1e-5:
+            c1, c2 = new_c1, new_c2
+            break
+        c1, c2 = new_c1, new_c2
+
+    if c1 > c2:
+        c1, c2 = c2, c1
+    threshold = float((c1 + c2) / 2.0) + cfg.blank_auto_margin
+    threshold = max(cfg.blank_density_thresh, threshold)
+    threshold = min(cfg.blank_auto_cap, max(0.0, threshold))
+    if threshold <= cfg.blank_density_thresh + 1e-6:
+        return None
+    return threshold
+
+
+def _build_blank_flags(files: List[str], densities: Dict[str, float], cfg: DetectorConfig) -> Tuple[Dict[str, bool], Dict[str, float], Optional[float]]:
+    thresholds: Dict[str, float] = {f: cfg.blank_density_thresh for f in files}
+    auto_threshold = None
+    target_suffix = cfg.blank_auto_suffix
+    if cfg.blank_auto_tune and target_suffix:
+        suffix_vals = [densities.get(f, 0.0) for f in files if os.path.splitext(f)[0].endswith(target_suffix)]
+        auto_threshold = _auto_blank_threshold(suffix_vals, cfg)
+        if auto_threshold is not None:
+            for f in files:
+                if os.path.splitext(f)[0].endswith(target_suffix):
+                    thresholds[f] = max(thresholds[f], auto_threshold)
+
+    blank_flags = {f: densities.get(f, 0.0) <= thresholds[f] for f in files}
+    return blank_flags, thresholds, auto_threshold
+
+
 def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndarray,
                     phashes: Dict[str, imagehash.ImageHash], pdqs: Dict[str, Optional[np.ndarray]],
-                    densities: Dict[str, float], texts: Dict[str, str], cfg: DetectorConfig,
+                    densities: Dict[str, float], blank_flags: Dict[str, bool], texts: Dict[str, str], cfg: DetectorConfig,
                     input_dir: Optional[str] = None, path_map: Optional[Dict[str, str]] = None):
     """
     공통의 페어링/그룹화 로직을 추출한 헬퍼.
     name_by_row: 행 인덱스 -> 파일명 매핑
     input_dir OR path_map 중 하나를 제공하여 추가 검사(LPIPS/OCR)를 수행함.
+    blank_flags: 사전에 계산된 공백 여부 (True이면 그룹 후보에서 제거).
     반환: pair_rows, groups
     """
     n = len(name_by_row)
@@ -1145,7 +1259,7 @@ def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndar
             if not (os.path.splitext(fi)[0].endswith('2') and os.path.splitext(fj)[0].endswith('2')):
                 continue
 
-            if densities.get(fi, 0.0) <= cfg.blank_density_thresh or densities.get(fj, 0.0) <= cfg.blank_density_thresh:
+            if blank_flags.get(fi, False) or blank_flags.get(fj, False):
                 continue
 
             if not prefilter_ok(fi, fj):
@@ -1234,9 +1348,11 @@ def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndar
 
 
 def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[str, float], cfg: DetectorConfig,
+                           blank_flags: Dict[str, bool], blank_thresholds: Dict[str, float],
                            pair_rows: List[List], groups: Dict[str, List[str]],
                            input_dir: Optional[str] = None, path_map: Optional[Dict[str, str]] = None,
-                           embs: Optional[np.ndarray] = None, backend_used: Optional[str] = None):
+                           embs: Optional[np.ndarray] = None, backend_used: Optional[str] = None,
+                           auto_blank_threshold: Optional[float] = None):
     """
     공통 리포트 저장 및 파일 복사 로직.
     input_dir이 주어지면 detect_pipeline 스타일 동작(빈칸 기본 복사),
@@ -1253,10 +1369,18 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
 
     # 이미지 요약
     try:
+        auto_cols = []
+        for f in files:
+            if auto_blank_threshold is not None and os.path.splitext(f)[0].endswith(cfg.blank_auto_suffix):
+                auto_cols.append(auto_blank_threshold)
+            else:
+                auto_cols.append(np.nan)
         img_df = pd.DataFrame({
             "파일": files,
             "밀도": [densities.get(f, 0.0) for f in files],
-            "빈칸여부": [densities.get(f, 0.0) <= cfg.blank_density_thresh for f in files],
+            "적용임계값": [blank_thresholds.get(f, cfg.blank_density_thresh) for f in files],
+            "자동보정임계값": auto_cols,
+            "빈칸여부": [bool(blank_flags.get(f, False)) for f in files],
         })
         img_df.to_csv(os.path.join(output_dir, "images_summary.csv"), index=False, encoding="utf-8-sig")
     except Exception:
@@ -1278,11 +1402,7 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
     for f in files:
         src = path_map[f] if path_map is not None else os.path.join(input_dir or "", f)
         name_wo_ext = os.path.splitext(f)[0]
-        try:
-            is_blank = (pd.read_csv(os.path.join(output_dir, "images_summary.csv"))
-                        .query("파일 == @f")["빈칸여부"].iloc[0])
-        except Exception:
-            is_blank = densities.get(f, 0.0) <= cfg.blank_density_thresh
+        is_blank = bool(blank_flags.get(f, densities.get(f, 0.0) <= blank_thresholds.get(f, cfg.blank_density_thresh)))
 
         if path_map is None:
             # detect_pipeline 동작: 기본적으로 blank는 blank_answers로, 단 파일명 끝이 '1'이면 ok로 재분류
@@ -1312,6 +1432,11 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
         if backend_used is not None:
             with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
                 fw.write(backend_used)
+        with open(os.path.join(output_dir, "artifacts", "blank_threshold.txt"), "w", encoding="utf-8") as fw:
+            fw.write(f"base_threshold={cfg.blank_density_thresh}\n")
+            if auto_blank_threshold is not None:
+                fw.write(f"auto_threshold={auto_blank_threshold}\n")
+                fw.write(f"auto_suffix={cfg.blank_auto_suffix}\n")
     except Exception:
         pass
 
@@ -1455,12 +1580,22 @@ def detect_pipeline(input_dir: str, output_dir: str,
             if txt:
                 texts[f] = txt
 
+    blank_flags, blank_thresholds, auto_blank_threshold = _build_blank_flags(files, densities, cfg)
+
     # images_summary.csv를 보존(밀도 + 빈칸 플래그)하여 이후 실행을 빠르게 함
     try:
+        auto_cols = []
+        for f in files:
+            if auto_blank_threshold is not None and os.path.splitext(f)[0].endswith(cfg.blank_auto_suffix):
+                auto_cols.append(auto_blank_threshold)
+            else:
+                auto_cols.append(np.nan)
         img_df = pd.DataFrame({
             "파일": files,
             "밀도": [densities.get(f, 0.0) for f in files],
-            "빈칸여부": [densities.get(f, 0.0) <= cfg.blank_density_thresh for f in files],
+            "적용임계값": [blank_thresholds.get(f, cfg.blank_density_thresh) for f in files],
+            "자동보정임계값": auto_cols,
+            "빈칸여부": [bool(blank_flags.get(f, False)) for f in files],
         })
         img_df.to_csv(images_summary_path, index=False, encoding="utf-8-sig")
     except Exception:
@@ -1540,13 +1675,37 @@ def detect_pipeline(input_dir: str, output_dir: str,
     _cb("pairing", 0.80, "페어링/유사도 계산 시작")
 
     # 공통 페어링/그룹화 로직으로 대체
-    pair_rows, groups = _pair_and_group(name_by_row, idxs, sims, phashes, pdqs, densities, texts, cfg, input_dir=input_dir)
+    pair_rows, groups = _pair_and_group(
+        name_by_row,
+        idxs,
+        sims,
+        phashes,
+        pdqs,
+        densities,
+        blank_flags,
+        texts,
+        cfg,
+        input_dir=input_dir,
+    )
 
     # 공통 리포트 저장/파일 복사 헬퍼 호출 (타이밍 콜백 보존)
     # logger.info("[5/5] 리포트 저장 및 출력 정리 …")  # 간소화
     t_io0 = time.time()
     _cb("save", 0.95, "리포트 저장 및 파일 분류 중")
-    _save_reports_and_copy(output_dir, files, densities, cfg, pair_rows, groups, input_dir=input_dir, embs=embs, backend_used=backend_used)
+    _save_reports_and_copy(
+        output_dir,
+        files,
+        densities,
+        cfg,
+        blank_flags,
+        blank_thresholds,
+        pair_rows,
+        groups,
+        input_dir=input_dir,
+        embs=embs,
+        backend_used=backend_used,
+        auto_blank_threshold=auto_blank_threshold,
+    )
     t_io1 = time.time()
     _cb("save", 0.98, f"저장 완료 ({round(t_io1 - t_io0, 2)}s)")
 
@@ -1835,6 +1994,8 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
             if txt:
                 texts[f] = txt
 
+    blank_flags, blank_thresholds, auto_blank_threshold = _build_blank_flags(files, densities, cfg)
+
     # 3) 임베딩
     logger.info("[2/5] CNN/ViT 임베딩 처리 …")
     # 이미 device 정보는 위에서 설정됨
@@ -1883,9 +2044,33 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")
 
     # 공통 페어링/그룹화 로직으로 대체
-    pair_rows, groups = _pair_and_group(name_by_row, idxs, sims, phashes, pdqs, densities, texts, cfg, path_map=path_map)
+    pair_rows, groups = _pair_and_group(
+        name_by_row,
+        idxs,
+        sims,
+        phashes,
+        pdqs,
+        densities,
+        blank_flags,
+        texts,
+        cfg,
+        path_map=path_map,
+    )
 
     # 공통 리포트 저장/파일 복사 헬퍼 호출
-    _save_reports_and_copy(output_dir, files, densities, cfg, pair_rows, groups, path_map=path_map, embs=embs, backend_used=backend_used)
+    _save_reports_and_copy(
+        output_dir,
+        files,
+        densities,
+        cfg,
+        blank_flags,
+        blank_thresholds,
+        pair_rows,
+        groups,
+        path_map=path_map,
+        embs=embs,
+        backend_used=backend_used,
+        auto_blank_threshold=auto_blank_threshold,
+    )
 
     return pair_rows, groups
