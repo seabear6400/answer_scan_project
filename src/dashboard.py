@@ -1,5 +1,4 @@
 import os
-import glob
 import sys
 import hashlib
 import re
@@ -57,6 +56,8 @@ REPORT_CSV = os.path.join(OUTPUT_DIR, "report.csv")
 IMG_SUMMARY = os.path.join(OUTPUT_DIR, "images_summary.csv")
 THUMB_DIR = os.path.join(OUTPUT_DIR, "artifacts", "thumbnails")
 
+IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(THUMB_DIR), exist_ok=True)
 os.makedirs(THUMB_DIR, exist_ok=True)
@@ -70,6 +71,20 @@ if "gallery_limit" not in st.session_state:
     st.session_state.gallery_limit = 120  # 한 번에 보여줄 개수 초기값 (증가)
 if "gallery_selected" not in st.session_state:
     st.session_state.gallery_selected = []  # 비교 선택(최대 2장)
+
+# 전체 보기 탭 공유 상태(사이드바 → 전역 적용)
+if "gallery_search" not in st.session_state:
+    st.session_state.gallery_search = ""
+if "gallery_sort" not in st.session_state:
+    st.session_state.gallery_sort = "파일명"
+if "gallery_render_mode" not in st.session_state:
+    st.session_state.gallery_render_mode = "리샘플(권장)"
+if "group_filter" not in st.session_state:
+    st.session_state.group_filter = "전체"
+if "group_view_mode" not in st.session_state:
+    st.session_state.group_view_mode = "그리드(다중 썸네일)"
+if "ok_view_mode" not in st.session_state:
+    st.session_state.ok_view_mode = "모두 보기"
 
 
 # ===== 공용 헬퍼 =====
@@ -126,11 +141,16 @@ def _safe_image_open(path: str) -> Image.Image:
 
 # ===== 캐싱: 데이터 읽기 =====
 @st.cache_data(show_spinner=False)
-def load_report(report_parquet: str, report_csv: str) -> pd.DataFrame:
+def load_report(report_parquet: str, report_csv: str, columns: Optional[List[str]] = None) -> pd.DataFrame:
     if os.path.exists(report_parquet):
-        return pl.read_parquet(report_parquet).to_pandas()
+        lf = pl.scan_parquet(report_parquet)
+        if columns:
+            lf = lf.select(columns)
+        return lf.collect(streaming=True).to_pandas(use_pyarrow_extension_array=True)
     if os.path.exists(report_csv):
-        return pl.read_csv(report_csv).to_pandas()
+        if columns:
+            return pd.read_csv(report_csv, usecols=columns)
+        return pd.read_csv(report_csv)
     st.error("⚠️ 결과 파일이 없습니다. 먼저 main.py(파이프라인)를 실행하세요.")
     st.stop()
 
@@ -140,18 +160,27 @@ def load_img_summary(img_summary_csv: str) -> pd.DataFrame:
         return pd.read_csv(img_summary_csv)
     return pd.DataFrame(columns=["파일", "밀도", "빈칸여부"])
 
+def _iter_images(root: str):
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(IMAGE_EXTS):
+                        yield entry.path
+        except PermissionError:
+            continue
+
 @st.cache_data(show_spinner=False)
 def list_all_images(root: str, cache_buster: float = 0) -> List[str]:
     """루트 폴더 아래의 이미지 파일을 재귀적으로 나열합니다.
     cache_buster는 외부에서 캐시를 무효화할 때 사용합니다.
     """
-    exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
-    all_paths = []
-    for dirpath, _dirs, files in os.walk(root):
-        for fn in files:
-            if os.path.splitext(fn)[1].lower() in exts:
-                all_paths.append(os.path.join(dirpath, fn))
-    return sorted(all_paths)
+    _ = cache_buster
+    return sorted(_iter_images(root))
 
 # ===== 캐싱: 베이스네임 → 경로 맵 (탐색/해결용) =====
 @st.cache_data(show_spinner=False)
@@ -367,6 +396,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     # mode에 따라 팔레트 선택
     theme = THEMES.get(mode, THEMES['Light (기본)'])
     pal = theme['palette']
+    sidebar_width = st.session_state.get('sidebar_width_px', 320)
 
     # 기본값 보장
     bg = pal.get('bg','#F7F9FB')
@@ -383,6 +413,8 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     <style>
     .stApp {{ background-color: {bg} !important; color: {text} !important; }}
     [data-testid="stSidebar"] {{ background-color: {sidebar_bg} !important; box-shadow: none !important; color: {sidebar_text} !important; }}
+    [data-testid="stSidebar"][aria-expanded="true"] {{ width: {sidebar_width}px !important; min-width: {sidebar_width}px !important; }}
+    [data-testid="stSidebar"][aria-expanded="false"] {{ width: 0 !important; min-width: 0 !important; }}
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stHeader, [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] .css-1d391kg {{ color: {sidebar_text} !important; opacity: 0.98 !important; }}
     .stBlock, .stCard {{ background-color: {card_bg} !important; border: 1px solid {card_border}; border-radius: 10px; box-shadow: {shadow}; padding: 12px; }}
     .stMetric {{ color: {text} !important; }}
@@ -474,19 +506,29 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     except Exception:
         pass
 
-# 사이드바에서 테마 선택 + 스와치 표시
-with st.sidebar.expander('테마', expanded=True):
-    theme_keys = list(THEMES.keys())
-    # 라디오를 session_state 'theme' 키에 바인딩합니다. Streamlit은 위젯 클릭 시 자동으로 재실행하므로
-    # 별도의 experimental_rerun은 필요하지 않습니다.
-    default_idx = theme_keys.index(st.session_state.get('theme', theme_keys[0])) if st.session_state.get('theme') in theme_keys else 0
-    st.radio('테마 선택', theme_keys, index=default_idx, key='theme')
-    sel = st.session_state.get('theme', theme_keys[0])
+theme_tab, rescan_tab, ok_tab, gallery_tab = st.sidebar.tabs(["테마", "재스캔 필요", "정상/공백 답안", "전체 보기"])
+quality_options_common = ["빠름", "균형", "선명"]
 
-    # 스와치: 작은 박스들로 팔레트 미리보기
+with theme_tab:
+    st.markdown("**대시보드 테마**")
+    sidebar_width_default = st.session_state.get("sidebar_width_px", 320)
+    sidebar_slider_args = {
+        "label": "사이드바 폭",
+        "min_value": 260,
+        "max_value": 520,
+        "key": "sidebar_width_px",
+        "help": "사이드바 영역의 폭을 조정해 긴 라벨이나 컨트롤이 잘려 보이지 않도록 합니다."
+    }
+    if "sidebar_width_px" in st.session_state:
+        st.slider(**sidebar_slider_args)
+    else:
+        st.slider(value=int(sidebar_width_default), **sidebar_slider_args)
+    theme_keys = list(THEMES.keys())
+    default_idx = theme_keys.index(st.session_state.get('theme', theme_keys[0])) if st.session_state.get('theme') in theme_keys else 0
+    st.radio('테마 선택', theme_keys, index=default_idx, key='theme', horizontal=True)
+    sel = st.session_state.get('theme', theme_keys[0])
     pal = THEMES[sel]['palette']
     swatch_html = '<div style="display:flex;gap:6px;margin-top:8px;align-items:center">'
-    # 주요 색상들(배경/카드/텍스트/액센트)
     for k in ['bg','card_bg','text','accent']:
         if k in pal:
             swatch_html += f"<div style=\"width:36px;height:24px;border-radius:6px;background:{pal[k]};border:1px solid rgba(0,0,0,0.06)\" title=\"{k}\"></div>"
@@ -494,33 +536,142 @@ with st.sidebar.expander('테마', expanded=True):
     st.markdown(swatch_html, unsafe_allow_html=True)
     st.write(THEMES[sel].get('desc',''))
 
-    # 라디오 클릭으로 session_state['theme']가 갱신되며 Streamlit이 재실행됩니다. 이 렌더 주기에서 바로 CSS를 주입합니다.
-    try:
-        _inject_theme_css(sel)
-    except Exception:
-        logger.debug("_inject_theme_css 즉시 적용 실패")
+with rescan_tab:
+    st.markdown("**재스캔 워크플로**")
+    group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
+    st.selectbox(
+        "그룹 선택",
+        ["전체"] + group_list,
+        key="group_filter",
+        help="재스캔 탭의 후보 목록을 특정 그룹으로 한정합니다."
+    )
+    st.radio(
+        "보기 방식",
+        ["대형 비교(2열)", "그리드(다중 썸네일)"],
+        key="group_view_mode",
+        horizontal=True,
+        help="대형 비교는 앞·뒤면을 크게 보여주고, 그리드는 그룹 내 모든 이미지를 타일로 확인합니다."
+    )
+    rescan_quality_default = st.session_state.get("rescan_quality_profile", "균형")
+    rescan_q_idx = quality_options_common.index(rescan_quality_default) if rescan_quality_default in quality_options_common else 1
+    st.radio(
+        "화질 프로파일",
+        quality_options_common,
+        index=rescan_q_idx,
+        key="rescan_quality_profile",
+        horizontal=True,
+        help="빠름(512px), 균형(768px), 선명(1024px) 수준으로 썸네일 품질과 크기를 조정합니다."
+    )
 
-# 실제로 주입
+with ok_tab:
+    st.markdown("**정상/공백 답안 보기**")
+    st.radio(
+        "보기 옵션",
+        ["모두 보기", "정상만", "공백만"],
+        key="ok_view_mode",
+        horizontal=True,
+        help="정상/공백 탭에서 표시할 답안 유형을 빠르게 전환합니다."
+    )
+    grid_default = st.session_state.get("grid_cols", 5)
+    grid_slider_args = {
+        "label": "그리드 열 개수",
+        "min_value": 2,
+        "max_value": 10,
+        "key": "grid_cols",
+        "help": "정상/공백 탭의 썸네일 한 줄 배치를 조정합니다."
+    }
+    if "grid_cols" in st.session_state:
+        st.slider(**grid_slider_args)
+    else:
+        st.slider(value=int(grid_default), **grid_slider_args)
+    ok_quality_default = st.session_state.get("ok_quality_profile", "균형")
+    ok_q_idx = quality_options_common.index(ok_quality_default) if ok_quality_default in quality_options_common else 1
+    st.radio(
+        "화질 프로파일",
+        quality_options_common,
+        index=ok_q_idx,
+        key="ok_quality_profile",
+        horizontal=True,
+        help="빠름(512px), 균형(768px), 선명(1024px) 썸네일 품질을 선택합니다."
+    )
+
+with gallery_tab:
+    st.markdown("**전체 보기 필터**")
+    st.caption("검색·정렬·표시 설정이 전체 보기 탭과 공유됩니다.")
+    st.text_input(
+        "파일명·경로 검색",
+        key="gallery_search",
+        placeholder="예: 10002, scan, .png"
+    )
+    ext_options = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
+    if "gallery_exts" in st.session_state:
+        st.multiselect("확장자", ext_options, key="gallery_exts")
+    else:
+        st.multiselect("확장자", ext_options, default=[], key="gallery_exts")
+    sort_options = ["파일명", "수정시각(최신순)", "수정시각(오래된순)"]
+    sort_idx = sort_options.index(st.session_state.gallery_sort) if st.session_state.gallery_sort in sort_options else 0
+    st.selectbox("정렬", sort_options, index=sort_idx, key="gallery_sort")
+    st.markdown("---")
+    st.markdown("**표시 설정**")
+    quality_options = ["빠름", "균형", "선명"]
+    current_quality = st.session_state.get("gallery_quality_profile")
+    q_idx = quality_options.index(current_quality) if current_quality in quality_options else 1
+    st.radio(
+        "화질 프로파일",
+        quality_options,
+        index=q_idx,
+        horizontal=True,
+        key="gallery_quality_profile",
+        help="빠름(512px), 균형(1024px), 선명(1600px)"
+    )
+    render_options = ["리샘플(권장)", "원본"]
+    r_idx = render_options.index(st.session_state.gallery_render_mode) if st.session_state.gallery_render_mode in render_options else 0
+    st.radio(
+        "렌더 방식",
+        render_options,
+        index=r_idx,
+        horizontal=True,
+        key="gallery_render_mode",
+        help="리샘플: LANCZOS 고화질 썸네일 / 원본: 이미지 원본 로드"
+    )
+    gallery_grid_default = st.session_state.get("gallery_grid_cols", 4)
+    gallery_slider_args = {
+        "label": "그리드 열 개수",
+        "min_value": 2,
+        "max_value": 10,
+        "key": "gallery_grid_cols",
+        "help": "전체 보기 탭에서 한 줄에 배치될 썸네일 개수"
+    }
+    if "gallery_grid_cols" in st.session_state:
+        st.slider(**gallery_slider_args)
+    else:
+        st.slider(value=int(gallery_grid_default), **gallery_slider_args)
+
 _inject_theme_css(st.session_state.get('theme','Light (기본)'))
 
-# Sidebar: 그룹화된 컨트롤 — 기본 / 고급
-with st.sidebar.expander('기본', expanded=True):
-    # 필수 필터/그리드 설정
-    group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
-    group_filter = st.selectbox("특정 그룹만 보기(재스캔 필요)", ["전체"] + group_list)
-    # 그리드 열 개수는 자주 쓰는 기본 옵션으로 노출
-    grid_cols = st.slider("그리드 열 개수", 2, 10, 5, help="한 줄에 몇 장씩 볼지 선택")
+group_filter = st.session_state.get("group_filter", "전체")
+grid_cols = int(st.session_state.get("grid_cols", 5))
+group_view_mode = st.session_state.get("group_view_mode", "그리드(다중 썸네일)")
+disp_fmt = "WEBP"    # 고정 포맷
 
-with st.sidebar.expander('재스캔 필요 탭', expanded=False):
-    # 재스캔 탭의 보기 모드(대형/그리드)
-    group_view_mode = st.radio("보기 방식", ["대형 비교(2열)", "그리드(다중 썸네일)"], horizontal=True, index=1)
-    # 표시 해상도/포맷/품질(내부 고정 파라미터) — 필요시 디버그용 노출
-    grid_target_px = 768  # 고정값 (내부적으로 사용)
-    disp_fmt = "WEBP"    # 고정값
-    disp_quality = 95     # 고정값
-    group_large_px = 1400 # 고정값
-    group_page_size = 6   # 고정값
-    group_page = 1        # 고정값(페이지네이션은 필요시만)
+rescan_quality_profile = st.session_state.get("rescan_quality_profile", "균형")
+if rescan_quality_profile == "빠름":
+    rescan_thumb_px, rescan_large_px, rescan_disp_quality = 512, 1200, 92
+elif rescan_quality_profile == "선명":
+    rescan_thumb_px, rescan_large_px, rescan_disp_quality = 1024, 1600, 98
+else:  # 균형
+    rescan_thumb_px, rescan_large_px, rescan_disp_quality = 768, 1400, 95
+
+ok_quality_profile = st.session_state.get("ok_quality_profile", "균형")
+if ok_quality_profile == "빠름":
+    ok_thumb_px, ok_disp_quality = 512, 92
+elif ok_quality_profile == "선명":
+    ok_thumb_px, ok_disp_quality = 1024, 98
+else:
+    ok_thumb_px, ok_disp_quality = 768, 95
+
+group_page_size = 6   # 고정값
+group_page = 1        # 고정값(페이지네이션은 필요시만)
 
 # ===== 유틸: 비교용 도구 =====
 def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -907,7 +1058,7 @@ with tab2:
                     st.session_state["gallery_selected"] = []
                     st.rerun()
             
-            bigp = make_display_image(sel_exist_top[0], size=max(1400, group_large_px), fmt=disp_fmt, quality=disp_quality)
+            bigp = make_display_image(sel_exist_top[0], size=max(1400, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
             st.image(_safe_image_open(bigp), caption=os.path.basename(sel_exist_top[0]), use_container_width=True)
         elif len(sel_exist_top) >= 2:
             a_path, b_path = sel_exist_top[:2]
@@ -931,8 +1082,8 @@ with tab2:
             
             # 사용자가 단순 비교(좌우)를 선택하면 두 이미지를 나란히 표시; 그렇지 않으면 병합/처리된 단일 이미지를 표시
             if cmp_mode_top == "비교(좌우)":
-                big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
-                big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                big_a = make_display_image(a_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
+                big_b = make_display_image(b_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
                 c1t, c2t = st.columns(2)
                 with c1t:
                     st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
@@ -964,8 +1115,8 @@ with tab2:
                         except Exception as he:
                             st.error(f"Heatmap 생성 실패: {he}")
                             # 폴백: 기본 좌우 비교
-                            big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
-                            big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                            big_a = make_display_image(a_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
+                            big_b = make_display_image(b_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
                             c1t, c2t = st.columns(2)
                             with c1t:
                                 st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
@@ -987,8 +1138,8 @@ with tab2:
                     st.error(f"비교 렌더링 실패: {e}")
                     # 오류 발생 시 기본 좌우 비교로 폴백
                     st.info("기본 좌우 비교로 표시합니다.")
-                    big_a = make_display_image(a_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
-                    big_b = make_display_image(b_path, size=max(1600, group_large_px), fmt=disp_fmt, quality=disp_quality)
+                    big_a = make_display_image(a_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
+                    big_b = make_display_image(b_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
                     c1t, c2t = st.columns(2)
                     with c1t:
                         st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
@@ -1041,7 +1192,7 @@ with tab2:
                     front_p, back_p, front_nm, back_nm = pairs[i]
                     with cols[i]:
                         if os.path.exists(front_p):
-                            disp_front = make_display_image(front_p, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                            disp_front = make_display_image(front_p, size=rescan_large_px, fmt=disp_fmt, quality=rescan_disp_quality)
                             st.image(_safe_image_open(disp_front), caption=f"앞면: {front_nm}", use_container_width=True)
                         else:
                             st.warning(f"앞면 파일을 찾을 수 없음: {front_nm}")
@@ -1052,15 +1203,15 @@ with tab2:
                     front_p, back_p, front_nm, back_nm = pairs[i]
                     with cols2[i]:
                         if os.path.exists(back_p):
-                            disp_back = make_display_image(back_p, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                            disp_back = make_display_image(back_p, size=rescan_large_px, fmt=disp_fmt, quality=rescan_disp_quality)
                             st.image(_safe_image_open(disp_back), caption=f"뒷면: {back_nm}", use_container_width=True)
                         else:
                             st.warning(f"뒷장 파일을 찾을 수 없음: {back_nm}")
                 # --- 그리드 모드 복원: 사용자가 탭에서 '그리드'를 선택했을 때 표시되는 블록 ---
         else:
-            sel = st.selectbox("그룹 선택", ["전체 그룹 보기"] + groups)
-            targets = groups if sel == "전체 그룹 보기" else [sel]
-            for gid in targets:
+            if not groups:
+                st.info("표시할 그룹이 없습니다.")
+            for gid in groups:
                 st.subheader(f"그룹: {gid}")
                 files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
                 if len(files) == 0:
@@ -1097,7 +1248,7 @@ with tab2:
                             if st.button(label, key=f"cmp_rescan_{gid}_{idx}"):
                                 toggle_compare(pth)
                                 st.rerun()
-                            disp = make_display_image(pth, size=group_large_px, fmt=disp_fmt, quality=disp_quality)
+                            disp = make_display_image(pth, size=rescan_thumb_px, fmt=disp_fmt, quality=rescan_disp_quality)
                             st.image(_safe_image_open(disp), caption=f"{kind}: {name}", use_container_width=True)
                         else:
                             st.info(f"{kind} 파일 없음: {name}")
@@ -1110,7 +1261,7 @@ with tab2:
 with tab3:
     ok_dir = os.path.join(OUTPUT_DIR, "ok")
     blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
-    sel = st.radio("보기 옵션", ["모두 보기", "정상만", "공백만"], horizontal=True)
+    sel = st.session_state.get("ok_view_mode", "모두 보기")
 
     # 전역 is_2file 유틸 사용
 
@@ -1120,7 +1271,7 @@ with tab3:
         cols = st.columns(grid_cols)
         for idx, f in enumerate(files):
             img_path = os.path.join(ok_dir, f)
-            disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
+            disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
             with cols[idx % grid_cols]:
                 st.image(_safe_image_open(disp), caption=f, use_container_width=True)
 
@@ -1130,58 +1281,42 @@ with tab3:
         cols = st.columns(grid_cols)
         for idx, f in enumerate(files):
             img_path = os.path.join(blank_dir, f)
-            disp = make_display_image(img_path, size=grid_target_px, fmt=disp_fmt, quality=disp_quality)
+            disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
             with cols[idx % grid_cols]:
                 st.image(_safe_image_open(disp), caption=f, use_container_width=True)
 
 
 # === Tab4: 전체 보기 ===
 with tab4:
-    # ---------- 쉬운 화질/레이아웃 컨트롤(탭 로컬) ----------
-    st.markdown("#### 표시 설정")
-    colq1, colq2, colq3 = st.columns([1.3, 1.1, 1.6])
-    with colq1:
-        quality_profile = st.radio(
-            "화질 프로파일", ["빠름", "균형", "선명"],
-            index=1, horizontal=True,
-            help="빠름(512px), 균형(1024px), 선명(1600px)"
-        )
-    with colq2:
-        render_mode = st.radio(
-            "렌더 방식", ["리샘플(권장)", "원본"], index=0, horizontal=True,
-            help="리샘플: LANCZOS로 고화질 썸네일 생성(권장) / 원본: 브라우저 스케일(선명하지만 느릴 수 있음)"
-        )
-        # 원본 모드 주의 문구
-        if render_mode == "원본":
-            st.caption("원본 모드: 브라우저에서 원본 이미지를 직접 로드합니다. 매우 큰 이미지의 경우 메모리/네트워크 사용이 증가할 수 있으므로 소량의 선택 비교(최대 2장)에서 사용하는 것을 권장합니다.")
-    with colq3:
-        grid_cols_local = st.slider("그리드 열 개수", 2, 8, max(4, grid_cols), 1)
+    quality_profile = st.session_state.get("gallery_quality_profile", "균형")
+    render_mode = st.session_state.get("gallery_render_mode", "리샘플(권장)")
+    grid_cols_local = max(2, int(st.session_state.get("gallery_grid_cols", 4)))
+    q = st.session_state.get("gallery_search", "")
+    ext_sel = st.session_state.get("gallery_exts", [])
+    sort_key = st.session_state.get("gallery_sort", "파일명")
+
+    if render_mode == "원본":
+        st.caption("원본 모드: 대용량 이미지는 로딩 시간이 길어질 수 있습니다. 필요한 비교 구간에서만 사용하세요.")
 
     # 프로파일 → 표시 해상도/포맷/품질 파라미터 도출
     if quality_profile == "빠름":
         target_px_eff, disp_fmt_eff, disp_quality_eff = 512, "WEBP", 92
     elif quality_profile == "균형":
         target_px_eff, disp_fmt_eff, disp_quality_eff = 1024, "WEBP", 95
-    elif quality_profile == "선명":
+    else:  # 선명
         target_px_eff, disp_fmt_eff, disp_quality_eff = 1600, "WEBP", 98
-    st.markdown("---")
 
-    # ---------- 검색/필터 UX (간결) ----------
-    row1 = st.columns([1.6, 1.2, 1.2])
-    with row1[0]:
-        q = st.text_input("🔎 파일명/경로 검색", value="", placeholder="예: 10002, scan, .png ...")
-    with row1[1]:
-        ext_sel = st.multiselect("확장자", [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"], default=[])
-    with row1[2]:
-        sort_key = st.selectbox("정렬", ["파일명", "수정시각(최신순)", "수정시각(오래된순)"], index=0)
 
     # ---------- 데이터 준비 ----------
     # # 보고서 업데이트 시 images_summary.csv 파일의 수정 시간(mtime)을 사용하여 캐시를 무효화(갱신)합니다.
     try:
-        cache_buster = os.path.getmtime(IMG_SUMMARY)
+        cache_buster_tuple = (
+            os.path.getmtime(IMG_SUMMARY),
+            len(os.listdir(os.path.dirname(IMG_SUMMARY)))
+        )
     except Exception:
-        cache_buster = 0
-    all_imgs = list_all_images(OUTPUT_DIR, cache_buster)
+        cache_buster_tuple = (0, 0)
+    all_imgs = list_all_images(OUTPUT_DIR, cache_buster=hash(cache_buster_tuple))
     # 검색/확장자 필터
     if q:
         all_imgs = [p for p in all_imgs if q.lower() in p.lower()]

@@ -161,9 +161,9 @@ class DetectorConfig:
     cnn_thresh: float = 0.98  # 약간 낮춰서 더 빠른 처리
     suspect_low: float = 0.93  # 의심 구간도 약간 낮춤
 
-    # 공백(빈칸) 감지 (성능 최적화를 위해 더 관대한 임계값)
+    # 공백(빈칸) 감지 (성능 최적화 + 정밀도 향상)
     blank_method: str = "sauvola"   # otsu/sauvola
-    blank_density_thresh: float = 0.01  # 더 엄격하게 설정하여 빈칸 탐지 정확도 향상
+    blank_density_thresh: float = 0.02  # 개선된 노이즈 필터링과 함께 빈칸 탐지 안정성 향상
     blank_border_trim: float = 0.02      # 공백 감지 시 가장자리 잘라내기 비율
     blank_min_component_ratio: float = 0.0008  # 노이즈 제거를 위한 최소 컴포넌트 비율
     blank_auto_tune: bool = True         # 데이터 기반 자동 임계값 조정
@@ -595,18 +595,23 @@ def ink_density(
     if min(roi.shape[:2]) >= 5:
         roi_proc = cv2.GaussianBlur(roi, (5, 5), 0)
     else:
-        roi_proc = roi
+        roi_proc = roi.copy()
 
     if method == "sauvola" and _HAS_SAUVOLA:
-        th = threshold_sauvola(roi_proc, window_size=25, k=0.2)
+        window = min(51, max(25, (min(roi_proc.shape) // 2) * 2 + 1))
+        try:
+            th = threshold_sauvola(roi_proc, window_size=window, k=0.3)
+        except Exception:
+            th = threshold_sauvola(roi_proc, window_size=25, k=0.2)
         binary = (roi_proc < th).astype(np.uint8)
     else:
         _, thr = cv2.threshold(roi_proc, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         binary = (thr > 0).astype(np.uint8)
 
     if min(binary.shape) >= 3:
-        kernel = np.ones((3, 3), np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
 
     if min_component_ratio > 0.0 and binary.size:
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
