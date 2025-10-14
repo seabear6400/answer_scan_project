@@ -312,7 +312,7 @@ def _disp_key(src_path: str, size: int, fmt: str, quality: int) -> str:
 def make_display_image(src_path: str, size: int, fmt: str = "WEBP", quality: int = 95) -> str:
     """긴 변을 기준으로 size(px)까지 축소한 표시용 이미지를 캐시에 생성/재사용합니다.
     LANCZOS 리샘플링을 사용하며 포맷은 WEBP/JPEG/PNG를 지원합니다.
-    quality는 JPEG/WEBP에 적용됩니다. 반환값은 캐시된 파일 경로입니다.
+    quality는 JPEG/WEBP에 적용됩니다. 반환값은 캐시된 파일 경로입니다. 
     """
     fmt = fmt.upper()
     ext_map = {"WEBP": "webp", "JPEG": "jpg", "PNG": "png"}
