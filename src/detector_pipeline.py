@@ -171,6 +171,10 @@ class DetectorConfig:
     blank_auto_min_samples: int = 6      # 자동 임계값 계산에 필요한 최소 샘플 수
     blank_auto_margin: float = 0.002     # 자동 임계값에 추가할 완충값
     blank_auto_cap: float = 0.12         # 자동 임계값 상한
+    blank_binary_weight: float = 0.55    # 밀도 기반 점수 가중치
+    blank_contrast_weight: float = 0.25  # 대비 기반 점수 가중치
+    blank_edge_weight: float = 0.20      # 에지/텍스처 기반 점수 가중치
+    blank_laplacian_ksize: int = 3       # 에지 추출 커널 크기 (홀수)
 
     # 재정렬 / OCR
     use_lpips: bool = False
@@ -295,6 +299,10 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
         blank_auto_min_samples=cfg.blank_auto_min_samples,
         blank_auto_margin=cfg.blank_auto_margin,
         blank_auto_cap=cfg.blank_auto_cap,
+    blank_binary_weight=cfg.blank_binary_weight,
+    blank_contrast_weight=cfg.blank_contrast_weight,
+    blank_edge_weight=cfg.blank_edge_weight,
+    blank_laplacian_ksize=cfg.blank_laplacian_ksize,
         use_lpips=cfg.use_lpips,
         lpips_thresh=cfg.lpips_thresh,
         use_ocr=cfg.use_ocr,
@@ -572,6 +580,10 @@ def ink_density(
     method: str = "sauvola",
     border_trim: float = 0.0,
     min_component_ratio: float = 0.0,
+    binary_weight: float = 0.7,
+    contrast_weight: float = 0.3,
+    edge_weight: float = 0.0,
+    laplacian_ksize: int = 3,
 ) -> float:
     gray = read_gray(path)
     if gray is None:
@@ -597,6 +609,10 @@ def ink_density(
     else:
         roi_proc = roi.copy()
 
+    # 조명 보정 및 대비 향상 (빈칸 노이즈 제거용)
+    if roi_proc.size and roi_proc.max() > roi_proc.min():
+        roi_proc = cv2.normalize(roi_proc, None, 0, 255, cv2.NORM_MINMAX)
+
     if method == "sauvola" and _HAS_SAUVOLA:
         window = min(51, max(25, (min(roi_proc.shape) // 2) * 2 + 1))
         try:
@@ -613,15 +629,21 @@ def ink_density(
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
 
+    dominant_component_ratio = 0.0
     if min_component_ratio > 0.0 and binary.size:
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if num_labels > 1:
             min_area = max(4, int(binary.size * min_component_ratio))
             filtered = np.zeros_like(binary, dtype=np.uint8)
+            keep_area = 0
             for lbl in range(1, num_labels):
-                if stats[lbl, cv2.CC_STAT_AREA] >= min_area:
+                area = stats[lbl, cv2.CC_STAT_AREA]
+                if area >= min_area:
                     filtered[labels == lbl] = 1
+                    keep_area += area
             binary = filtered
+            if keep_area > 0:
+                dominant_component_ratio = float(keep_area) / float(binary.size)
 
     if binary.size == 0:
         return 0.0
@@ -629,8 +651,28 @@ def ink_density(
     binary_density = float(np.count_nonzero(binary)) / float(binary.size)
     mean_dark = max(0.0, 1.0 - float(np.mean(roi_proc)) / 255.0)
     std_dark = float(np.std(roi_proc)) / 255.0
-    contrast_score = max(0.0, min(1.0, 0.6 * mean_dark + 0.4 * std_dark))
-    density = 0.7 * binary_density + 0.3 * contrast_score
+    contrast_score = max(0.0, min(1.0, 0.5 * mean_dark + 0.5 * std_dark))
+
+    edge_score = 0.0
+    if edge_weight > 0.0 and min(roi_proc.shape[:2]) >= 5:
+        ksize = laplacian_ksize if laplacian_ksize % 2 == 1 else 3
+        lap = cv2.Laplacian(roi_proc, cv2.CV_32F, ksize=ksize)
+        lap_abs = np.abs(lap)
+        lap_abs = np.clip(lap_abs, 0.0, 255.0)
+        edge_score = float(np.mean(lap_abs)) / 255.0
+        # 큰 컴포넌트가 존재하면 에지 점수에 가중치 부여 (필기 강조)
+        if dominant_component_ratio > 0.0:
+            edge_score = min(1.0, edge_score + dominant_component_ratio)
+
+    # 가중 조합 (합이 0이면 기본값 사용)
+    bw = max(0.0, binary_weight)
+    cw = max(0.0, contrast_weight)
+    ew = max(0.0, edge_weight)
+    weight_sum = bw + cw + ew
+    if weight_sum <= 0.0:
+        bw, cw = 0.7, 0.3
+        weight_sum = bw + cw
+    density = (bw * binary_density + cw * contrast_score + ew * edge_score) / weight_sum
     return float(max(0.0, min(1.0, density)))
 
 
