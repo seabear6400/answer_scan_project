@@ -2,7 +2,9 @@ import os
 import sys
 import hashlib
 import re
+import importlib
 from typing import Tuple, List, Dict, Optional
+import base64
 
 import streamlit as st
 import polars as pl
@@ -20,11 +22,15 @@ if not logger.handlers:
 
 # ===== Optional metrics/components (존재하면 사용) =====
 
-try:
-    import lpips
-    _HAS_LPIPS = True
-except Exception:
-    _HAS_LPIPS = False
+def _optional_import(module_name: str, attr_name: Optional[str] = None):
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return None
+    if attr_name:
+        return getattr(module, attr_name, None)
+    return module
+
 
 # Pillow resample 상수 호환
 try:
@@ -56,6 +62,8 @@ REPORT_CSV = os.path.join(OUTPUT_DIR, "report.csv")
 IMG_SUMMARY = os.path.join(OUTPUT_DIR, "images_summary.csv")
 THUMB_DIR = os.path.join(OUTPUT_DIR, "artifacts", "thumbnails")
 
+REPORT_BASE_COLUMNS = ["그룹ID", "상태", "파일1", "파일2", "유사도"]
+
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -85,6 +93,16 @@ if "group_view_mode" not in st.session_state:
     st.session_state.group_view_mode = "그리드(다중 썸네일)"
 if "ok_view_mode" not in st.session_state:
     st.session_state.ok_view_mode = "모두 보기"
+
+# 재스캔 탭 삭제 워크플로 상태
+if "rescan_delete_mode" not in st.session_state:
+    st.session_state.rescan_delete_mode = False
+if "rescan_delete_targets" not in st.session_state:
+    st.session_state.rescan_delete_targets = []
+if "rescan_show_confirm" not in st.session_state:
+    st.session_state.rescan_show_confirm = False
+if "rescan_delete_feedback" not in st.session_state:
+    st.session_state.rescan_delete_feedback = None
 
 
 # ===== 공용 헬퍼 =====
@@ -145,17 +163,29 @@ def load_report(report_parquet: str, report_csv: str, columns: Optional[List[str
     if os.path.exists(report_parquet):
         lf = pl.scan_parquet(report_parquet)
         if columns:
-            lf = lf.select(columns)
-        return lf.collect(streaming=True).to_pandas(use_pyarrow_extension_array=True)
+            available_cols = [col for col in lf.columns if col in columns]
+            if available_cols:
+                lf = lf.select(available_cols)
+        df_out = lf.collect(streaming=True).to_pandas(use_pyarrow_extension_array=True)
+        if columns:
+            ordered = [col for col in columns if col in df_out.columns]
+            if ordered:
+                df_out = df_out[ordered]
+        return df_out
     if os.path.exists(report_csv):
         if columns:
-            return pd.read_csv(report_csv, usecols=columns)
+            df_csv = pd.read_csv(report_csv, usecols=lambda c: c in set(columns))
+            ordered = [col for col in columns if col in df_csv.columns]
+            if ordered:
+                df_csv = df_csv[ordered]
+            return df_csv
         return pd.read_csv(report_csv)
     st.error("⚠️ 결과 파일이 없습니다. 먼저 main.py(파이프라인)를 실행하세요.")
     st.stop()
 
 @st.cache_data(show_spinner=False)
-def load_img_summary(img_summary_csv: str) -> pd.DataFrame:
+def load_img_summary(img_summary_csv: str, cache_buster: Optional[float] = None) -> pd.DataFrame:
+    _ = cache_buster
     if os.path.exists(img_summary_csv):
         return pd.read_csv(img_summary_csv)
     return pd.DataFrame(columns=["파일", "밀도", "빈칸여부"])
@@ -179,7 +209,21 @@ def list_all_images(root: str, cache_buster: float = 0) -> List[str]:
     """루트 폴더 아래의 이미지 파일을 재귀적으로 나열합니다.
     cache_buster는 외부에서 캐시를 무효화할 때 사용합니다.
     """
-    _ = cache_buster
+    try:
+        summary_df = load_img_summary(IMG_SUMMARY, cache_buster=cache_buster)
+        if not summary_df.empty and '파일' in summary_df.columns:
+            seen: Dict[str, None] = {}
+            for entry in summary_df['파일']:
+                if not isinstance(entry, str) or not entry:
+                    continue
+                path = entry if os.path.isabs(entry) else os.path.join(root, entry)
+                path = os.path.normpath(path)
+                if os.path.isfile(path):
+                    seen[path] = None
+            if seen:
+                return sorted(seen.keys())
+    except Exception as exc:
+        logger.debug(f"images_summary 기반 이미지 목록 활용 실패: {exc}")
     return sorted(_iter_images(root))
 
 # ===== 캐싱: 베이스네임 → 경로 맵 (탐색/해결용) =====
@@ -345,8 +389,8 @@ def compute_kpis(df: pd.DataFrame, img_df: pd.DataFrame) -> Dict[str, int]:
     return kpis
 
 # ===== 데이터 로딩 =====
-df = load_report(REPORT_PARQUET, REPORT_CSV)
-img_df = load_img_summary(IMG_SUMMARY)
+df = load_report(REPORT_PARQUET, REPORT_CSV, columns=REPORT_BASE_COLUMNS)
+img_df = load_img_summary(IMG_SUMMARY, cache_buster=_file_mtime(IMG_SUMMARY))
 
 # ===== KPI 카드 =====
 kpis = compute_kpis(df, img_df)
@@ -389,14 +433,11 @@ THEMES = {
 
 if 'theme' not in st.session_state:
     st.session_state['theme'] = 'Light (기본)'
-
-if 'theme' not in st.session_state:
-    st.session_state['theme'] = 'Light (기본)'
 def _inject_theme_css(mode: str = 'Light (기본)'):
     # mode에 따라 팔레트 선택
     theme = THEMES.get(mode, THEMES['Light (기본)'])
     pal = theme['palette']
-    sidebar_width = st.session_state.get('sidebar_width_px', 320)
+    sidebar_width = int(st.session_state.get('sidebar_width_px', 350))
 
     # 기본값 보장
     bg = pal.get('bg','#F7F9FB')
@@ -511,7 +552,7 @@ quality_options_common = ["빠름", "균형", "선명"]
 
 with theme_tab:
     st.markdown("**대시보드 테마**")
-    sidebar_width_default = st.session_state.get("sidebar_width_px", 320)
+    sidebar_width_default = int(st.session_state.get("sidebar_width_px", 350))
     sidebar_slider_args = {
         "label": "사이드바 폭",
         "min_value": 260,
@@ -519,10 +560,7 @@ with theme_tab:
         "key": "sidebar_width_px",
         "help": "사이드바 영역의 폭을 조정해 긴 라벨이나 컨트롤이 잘려 보이지 않도록 합니다."
     }
-    if "sidebar_width_px" in st.session_state:
-        st.slider(**sidebar_slider_args)
-    else:
-        st.slider(value=int(sidebar_width_default), **sidebar_slider_args)
+    st.slider(value=sidebar_width_default, **sidebar_slider_args)
     theme_keys = list(THEMES.keys())
     default_idx = theme_keys.index(st.session_state.get('theme', theme_keys[0])) if st.session_state.get('theme') in theme_keys else 0
     st.radio('테마 선택', theme_keys, index=default_idx, key='theme', horizontal=True)
@@ -563,6 +601,39 @@ with rescan_tab:
         help="빠름(512px), 균형(768px), 선명(1024px) 수준으로 썸네일 품질과 크기를 조정합니다."
     )
 
+    delete_mode = st.session_state.get("rescan_delete_mode", False)
+    delete_targets = st.session_state.get("rescan_delete_targets", [])
+    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
+
+    if not delete_mode:
+        delete_button_label = "🗑️ 삭제"
+    else:
+        if waiting_confirm:
+            delete_button_label = "🗑️ 삭제 확인 중"
+        elif delete_targets:
+            delete_button_label = f"🗑️ 삭제 ({len(delete_targets)}개)"
+        else:
+            delete_button_label = "🗑️ 삭제 실행"
+
+    if st.button(delete_button_label, key="rescan_delete_button"):
+        if not delete_mode:
+            st.session_state.rescan_delete_mode = True
+            st.session_state.rescan_delete_targets = []
+            st.session_state.rescan_show_confirm = False
+            st.session_state.rescan_delete_feedback = None
+        else:
+            if delete_targets:
+                st.session_state.rescan_show_confirm = True
+            else:
+                st.session_state.rescan_delete_feedback = ("warn", "삭제할 이미지를 먼저 선택하세요.")
+
+    if delete_mode and not waiting_confirm:
+        st.caption("이미지 카드의 '🗑️ 선택' 버튼을 눌러 삭제 대상을 고르세요. 선택을 취소하려면 동일한 버튼을 다시 누르거나 아래 취소 버튼을 사용하세요.")
+        if st.button("취소", key="rescan_delete_cancel"):
+            st.session_state.rescan_delete_mode = False
+            st.session_state.rescan_delete_targets = []
+            st.session_state.rescan_delete_feedback = None
+
 with ok_tab:
     st.markdown("**정상/공백 답안 보기**")
     st.radio(
@@ -572,7 +643,7 @@ with ok_tab:
         horizontal=True,
         help="정상/공백 탭에서 표시할 답안 유형을 빠르게 전환합니다."
     )
-    grid_default = st.session_state.get("grid_cols", 5)
+    grid_default = int(st.session_state.get("grid_cols", 5))
     grid_slider_args = {
         "label": "그리드 열 개수",
         "min_value": 2,
@@ -580,10 +651,7 @@ with ok_tab:
         "key": "grid_cols",
         "help": "정상/공백 탭의 썸네일 한 줄 배치를 조정합니다."
     }
-    if "grid_cols" in st.session_state:
-        st.slider(**grid_slider_args)
-    else:
-        st.slider(value=int(grid_default), **grid_slider_args)
+    st.slider(value=grid_default, **grid_slider_args)
     ok_quality_default = st.session_state.get("ok_quality_profile", "균형")
     ok_q_idx = quality_options_common.index(ok_quality_default) if ok_quality_default in quality_options_common else 1
     st.radio(
@@ -597,7 +665,6 @@ with ok_tab:
 
 with gallery_tab:
     st.markdown("**전체 보기 필터**")
-    st.caption("검색·정렬·표시 설정이 전체 보기 탭과 공유됩니다.")
     st.text_input(
         "파일명·경로 검색",
         key="gallery_search",
@@ -613,7 +680,7 @@ with gallery_tab:
     st.selectbox("정렬", sort_options, index=sort_idx, key="gallery_sort")
     st.markdown("---")
     st.markdown("**표시 설정**")
-    quality_options = ["빠름", "균형", "선명"]
+    quality_options = quality_options_common
     current_quality = st.session_state.get("gallery_quality_profile")
     q_idx = quality_options.index(current_quality) if current_quality in quality_options else 1
     st.radio(
@@ -634,7 +701,7 @@ with gallery_tab:
         key="gallery_render_mode",
         help="리샘플: LANCZOS 고화질 썸네일 / 원본: 이미지 원본 로드"
     )
-    gallery_grid_default = st.session_state.get("gallery_grid_cols", 4)
+    gallery_grid_default = int(st.session_state.get("gallery_grid_cols", 5))
     gallery_slider_args = {
         "label": "그리드 열 개수",
         "min_value": 2,
@@ -642,10 +709,7 @@ with gallery_tab:
         "key": "gallery_grid_cols",
         "help": "전체 보기 탭에서 한 줄에 배치될 썸네일 개수"
     }
-    if "gallery_grid_cols" in st.session_state:
-        st.slider(**gallery_slider_args)
-    else:
-        st.slider(value=int(gallery_grid_default), **gallery_slider_args)
+    st.slider(value=gallery_grid_default, **gallery_slider_args)
 
 _inject_theme_css(st.session_state.get('theme','Light (기본)'))
 
@@ -674,11 +738,32 @@ group_page_size = 6   # 고정값
 group_page = 1        # 고정값(페이지네이션은 필요시만)
 
 # ===== 유틸: 비교용 도구 =====
+def _cv2_read_unicode(path: str, flag: int) -> Optional[np.ndarray]:
+    """cv2.imread는 Windows에서 유니코드 경로를 처리하지 못할 수 있으므로 안전한 대안을 제공합니다."""
+    if not path:
+        return None
+    arr = cv2.imread(path, flag)
+    if arr is not None:
+        return arr
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+    except Exception:
+        return None
+    if data.size == 0:
+        return None
+    try:
+        return cv2.imdecode(data, flag)
+    except Exception:
+        return None
+
+
 def _read_gray_same_size(a_path: str, b_path: str) -> Tuple[np.ndarray, np.ndarray]:
-    a = cv2.imread(a_path, cv2.IMREAD_GRAYSCALE)
-    b = cv2.imread(b_path, cv2.IMREAD_GRAYSCALE)
-    if a is None or b is None:
-        raise RuntimeError("이미지 로딩 실패")
+    a = _cv2_read_unicode(a_path, cv2.IMREAD_GRAYSCALE)
+    b = _cv2_read_unicode(b_path, cv2.IMREAD_GRAYSCALE)
+    if a is None:
+        raise RuntimeError(f"이미지 로드 실패: {a_path}")
+    if b is None:
+        raise RuntimeError(f"이미지 로드 실패: {b_path}")
     h = min(a.shape[0], b.shape[0]); w = min(a.shape[1], b.shape[1])
     a = cv2.resize(a, (w, h), interpolation=cv2.INTER_AREA)
     b = cv2.resize(b, (w, h), interpolation=cv2.INTER_AREA)
@@ -714,10 +799,12 @@ def _absdiff_heatmap(a: np.ndarray, b: np.ndarray, blur_size: int = 3, threshold
 def _blend_images_rgb(a_path: str, b_path: str, alpha: float = 0.5) -> np.ndarray:
     """두 이미지를 읽어 공통 최소 크기로 리사이즈한 뒤 RGB로 블렌드하여 numpy 배열을 반환합니다.
     alpha는 첫 번째 이미지(a)의 가중치(0..1)입니다."""
-    a = cv2.imread(a_path, cv2.IMREAD_COLOR)
-    b = cv2.imread(b_path, cv2.IMREAD_COLOR)
-    if a is None or b is None:
-        raise RuntimeError("이미지 로드 실패")
+    a = _cv2_read_unicode(a_path, cv2.IMREAD_COLOR)
+    b = _cv2_read_unicode(b_path, cv2.IMREAD_COLOR)
+    if a is None:
+        raise RuntimeError(f"이미지 로드 실패: {a_path}")
+    if b is None:
+        raise RuntimeError(f"이미지 로드 실패: {b_path}")
     # 최소 공통 크기로 리사이즈합니다
     h = min(a.shape[0], b.shape[0]); w = min(a.shape[1], b.shape[1])
     a = cv2.resize(a, (w, h), interpolation=cv2.INTER_AREA)
@@ -730,10 +817,12 @@ def _blend_images_rgb(a_path: str, b_path: str, alpha: float = 0.5) -> np.ndarra
 def _highlight_differences_rgb(a_path: str, b_path: str, color: Tuple[int, int, int] = (0, 255, 255), thresh: int = 20) -> np.ndarray:
     """절대 차이가 thresh보다 큰 영역에 색 마스크를 오버레이해 변경점을 강조한 RGB 배열을 반환합니다.
     color는 OpenCV(BGR) 형식으로 전달하되, 반환값은 RGB입니다."""
-    a = cv2.imread(a_path, cv2.IMREAD_COLOR)
-    b = cv2.imread(b_path, cv2.IMREAD_COLOR)
-    if a is None or b is None:
-        raise RuntimeError("이미지 로드 실패")
+    a = _cv2_read_unicode(a_path, cv2.IMREAD_COLOR)
+    b = _cv2_read_unicode(b_path, cv2.IMREAD_COLOR)
+    if a is None:
+        raise RuntimeError(f"이미지 로드 실패: {a_path}")
+    if b is None:
+        raise RuntimeError(f"이미지 로드 실패: {b_path}")
     h = min(a.shape[0], b.shape[0]); w = min(a.shape[1], b.shape[1])
     a = cv2.resize(a, (w, h), interpolation=cv2.INTER_AREA)
     b = cv2.resize(b, (w, h), interpolation=cv2.INTER_AREA)
@@ -807,19 +896,6 @@ def _cached_highlight_path(a_path: str, b_path: str, color: Tuple[int, int, int]
 
 # GIF 생성 지원 제거: Fade는 이제 _cached_blend_path/_blend_images_rgb의 정적 블렌드만 사용합니다
 
-# ===== 모달(미리보기) 지원: Streamlit 1.34+ =====
-_HAS_DIALOG = hasattr(st, "dialog")
-def open_preview(img_path: str, caption: str = ""):
-    """모달(dialog) 기능이 있으면 모달로, 없으면 인라인으로 미리보기를 표시합니다."""
-    if _HAS_DIALOG:
-        @st.dialog("미리보기")
-        def _d(img_path_inner: str, caption_inner: str = ""):
-            st.image(_safe_image_open(img_path_inner), caption=caption_inner, use_container_width=True)
-        _d(img_path, caption)
-    else:
-        # 모달 미지원 환경에서는 인라인으로 표시
-        st.image(_safe_image_open(img_path), caption=caption, use_container_width=True)
-
 # ===== 공통: 리포트 필터링 =====
 def filter_sort_report(_df: pd.DataFrame) -> pd.DataFrame:
     view = _df.copy()
@@ -834,8 +910,6 @@ def filter_sort_report(_df: pd.DataFrame) -> pd.DataFrame:
 
 # ===== 세션: 비교 큐 =====
 # 통합된 비교 선택 상태: 절대 경로 리스트 (최대 2개)
-if "gallery_selected" not in st.session_state:
-    st.session_state["gallery_selected"] = []
 def toggle_compare(img_path: str):
     """비교를 위한 선택 토글 기능. 선택된 항목의 절대 경로를 $\text{gallery_selected}$에 저장합니다. (최대 2개)."""
     if not img_path:
@@ -856,6 +930,131 @@ def toggle_compare(img_path: str):
         st.session_state["gallery_selected"] = st.session_state["gallery_selected"][1:] + [path]
     else:
         st.session_state["gallery_selected"].append(path)
+
+
+def toggle_delete_target(img_path: str):
+    """재스캔 탭 삭제 모드에서 선택 대상을 토글합니다."""
+    if not img_path:
+        return
+    targets = st.session_state.get("rescan_delete_targets", [])
+    if img_path in targets:
+        st.session_state.rescan_delete_targets = [p for p in targets if p != img_path]
+    else:
+        st.session_state.rescan_delete_targets = targets + [img_path]
+    st.session_state.rescan_delete_feedback = None
+
+
+def refresh_image_caches():
+    """파일 삭제 후 이미지 관련 캐시와 경로 맵을 새로고침합니다."""
+    global BASENAME_MAP
+    try:
+        list_all_images.clear()
+    except AttributeError:
+        pass
+    try:
+        build_basename_map.clear()
+    except AttributeError:
+        pass
+    try:
+        BASENAME_MAP = build_basename_map(OUTPUT_DIR, cache_buster=time.time())
+    except Exception as exc:
+        logger.debug(f"BASENAME_MAP 갱신 실패: {exc}")
+
+
+@st.cache_data(show_spinner=False)
+def _encode_image_base64(img_path: str) -> str:
+    with open(img_path, "rb") as fh:
+        return base64.b64encode(fh.read()).decode("utf-8")
+
+
+def _delete_card_css(button_key: str, img_base64: str, selected: bool, height: int, disabled: bool) -> str:
+    border_color = "#ef4444" if selected else "rgba(148,163,184,0.45)"
+    glow = "0 0 0 4px rgba(239,68,68,0.18)" if selected else "0 2px 8px rgba(15,23,42,0.12)"
+    status_badge = "삭제 대상" if selected else "이미지 선택"
+    badge_bg = "rgba(239,68,68,0.92)" if selected else "rgba(15,23,42,0.65)"
+    return f"""
+    <style>
+    div[data-testid="stButton"][data-key="{button_key}"] {{
+        width: 100%;
+        position: relative;
+    }}
+    div[data-testid="stButton"][data-key="{button_key}"] > button {{
+        width: 100%;
+        height: {height}px;
+        border-radius: 12px;
+        border: 3px solid {border_color};
+        background-image: url('data:image/webp;base64,{img_base64}');
+        background-size: cover;
+        background-position: center center;
+        padding: 0;
+        margin: 0;
+        box-shadow: {glow};
+        transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+        cursor: pointer;
+        position: relative;
+    }}
+    div[data-testid="stButton"][data-key="{button_key}"] > button:hover {{
+        transform: translateY(-2px);
+        border-color: #ef4444;
+        box-shadow: 0 0 0 4px rgba(239,68,68,0.15);
+    }}
+    div[data-testid="stButton"][data-key="{button_key}"] > button:disabled {{
+        cursor: not-allowed;
+        transform: none;
+        opacity: 0.92;
+    }}
+    div[data-testid="stButton"][data-key="{button_key}"] > button::after {{
+        content: '{status_badge}';
+        position: absolute;
+        bottom: 10px;
+        right: 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #fff;
+        background: {badge_bg};
+        padding: 3px 10px;
+        border-radius: 999px;
+        letter-spacing: -0.1px;
+    }}
+    </style>
+    """
+
+
+def render_rescan_image_card(img_path: str, caption: str, key_suffix: str, target_px: int, quality: int, card_height: int) -> None:
+    if not img_path or not os.path.isfile(img_path):
+        st.warning(f"이미지 파일을 찾을 수 없습니다: {caption}")
+        return
+
+    display_path = make_display_image(img_path, size=target_px, fmt=disp_fmt, quality=quality)
+    delete_mode = st.session_state.get("rescan_delete_mode", False)
+    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
+    selected = img_path in st.session_state.get("rescan_delete_targets", [])
+
+    if delete_mode:
+        button_key = f"delete_card_{key_suffix}"
+        try:
+            encoded = _encode_image_base64(display_path)
+        except Exception as exc:
+            logger.debug(f"썸네일 인코딩 실패 {display_path}: {exc}")
+            encoded = ""
+        if encoded:
+            st.markdown(_delete_card_css(button_key, encoded, selected, card_height, waiting_confirm and selected), unsafe_allow_html=True)
+            st.button(
+                " ",
+                key=button_key,
+                help="삭제할 이미지를 선택/해제",
+                disabled=waiting_confirm,
+                on_click=toggle_delete_target,
+                args=(img_path,),
+                type="secondary",
+                use_container_width=True,
+            )
+        else:
+            # base64 인코딩이 실패한 경우에는 기본 이미지 렌더링으로 폴백
+            st.image(_safe_image_open(display_path), use_container_width=True)
+        st.caption(caption)
+    else:
+        st.image(_safe_image_open(display_path), caption=caption, use_container_width=True)
 
 # ===== 탭 구성 =====
 tab2, tab3, tab4 = st.tabs([ "재스캔 필요", "정상/공백 답안", "전체 보기"])
@@ -882,6 +1081,90 @@ cmp_pair = _render_global_compare()
 
 # === Tab2: 재스캔 필요 ===
 with tab2:
+    delete_mode = st.session_state.get("rescan_delete_mode", False)
+    delete_targets = st.session_state.get("rescan_delete_targets", [])
+    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
+
+    feedback = st.session_state.get("rescan_delete_feedback")
+    if feedback:
+        level, message = feedback
+        if level == "success":
+            st.success(message)
+        elif level == "error":
+            st.error(message)
+        else:
+            st.warning(message)
+        st.session_state.rescan_delete_feedback = None
+
+    if delete_mode and not waiting_confirm:
+        if delete_targets:
+            st.info(f"삭제 대상 {len(delete_targets)}개 선택됨: {', '.join(os.path.basename(p) for p in delete_targets)}")
+        else:
+            st.info("삭제할 이미지를 선택하세요. 이미지 아래의 '🗑️ 선택' 버튼을 눌러 토글할 수 있습니다.")
+
+    if waiting_confirm:
+        st.warning("선택한 이미지를 삭제하시겠습니까?")
+        if delete_targets:
+            grid_cols_confirm = min(4, max(1, len(delete_targets)))
+            confirm_grid = st.columns(grid_cols_confirm)
+            for idx, pth in enumerate(delete_targets):
+                with confirm_grid[idx % grid_cols_confirm]:
+                    if pth and os.path.isfile(pth):
+                        thumb = make_display_image(pth, size=320, fmt=disp_fmt, quality=rescan_disp_quality)
+                        st.image(_safe_image_open(thumb), caption=os.path.basename(pth), use_container_width=True)
+                    else:
+                        st.info(f"파일을 찾을 수 없음: {os.path.basename(pth) if pth else '알 수 없음'}")
+        confirm_cols = st.columns([1, 1, 6])
+        with confirm_cols[0]:
+            if st.button("네, 삭제합니다", key="rescan_delete_confirm_yes"):
+                successes: List[str] = []
+                failures: List[Tuple[str, str]] = []
+                for path in delete_targets:
+                    try:
+                        if os.path.isfile(path):
+                            os.remove(path)
+                            successes.append(path)
+                        else:
+                            failures.append((path, "파일이 존재하지 않습니다."))
+                    except Exception as exc:
+                        failures.append((path, str(exc)))
+
+                # 성공한 경우 비교 선택 상태에서 제거합니다.
+                if successes and "gallery_selected" in st.session_state:
+                    st.session_state.gallery_selected = [p for p in st.session_state.gallery_selected if p not in successes]
+
+                refresh_image_caches()
+
+                if failures and successes:
+                    msg = "일부 파일만 삭제되었습니다: " + ", ".join(os.path.basename(p) for p, _ in failures)
+                    st.session_state.rescan_delete_feedback = ("error", msg)
+                elif failures and not successes:
+                    detail = "; ".join(f"{os.path.basename(p)}: {err}" for p, err in failures)
+                    st.session_state.rescan_delete_feedback = ("error", f"삭제 실패: {detail}")
+                elif successes:
+                    st.session_state.rescan_delete_feedback = ("success", f"{len(successes)}개 파일을 삭제했습니다.")
+                else:
+                    st.session_state.rescan_delete_feedback = ("warn", "삭제할 파일이 없습니다.")
+
+                st.session_state.rescan_delete_targets = []
+                st.session_state.rescan_delete_mode = False
+                st.session_state.rescan_show_confirm = False
+
+                rerun_fn = getattr(st, "rerun", None)
+                if callable(rerun_fn):
+                    rerun_fn()
+                else:
+                    rerun_fn = getattr(st, "experimental_rerun", None)
+                    if callable(rerun_fn):
+                        rerun_fn()
+
+        with confirm_cols[1]:
+            if st.button("취소", key="rescan_delete_confirm_no"):
+                st.session_state.rescan_show_confirm = False
+                st.session_state.rescan_delete_mode = False
+                st.session_state.rescan_delete_targets = []
+                st.session_state.rescan_delete_feedback = None
+
     try:
         import imagehash
         dup_pairs = []
@@ -1192,8 +1475,7 @@ with tab2:
                     front_p, back_p, front_nm, back_nm = pairs[i]
                     with cols[i]:
                         if os.path.exists(front_p):
-                            disp_front = make_display_image(front_p, size=rescan_large_px, fmt=disp_fmt, quality=rescan_disp_quality)
-                            st.image(_safe_image_open(disp_front), caption=f"앞면: {front_nm}", use_container_width=True)
+                            render_rescan_image_card(front_p, f"앞면: {front_nm}", f"{gid}_front_{i}", rescan_large_px, rescan_disp_quality, card_height=360)
                         else:
                             st.warning(f"앞면 파일을 찾을 수 없음: {front_nm}")
 
@@ -1203,8 +1485,7 @@ with tab2:
                     front_p, back_p, front_nm, back_nm = pairs[i]
                     with cols2[i]:
                         if os.path.exists(back_p):
-                            disp_back = make_display_image(back_p, size=rescan_large_px, fmt=disp_fmt, quality=rescan_disp_quality)
-                            st.image(_safe_image_open(disp_back), caption=f"뒷면: {back_nm}", use_container_width=True)
+                            render_rescan_image_card(back_p, f"뒷면: {back_nm}", f"{gid}_back_{i}", rescan_large_px, rescan_disp_quality, card_height=360)
                         else:
                             st.warning(f"뒷장 파일을 찾을 수 없음: {back_nm}")
                 # --- 그리드 모드 복원: 사용자가 탭에서 '그리드'를 선택했을 때 표시되는 블록 ---
@@ -1242,14 +1523,16 @@ with tab2:
                 for idx, (kind, name, pth) in enumerate(items):
                     with cols[idx % 4]:
                         if os.path.exists(pth):
-                            # 비교 선택 토글 (통합된 gallery_selected 사용)
-                            selected = pth in st.session_state.get("gallery_selected", [])
-                            label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                            if st.button(label, key=f"cmp_rescan_{gid}_{idx}"):
-                                toggle_compare(pth)
-                                st.rerun()
-                            disp = make_display_image(pth, size=rescan_thumb_px, fmt=disp_fmt, quality=rescan_disp_quality)
-                            st.image(_safe_image_open(disp), caption=f"{kind}: {name}", use_container_width=True)
+                            if st.session_state.get("rescan_delete_mode", False):
+                                render_rescan_image_card(pth, f"{kind}: {name}", f"{gid}_{idx}", rescan_thumb_px, rescan_disp_quality, card_height=220)
+                            else:
+                                selected = pth in st.session_state.get("gallery_selected", [])
+                                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
+                                if st.button(label, key=f"cmp_rescan_{gid}_{idx}"):
+                                    toggle_compare(pth)
+                                    st.rerun()
+                                disp = make_display_image(pth, size=rescan_thumb_px, fmt=disp_fmt, quality=rescan_disp_quality)
+                                st.image(_safe_image_open(disp), caption=f"{kind}: {name}", use_container_width=True)
                         else:
                             st.info(f"{kind} 파일 없음: {name}")
 
@@ -1290,7 +1573,7 @@ with tab3:
 with tab4:
     quality_profile = st.session_state.get("gallery_quality_profile", "균형")
     render_mode = st.session_state.get("gallery_render_mode", "리샘플(권장)")
-    grid_cols_local = max(2, int(st.session_state.get("gallery_grid_cols", 4)))
+    grid_cols_local = max(2, int(st.session_state.get("gallery_grid_cols", 5)))
     q = st.session_state.get("gallery_search", "")
     ext_sel = st.session_state.get("gallery_exts", [])
     sort_key = st.session_state.get("gallery_sort", "파일명")
