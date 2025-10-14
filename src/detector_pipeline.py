@@ -319,8 +319,7 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
     gpu_memory_gb = device_info['gpu_memory_gb']
     
     if n_images < 50:
-        # 소규모: 최적화된 처리
-        # logger.info(f"소규모 데이터({n_images}개) 최적화")  # 로그 간소화
+    # 소규모: 최적화된 처리
         
         # 메모리와 처리량 최적화된 배치 크기
         if has_gpu:
@@ -347,8 +346,7 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
             optimized.prefilter = "phash"
             
     elif n_images < 500:
-        # 중간 규모: 균형잡힌 고성능 설정
-        # logger.info(f"중간 규모 데이터({n_images}개) 최적화")  # 로그 간소화
+    # 중간 규모: 균형잡힌 고성능 설정
         
         # GPU 메모리에 따른 배치 크기 최적화 (더 적극적)
         if has_gpu:
@@ -374,8 +372,7 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
                 optimized.ann_backend = "brute"
                 
     else:
-        # 대규모: 최대 성능 배치 처리 최적화
-        # logger.info(f"대규모 데이터({n_images}개) 최적화")  # 로그 간소화
+    # 대규모: 최대 성능 배치 처리 최적화
         
         # GPU 메모리에 따른 대용량 배치 처리 (더 적극적)
         if has_gpu:
@@ -747,22 +744,16 @@ def load_model(device: torch.device, backend: str, force_gpu: bool = False, fall
     # GPU/CPU 정보 (간소화)
     if device.type == "cuda":
         try:
-            # gpu_name = torch.cuda.get_device_properties(0).name
-            # gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            # logger.info(f"🚀 GPU 모델 로딩: {gpu_name} ({gpu_memory:.1f}GB)")  # 간소화
             pass
         except Exception:
             if fallback_to_cpu:
                 device = torch.device("cpu")
     else:
-        # logger.info("🖥️ CPU 모델 로딩 중...")  # 간소화
         pass
     
     # DINOv2 시도 (입력 크기 문제 해결)
     if backend == "dinov2" and _HAS_TIMM:
         try:
-            # logger.info("🔄 DINOv2 ViT-Base 모델 로딩...")  # 간소화
-            
             # DINOv2 모델 로딩 시 정확한 설정
             model = timm.create_model(
                 "vit_base_patch14_dinov2.lvd142m", 
@@ -777,7 +768,6 @@ def load_model(device: torch.device, backend: str, force_gpu: bool = False, fall
             with torch.no_grad():
                 test_input = torch.randn(1, 3, 224, 224).to(device)
                 test_output = model(test_input)
-                # logger.info(f"✅ {model_name} 로딩 완료 - 출력 크기: {test_output.shape}")  # 간소화
                 del test_input, test_output
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
@@ -869,41 +859,29 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     except:
         pin_memory = False
     
-    # logger.info(f"📊 DataLoader 설정: batch_size={batch_size}, num_workers={num_workers}, pin_memory={pin_memory}")  # 간소화
-    
     dl = DataLoader(
         ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory
     )
     
-    # 모델 로드 (조용히)
-    # logger.info(f"🔄 모델 로딩 중... (backend: {backend}, device: {device})")  # 간소화
     t_model0 = time.time()
     
     try:
         model = load_model(device, backend, force_gpu, fallback_to_cpu=True)
         actual_device = next(model.parameters()).device
         if actual_device != device:
-            # logger.info(f"모델이 다른 디바이스에 로드됨: {device} → {actual_device}")  # 간소화
             device = actual_device
     except Exception as e:
-        # logger.error(f"모델 로딩 실패: {e}")  # 간소화
-        # 최후의 CPU 시도
-        # logger.info("🆘 최후의 CPU 시도...")  # 간소화
         device = torch.device("cpu")
         model = load_model(device, "resnet18", force_gpu=False, fallback_to_cpu=True)
     
     t_model1 = time.time()
     model_load_s = float(t_model1 - t_model0)
-    # logger.info(f"⏱️ 모델 로딩 시간: {model_load_s:.2f}초")  # 간소화
 
     # GPU 메모리 정보 로깅 (간소화)
     if device.type == "cuda":
         try:
             torch.cuda.empty_cache()
-            # memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
-            # memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
-            # logger.info(f"GPU 메모리 사용량: {memory_allocated:.2f}GB 할당, {memory_reserved:.2f}GB 예약")  # 간소화
         except Exception:
             pass
 
@@ -911,8 +889,6 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     ordered_paths = []
     total = len(ds)
     processed = 0
-    
-    # logger.info(f"임베딩 계산 시작: {total}개 이미지, 배치 크기: {batch_size}")  # 간소화
     
     with torch.no_grad():
         for batch_idx, (x, pths) in enumerate(dl):
@@ -960,7 +936,6 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     # 결과 정리
     if len(embs):
         embs = np.vstack(embs)
-        # logger.info(f"임베딩 완료: {embs.shape[0]}개 이미지, 차원: {embs.shape[1]}")  # 간소화
     else:
         # 빈 결과에 대한 차원 추정
         try:
@@ -974,7 +949,6 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         except Exception:
             D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
         embs = np.zeros((0, D_out), dtype=np.float32)
-        # logger.warning("임베딩 결과가 비어있습니다.")  # 간소화
 
     # 일관성 검사
     if len(ordered_paths) != len(paths):
@@ -1562,7 +1536,6 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 test_tensor = torch.zeros(1).to(device)
                 del test_tensor
                 torch.cuda.empty_cache()
-                # logger.info(f"🎯 GPU 최종 확인 완료: {device}")  # 간소화
         except Exception as e:
             logger.warning(f"🛡️ GPU 테스트 실패, CPU로 안전 전환: {e}")
             device = torch.device("cpu")
@@ -1584,11 +1557,8 @@ def detect_pipeline(input_dir: str, output_dir: str,
             logger.warning(f"❌ GPU 강제 사용 실패, CPU 유지: {e}")
             device = torch.device("cpu")
 
-    # logger.info(f"🎯 최종 디바이스: {device} ({'GPU' if device.type == 'cuda' else 'CPU 안전모드'})")  # 간소화
-
     # 2) Metadata: prefilters + density + (optional) OCR text
     _cb("meta", 0.05, "메타데이터 수집 시작 (pHash/PDQ + density)")
-    # logger.info("[1/5] Metadata (pHash/PDQ + density)")  # 간소화
     t_meta0 = time.time()
     phashes: Dict[str, imagehash.ImageHash] = {}
     pdqs: Dict[str, Optional[np.ndarray]] = {}
