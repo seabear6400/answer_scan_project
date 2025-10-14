@@ -163,7 +163,7 @@ class DetectorConfig:
 
     # 공백(빈칸) 감지 (성능 최적화를 위해 더 관대한 임계값)
     blank_method: str = "sauvola"   # otsu/sauvola
-    blank_density_thresh: float = 0.01  # 더 엄격하게 설정하여 빈칸 탐지 정확도 향상
+    blank_density_thresh: float = 0.015  # 개선된 노이즈 필터링으로 더 정확한 빈칸 탐지
 
     # 재정렬 / OCR
     use_lpips: bool = False
@@ -561,12 +561,23 @@ def ink_density(path: str, roi_ratio: Tuple[float, float, float, float], method:
     l, t, r, b = roi_ratio
     x1, y1, x2, y2 = int(l * w), int(t * h), int(r * w), int(b * h)
     roi = gray[y1:y2, x1:x2]
+    
+    # 노이즈 감소를 위한 전처리: 가우시안 블러 적용
+    roi = cv2.GaussianBlur(roi, (3, 3), 0)
+    
     if method == "sauvola" and _HAS_SAUVOLA:
-        th = threshold_sauvola(roi, window_size=25, k=0.2)
+        # Sauvola 파라미터 조정: k를 높여서 덜 민감하게 (0.2 -> 0.3)
+        # window_size를 늘려서 로컬 변화에 덜 민감하게 (25 -> 35)
+        th = threshold_sauvola(roi, window_size=35, k=0.3)
         binary = (roi < th).astype(np.uint8)
     else:
         _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         binary = (binary > 0).astype(np.uint8)
+    
+    # 모폴로지 연산으로 작은 노이즈 제거
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    
     return float(np.count_nonzero(binary)) / binary.size
 
 
