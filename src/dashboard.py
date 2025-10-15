@@ -631,7 +631,6 @@ with rescan_tab:
                 st.session_state.rescan_delete_feedback = ("warn", "삭제할 이미지를 먼저 선택하세요.")
 
     if delete_mode and not waiting_confirm:
-        st.caption("이미지 카드의 '🗑️ 선택' 버튼을 눌러 삭제 대상을 고르세요. 선택을 취소하려면 동일한 버튼을 다시 누르거나 아래 취소 버튼을 사용하세요.")
         if st.button("취소", key="rescan_delete_cancel"):
             st.session_state.rescan_delete_mode = False
             st.session_state.rescan_delete_targets = []
@@ -1307,8 +1306,14 @@ with tab2:
             for idx, pth in enumerate(delete_targets):
                 with confirm_grid[idx % grid_cols_confirm]:
                     if pth and os.path.isfile(pth):
-                        thumb = make_display_image(pth, size=320, fmt=disp_fmt, quality=rescan_disp_quality)
-                        st.image(_safe_image_open(thumb), caption=os.path.basename(pth), use_container_width=True)
+                        # 최종 확인 단계에서는 썸네일 대신 고해상도 미리보기 사용
+                        confirm_preview = make_display_image(
+                            pth,
+                            size=max(rescan_large_px, 1400),
+                            fmt=disp_fmt,
+                            quality=rescan_disp_quality,
+                        )
+                        st.image(_safe_image_open(confirm_preview), caption=os.path.basename(pth), use_container_width=True)
                     else:
                         st.info(f"파일을 찾을 수 없음: {os.path.basename(pth) if pth else '알 수 없음'}")
         # 옵션: 원본 입력 폴더에서도 같은 파일명을 삭제
