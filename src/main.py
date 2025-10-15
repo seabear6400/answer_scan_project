@@ -175,8 +175,6 @@ def main():
         auto_optimize=not args.no_auto_optimize,  # 기본값은 True, --no_auto_optimize 플래그로 비활성화
     )
 
-    # (예상 시간 계산 코드는 제거됨 — 요청에 따라 출력에서 제외합니다)
-
     # progress callback: 콘솔에 단계/퍼센트/메시지를 출력 (진행바 + ETA 포함)
     _progress_state = {"start": time.time(), "stages": {}}
 

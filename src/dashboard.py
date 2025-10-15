@@ -14,6 +14,8 @@ import pandas as pd
 import cv2
 import time
 import logging
+import shutil
+import stat
 
 # 모듈 로거
 logger = logging.getLogger(__name__)
@@ -206,7 +208,8 @@ def _iter_images(root: str):
 
 @st.cache_data(show_spinner=False)
 def list_all_images(root: str, cache_buster: float = 0) -> List[str]:
-    """루트 폴더 아래의 이미지 파일을 재귀적으로 나열합니다.
+    """
+    루트 폴더 아래의 이미지 파일을 재귀적으로 나열합니다.
     cache_buster는 외부에서 캐시를 무효화할 때 사용합니다.
     """
     try:
@@ -363,7 +366,7 @@ def compute_kpis(df: pd.DataFrame, img_df: pd.DataFrame) -> Dict[str, int]:
     except Exception:
         pass
 
-    # 공백 수: output/blank_answers 폴더에 있는 이미지 파일 수를 센다 (안전하게 처리)
+    # 공백 수: output/blank_answers 폴더에 있는 이미지 파일 수를 센다
     try:
         blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
         blank_cnt = 0
@@ -418,7 +421,7 @@ try:
 
 except Exception:
     pass
-# ===== 테마 선택: 여러 디자이너 친화적 테마 제공 =====
+# ===== 테마 선택 =====
 THEMES = {
     'Light (기본)': {
         'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','sidebar_text':'#091223','secondary':'#475569','accent':'#0B66FF','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
@@ -633,6 +636,7 @@ with rescan_tab:
             st.session_state.rescan_delete_mode = False
             st.session_state.rescan_delete_targets = []
             st.session_state.rescan_delete_feedback = None
+            st.rerun()
 
 with ok_tab:
     st.markdown("**정상/공백 답안 보기**")
@@ -962,16 +966,154 @@ def refresh_image_caches():
 
 
 @st.cache_data(show_spinner=False)
+def load_input_basename_map() -> Dict[str, List[str]]:
+    """artifacts/ordered_paths.txt가 있으면 입력 폴더 경로들을 읽어
+    베이스네임(소문자) -> 원본 절대 경로 목록으로 매핑합니다.
+    중복 파일명은 모두 포함합니다.
+    """
+    mapping: Dict[str, List[str]] = {}
+    try:
+        ordered_txt = os.path.join(OUTPUT_DIR, "artifacts", "ordered_paths.txt")
+        if not os.path.isfile(ordered_txt):
+            return mapping
+        with open(ordered_txt, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                p = line.strip().strip('\"')
+                if not p:
+                    continue
+                # 경로가 실제 존재하는 경우만 포함
+                if os.path.isabs(p) and os.path.exists(p):
+                    bn = os.path.basename(p).lower()
+                    mapping.setdefault(bn, []).append(p)
+    except Exception as exc:
+        logger.debug(f"입력 경로 맵 로드 실패: {exc}")
+    return mapping
+
+
+def _all_output_paths_by_basename(bn_lower: str) -> List[str]:
+    """OUTPUT_DIR 하위에서 주어진 베이스네임과 일치하는 모든 파일 경로를 찾아 반환합니다."""
+    try:
+        # images_summary 또는 파일시스템에서 전체 목록을 가져온 뒤 필터
+        all_imgs = list_all_images(OUTPUT_DIR, cache_buster=time.time())
+        return [p for p in all_imgs if os.path.basename(p).lower() == bn_lower]
+    except Exception:
+        # 폴백: 주요 서브폴더만 순회
+        results: List[str] = []
+        for sub in ("grouped", "ok", "blank_answers"):
+            base = os.path.join(OUTPUT_DIR, sub)
+            if not os.path.isdir(base):
+                continue
+            for root, _dirs, files in os.walk(base):
+                for f in files:
+                    if os.path.basename(f).lower() == bn_lower:
+                        results.append(os.path.join(root, f))
+        return results
+
+
+def _remove_file_force(path: str) -> Optional[str]:
+    """파일 삭제를 시도합니다. 읽기 전용/권한 문제를 처리하며, 성공 시 None, 실패 시 에러메시지 반환."""
+    try:
+        if not os.path.isfile(path):
+            return "파일이 존재하지 않습니다."
+        try:
+            os.remove(path)
+            return None
+        except PermissionError:
+            try:
+                # 읽기 전용 해제 후 재시도 (Windows 대응)
+                os.chmod(path, stat.S_IWRITE)
+                os.remove(path)
+                return None
+            except Exception as exc:
+                return f"권한 문제: {exc}"
+        except Exception as exc:
+            return str(exc)
+    except Exception as exc:
+        return str(exc)
+
+
+def _clear_thumbnail_caches():
+    """썸네일/비교 이미지 캐시를 깨끗이 비웁니다."""
+    try:
+        if os.path.isdir(THUMB_DIR):
+            shutil.rmtree(THUMB_DIR, ignore_errors=True)
+    except Exception as exc:
+        logger.debug(f"썸네일 캐시 삭제 실패: {exc}")
+    try:
+        os.makedirs(os.path.join(THUMB_DIR, "disp_cache"), exist_ok=True)
+    except Exception:
+        pass
+
+
+def delete_selected_images(target_paths: List[str], also_delete_input: bool = False) -> Tuple[List[str], List[Tuple[str, str]]]:
+    """선택된 경로들을 기준으로 다음을 삭제합니다.
+    - OUTPUT_DIR 하위의 동일 베이스네임 파일들(예: grouped/, ok/, blank_answers/ 등)
+    - (옵션) artifacts/ordered_paths.txt에 기록된 원본 입력 폴더의 동일 베이스네임 파일들
+
+    Returns:
+        (성공 목록, 실패 (경로, 사유) 목록)
+    """
+    successes: List[str] = []
+    failures: List[Tuple[str, str]] = []
+
+    # 기준 베이스네임 집합 구성
+    base_names = set()
+    for p in target_paths:
+        if p:
+            base_names.add(os.path.basename(p).lower())
+
+    # OUTPUT에서 모든 매칭 파일 수집
+    to_delete: List[str] = []
+    for bn in base_names:
+        to_delete.extend(_all_output_paths_by_basename(bn))
+
+    # 원본 입력 경로 매칭 (선택적)
+    if also_delete_input:
+        input_map = load_input_basename_map()
+        for bn in base_names:
+            for src in input_map.get(bn, []):
+                to_delete.append(src)
+
+    # 중복 제거 및 존재 확인
+    unique_delete = []
+    seen = set()
+    for p in to_delete:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        if os.path.exists(p):
+            unique_delete.append(p)
+
+    # 실제 삭제 수행
+    for p in unique_delete:
+        err = _remove_file_force(p)
+        if err is None:
+            successes.append(p)
+        else:
+            failures.append((p, err))
+
+    # 캐시 및 맵 갱신
+    _clear_thumbnail_caches()
+    refresh_image_caches()
+
+    return successes, failures
+
+
+@st.cache_data(show_spinner=False)
 def _encode_image_base64(img_path: str) -> str:
     with open(img_path, "rb") as fh:
         return base64.b64encode(fh.read()).decode("utf-8")
 
 
 def _delete_card_css(button_key: str, img_base64: str, selected: bool, height: int, disabled: bool) -> str:
+    # 선택 상태에 따라 빨간 테두리와 강한 그림자 효과 적용
     border_color = "#ef4444" if selected else "rgba(148,163,184,0.45)"
-    glow = "0 0 0 4px rgba(239,68,68,0.18)" if selected else "0 2px 8px rgba(15,23,42,0.12)"
-    status_badge = "삭제 대상" if selected else "이미지 선택"
-    badge_bg = "rgba(239,68,68,0.92)" if selected else "rgba(15,23,42,0.65)"
+    border_width = "4px" if selected else "2px"
+    glow = "0 0 0 6px rgba(239,68,68,0.35), 0 4px 12px rgba(239,68,68,0.25)" if selected else "0 2px 8px rgba(15,23,42,0.12)"
+    status_badge = "✓ 삭제 대상" if selected else "클릭하여 선택"
+    badge_bg = "rgba(239,68,68,0.95)" if selected else "rgba(15,23,42,0.65)"
+    overlay = "rgba(239,68,68,0.15)" if selected else "transparent"
+    
     return f"""
     <style>
     div[data-testid="stButton"][data-key="{button_key}"] {{
@@ -982,21 +1124,36 @@ def _delete_card_css(button_key: str, img_base64: str, selected: bool, height: i
         width: 100%;
         height: {height}px;
         border-radius: 12px;
-        border: 3px solid {border_color};
+        border: {border_width} solid {border_color};
         background-image: url('data:image/webp;base64,{img_base64}');
         background-size: cover;
         background-position: center center;
         padding: 0;
         margin: 0;
         box-shadow: {glow};
-        transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         cursor: pointer;
         position: relative;
     }}
+    div[data-testid="stButton"][data-key="{button_key}"] > button::before {{
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        border-radius: 10px;
+        background: {overlay};
+        pointer-events: none;
+        transition: background 0.3s ease;
+    }}
     div[data-testid="stButton"][data-key="{button_key}"] > button:hover {{
-        transform: translateY(-2px);
+        transform: translateY(-3px) scale(1.02);
         border-color: #ef4444;
-        box-shadow: 0 0 0 4px rgba(239,68,68,0.15);
+        box-shadow: 0 0 0 6px rgba(239,68,68,0.25), 0 6px 16px rgba(239,68,68,0.2);
+    }}
+    div[data-testid="stButton"][data-key="{button_key}"] > button:active {{
+        transform: translateY(-1px) scale(0.98);
     }}
     div[data-testid="stButton"][data-key="{button_key}"] > button:disabled {{
         cursor: not-allowed;
@@ -1012,15 +1169,21 @@ def _delete_card_css(button_key: str, img_base64: str, selected: bool, height: i
         font-weight: 600;
         color: #fff;
         background: {badge_bg};
-        padding: 3px 10px;
+        padding: 4px 12px;
         border-radius: 999px;
         letter-spacing: -0.1px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        z-index: 10;
     }}
     </style>
     """
 
 
 def render_rescan_image_card(img_path: str, caption: str, key_suffix: str, target_px: int, quality: int, card_height: int) -> None:
+    """재스캔 탭에서 이미지 카드를 렌더링합니다.
+    삭제 모드일 때는 클릭 가능한 선택 카드로 표시하고,
+    일반 모드일 때는 기본 이미지로 표시합니다.
+    """
     if not img_path or not os.path.isfile(img_path):
         st.warning(f"이미지 파일을 찾을 수 없습니다: {caption}")
         return
@@ -1031,27 +1194,61 @@ def render_rescan_image_card(img_path: str, caption: str, key_suffix: str, targe
     selected = img_path in st.session_state.get("rescan_delete_targets", [])
 
     if delete_mode:
-        button_key = f"delete_card_{key_suffix}"
-        try:
-            encoded = _encode_image_base64(display_path)
-        except Exception as exc:
-            logger.debug(f"썸네일 인코딩 실패 {display_path}: {exc}")
-            encoded = ""
-        if encoded:
-            st.markdown(_delete_card_css(button_key, encoded, selected, card_height, waiting_confirm and selected), unsafe_allow_html=True)
-            st.button(
-                " ",
-                key=button_key,
-                help="삭제할 이미지를 선택/해제",
-                disabled=waiting_confirm,
-                on_click=toggle_delete_target,
-                args=(img_path,),
-                type="secondary",
-                use_container_width=True,
-            )
-        else:
-            # base64 인코딩이 실패한 경우에는 기본 이미지 렌더링으로 폴백
-            st.image(_safe_image_open(display_path), use_container_width=True)
+        # 삭제 모드: 이미지를 보여주고 선택 상태를 테두리로 표시
+        container_key = f"img_container_{key_suffix}"
+        button_key = f"select_btn_{key_suffix}"
+        
+        # 선택 상태에 따른 스타일
+        border_style = "border: 4px solid #ef4444; box-shadow: 0 0 0 6px rgba(239,68,68,0.35);" if selected else "border: 2px solid rgba(148,163,184,0.45);"
+        badge_text = "✓ 삭제 대상" if selected else "클릭하여 선택"
+        badge_color = "background: rgba(239,68,68,0.95);" if selected else "background: rgba(15,23,42,0.65);"
+        
+        # 이미지와 선택 버튼을 함께 표시
+        st.markdown(f"""
+        <style>
+        .img-select-container-{key_suffix} {{
+            position: relative;
+            {border_style}
+            border-radius: 12px;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }}
+        .img-select-container-{key_suffix}:hover {{
+            transform: translateY(-2px);
+            border-color: #ef4444;
+        }}
+        .img-select-badge-{key_suffix} {{
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            {badge_color}
+            color: white;
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 10;
+            pointer-events: none;
+        }}
+        </style>
+        <div class="img-select-container-{key_suffix}">
+        """, unsafe_allow_html=True)
+        
+        # 이미지 표시
+        st.image(_safe_image_open(display_path), use_container_width=True)
+        
+        st.markdown(f'<div class="img-select-badge-{key_suffix}">{badge_text}</div></div>', unsafe_allow_html=True)
+        
+        # 선택 버튼
+        if st.button("🗑️ 선택" if not selected else "✓ 선택됨", 
+                    key=button_key,
+                    disabled=waiting_confirm,
+                    on_click=toggle_delete_target,
+                    args=(img_path,),
+                    type="primary" if selected else "secondary",
+                    use_container_width=True):
+            pass
+        
         st.caption(caption)
     else:
         st.image(_safe_image_open(display_path), caption=caption, use_container_width=True)
@@ -1114,26 +1311,16 @@ with tab2:
                         st.image(_safe_image_open(thumb), caption=os.path.basename(pth), use_container_width=True)
                     else:
                         st.info(f"파일을 찾을 수 없음: {os.path.basename(pth) if pth else '알 수 없음'}")
+        # 옵션: 원본 입력 폴더에서도 같은 파일명을 삭제
+        also_del_input = st.checkbox("입력 폴더에서도 같은 이름의 파일 삭제", value=False, help="파이프라인 입력으로 사용된 원본 폴더(artifacts/ordered_paths.txt 기준)에서도 동일한 파일명을 찾아 함께 삭제합니다.")
         confirm_cols = st.columns([1, 1, 6])
         with confirm_cols[0]:
             if st.button("네, 삭제합니다", key="rescan_delete_confirm_yes"):
-                successes: List[str] = []
-                failures: List[Tuple[str, str]] = []
-                for path in delete_targets:
-                    try:
-                        if os.path.isfile(path):
-                            os.remove(path)
-                            successes.append(path)
-                        else:
-                            failures.append((path, "파일이 존재하지 않습니다."))
-                    except Exception as exc:
-                        failures.append((path, str(exc)))
+                successes, failures = delete_selected_images(delete_targets, also_delete_input=also_del_input)
 
                 # 성공한 경우 비교 선택 상태에서 제거합니다.
                 if successes and "gallery_selected" in st.session_state:
                     st.session_state.gallery_selected = [p for p in st.session_state.gallery_selected if p not in successes]
-
-                refresh_image_caches()
 
                 if failures and successes:
                     msg = "일부 파일만 삭제되었습니다: " + ", ".join(os.path.basename(p) for p, _ in failures)
@@ -1524,8 +1711,10 @@ with tab2:
                     with cols[idx % 4]:
                         if os.path.exists(pth):
                             if st.session_state.get("rescan_delete_mode", False):
+                                # 삭제 모드: 선택 가능한 카드로 렌더링
                                 render_rescan_image_card(pth, f"{kind}: {name}", f"{gid}_{idx}", rescan_thumb_px, rescan_disp_quality, card_height=220)
                             else:
+                                # 일반 모드: 비교 선택 버튼 + 이미지 표시
                                 selected = pth in st.session_state.get("gallery_selected", [])
                                 label = "✔ 비교 취소" if selected else "↔ 비교 선택"
                                 if st.button(label, key=f"cmp_rescan_{gid}_{idx}"):
