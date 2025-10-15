@@ -601,7 +601,7 @@ with rescan_tab:
         index=rescan_q_idx,
         key="rescan_quality_profile",
         horizontal=True,
-        help="빠름(512px), 균형(768px), 선명(1024px) 수준으로 썸네일 품질과 크기를 조정합니다."
+        help="빠름(512px), 균형(1024px), 선명(1600px) 수준으로 썸네일 품질과 크기를 조정합니다."
     )
 
     delete_mode = st.session_state.get("rescan_delete_mode", False)
@@ -663,7 +663,7 @@ with ok_tab:
         index=ok_q_idx,
         key="ok_quality_profile",
         horizontal=True,
-        help="빠름(512px), 균형(768px), 선명(1024px) 썸네일 품질을 선택합니다."
+        help="빠름(512px), 균형(1024px), 선명(1600px) 썸네일 품질을 선택합니다."
     )
 
 with gallery_tab:
@@ -725,17 +725,17 @@ rescan_quality_profile = st.session_state.get("rescan_quality_profile", "균형"
 if rescan_quality_profile == "빠름":
     rescan_thumb_px, rescan_large_px, rescan_disp_quality = 512, 1200, 92
 elif rescan_quality_profile == "선명":
-    rescan_thumb_px, rescan_large_px, rescan_disp_quality = 1024, 1600, 98
+    rescan_thumb_px, rescan_large_px, rescan_disp_quality = 1600, 2000, 98
 else:  # 균형
-    rescan_thumb_px, rescan_large_px, rescan_disp_quality = 768, 1400, 95
+    rescan_thumb_px, rescan_large_px, rescan_disp_quality = 1024, 1600, 95
 
 ok_quality_profile = st.session_state.get("ok_quality_profile", "균형")
 if ok_quality_profile == "빠름":
     ok_thumb_px, ok_disp_quality = 512, 92
 elif ok_quality_profile == "선명":
-    ok_thumb_px, ok_disp_quality = 1024, 98
+    ok_thumb_px, ok_disp_quality = 1600, 98
 else:
-    ok_thumb_px, ok_disp_quality = 768, 95
+    ok_thumb_px, ok_disp_quality = 1024, 95
 
 group_page_size = 6   # 고정값
 group_page = 1        # 고정값(페이지네이션은 필요시만)
