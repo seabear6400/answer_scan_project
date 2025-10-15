@@ -1252,6 +1252,14 @@ def render_rescan_image_card(img_path: str, caption: str, key_suffix: str, targe
     else:
         st.image(_safe_image_open(display_path), caption=caption, use_container_width=True)
 
+def on_image_click(img_path: str):
+    """이미지를 클릭했을 때 비교 선택을 처리합니다."""
+    toggle_compare(img_path)
+
+# 이미지 클릭 이벤트를 처리하는 UI 요소에 on_image_click 함수를 연결합니다.
+# 예를 들어, Streamlit의 st.image()를 사용할 경우:
+# st.image(image_path, on_click=on_image_click, args=(image_path,))
+
 # ===== 탭 구성 =====
 tab2, tab3, tab4 = st.tabs([ "재스캔 필요", "정상/공백 답안", "전체 보기"])
 
@@ -1455,7 +1463,7 @@ with tab2:
             a_name, b_name = os.path.basename(sel_exist_top[0]), os.path.basename(sel_exist_top[1])
             st.info(f"📁 비교 대상: **A**: {a_name} ↔ **B**: {b_name}")
             if len(sel_exist_top) > 2:
-                st.caption(f"추가로 {len(sel_exist_top)-2}개 이미지가 더 선택되어 있습니다. (최대 2개까지 비교)")
+                st.caption(f" 추가로 {len(sel_exist_top)-2}개 이미지가 더 선택되어 있습니다. (최대 2개까지 비교)")
     
     # 공통: 모드 선택 + 도움말 옆에 배치
         colm1, colm2 = st.columns([3, 7])
