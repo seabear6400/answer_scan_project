@@ -76,6 +76,14 @@ os.makedirs(THUMB_DIR, exist_ok=True)
 st.set_page_config(page_title="답안지 검수 대시보드", layout="wide")
 st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized)")
 
+# --- 메인 탭 상태 관리 ---
+if "main_tab" not in st.session_state:
+    st.session_state["main_tab"] = "재스캔 필요"
+
+def switch_main_tab(tab_name: str):
+    """사이드바 필터 변경 시 해당 탭으로 이동"""
+    st.session_state["main_tab"] = tab_name
+
 # --- Gallery state (전체 보기 탭 전용) ---
 if "gallery_limit" not in st.session_state:
     st.session_state.gallery_limit = 120  # 한 번에 보여줄 개수 초기값 (증가)
@@ -584,14 +592,18 @@ with rescan_tab:
         "그룹 선택",
         ["전체"] + group_list,
         key="group_filter",
-        help="재스캔 탭의 후보 목록을 특정 그룹으로 한정합니다."
+        help="재스캔 탭의 후보 목록을 특정 그룹으로 한정합니다.",
+        on_change=switch_main_tab,
+        args=("재스캔 필요",)
     )
     st.radio(
         "보기 방식",
         ["대형 비교(2열)", "그리드(다중 썸네일)"],
         key="group_view_mode",
         horizontal=True,
-        help="대형 비교는 앞·뒤면을 크게 보여주고, 그리드는 그룹 내 모든 이미지를 타일로 확인합니다."
+        help="대형 비교는 앞·뒤면을 크게 보여주고, 그리드는 그룹 내 모든 이미지를 타일로 확인합니다.",
+        on_change=switch_main_tab,
+        args=("재스캔 필요",)
     )
     rescan_quality_default = st.session_state.get("rescan_quality_profile", "균형")
     rescan_q_idx = quality_options_common.index(rescan_quality_default) if rescan_quality_default in quality_options_common else 1
@@ -601,7 +613,9 @@ with rescan_tab:
         index=rescan_q_idx,
         key="rescan_quality_profile",
         horizontal=True,
-        help="빠름(512px), 균형(1024px), 선명(1600px) 수준으로 썸네일 품질과 크기를 조정합니다."
+        help="빠름(512px), 균형(1024px), 선명(1600px) 수준으로 썸네일 품질과 크기를 조정합니다.",
+        on_change=switch_main_tab,
+        args=("재스캔 필요",)
     )
 
     delete_mode = st.session_state.get("rescan_delete_mode", False)
@@ -644,7 +658,9 @@ with ok_tab:
         ["모두 보기", "정상만", "공백만"],
         key="ok_view_mode",
         horizontal=True,
-        help="정상/공백 탭에서 표시할 답안 유형을 빠르게 전환합니다."
+        help="정상/공백 탭에서 표시할 답안 유형을 빠르게 전환합니다.",
+        on_change=switch_main_tab,
+        args=("정상/공백 답안",)
     )
     grid_default = int(st.session_state.get("grid_cols", 5))
     grid_slider_args = {
@@ -663,7 +679,9 @@ with ok_tab:
         index=ok_q_idx,
         key="ok_quality_profile",
         horizontal=True,
-        help="빠름(512px), 균형(1024px), 선명(1600px) 썸네일 품질을 선택합니다."
+        help="빠름(512px), 균형(1024px), 선명(1600px) 썸네일 품질을 선택합니다.",
+        on_change=switch_main_tab,
+        args=("정상/공백 답안",)
     )
 
 with gallery_tab:
@@ -671,7 +689,9 @@ with gallery_tab:
     st.text_input(
         "파일명·경로 검색",
         key="gallery_search",
-        placeholder="예: 10002, scan, .png"
+        placeholder="예: 10002, scan, .png",
+        on_change=switch_main_tab,
+        args=("전체 보기",)
     )
     ext_options = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
     if "gallery_exts" in st.session_state:
@@ -692,7 +712,9 @@ with gallery_tab:
         index=q_idx,
         horizontal=True,
         key="gallery_quality_profile",
-        help="빠름(512px), 균형(1024px), 선명(1600px)"
+        help="빠름(512px), 균형(1024px), 선명(1600px)",
+        on_change=switch_main_tab,
+        args=("전체 보기",)
     )
     render_options = ["리샘플(권장)", "원본"]
     r_idx = render_options.index(st.session_state.gallery_render_mode) if st.session_state.gallery_render_mode in render_options else 0
@@ -702,7 +724,9 @@ with gallery_tab:
         index=r_idx,
         horizontal=True,
         key="gallery_render_mode",
-        help="리샘플: LANCZOS 고화질 썸네일 / 원본: 이미지 원본 로드"
+        help="리샘플: LANCZOS 고화질 썸네일 / 원본: 이미지 원본 로드",
+        on_change=switch_main_tab,
+        args=("전체 보기",)
     )
     gallery_grid_default = int(st.session_state.get("gallery_grid_cols", 5))
     gallery_slider_args = {
@@ -1260,8 +1284,60 @@ def on_image_click(img_path: str):
 # 예를 들어, Streamlit의 st.image()를 사용할 경우:
 # st.image(image_path, on_click=on_image_click, args=(image_path,))
 
-# ===== 탭 구성 =====
-tab2, tab3, tab4 = st.tabs([ "재스캔 필요", "정상/공백 답안", "전체 보기"])
+# ===== 메인 탭 구성 (커스텀 탭 버튼으로 완전 제어) =====
+tab_names = ["재스캔 필요", "정상/공백 답안", "전체 보기"]
+
+# 탭 스타일 CSS
+tab_css = """
+<style>
+.custom-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #e6e9ee;
+    padding-bottom: 0;
+}
+.custom-tab {
+    padding: 12px 24px;
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 500;
+    color: #666;
+    transition: all 0.3s ease;
+    margin-bottom: -2px;
+}
+.custom-tab:hover {
+    color: #0B66FF;
+    background: rgba(11, 102, 255, 0.05);
+}
+.custom-tab.active {
+    color: #0B66FF;
+    border-bottom-color: #0B66FF;
+    font-weight: 600;
+}
+</style>
+"""
+st.markdown(tab_css, unsafe_allow_html=True)
+
+# 탭 버튼 UI
+cols = st.columns(len(tab_names))
+for idx, tab_name in enumerate(tab_names):
+    with cols[idx]:
+        is_active = st.session_state["main_tab"] == tab_name
+        button_type = "primary" if is_active else "secondary"
+        if st.button(
+            tab_name,
+            key=f"tab_btn_{idx}",
+            use_container_width=True,
+            type=button_type
+        ):
+            st.session_state["main_tab"] = tab_name
+            st.rerun()
+
+st.markdown("---")
 
 # ===== Global: 탭 어디에서든 2장 선택 시 상단에 즉시 비교 패널 표시 =====
 def _render_global_compare():
@@ -1283,8 +1359,8 @@ cmp_pair = _render_global_compare()
 # 필요하면 향후 탭을 다시 추가하여 활성화할 수 있습니다.
 
 
-# === Tab2: 재스캔 필요 ===
-with tab2:
+# === Tab: 재스캔 필요 ===
+if st.session_state["main_tab"] == "재스캔 필요":
     delete_mode = st.session_state.get("rescan_delete_mode", False)
     delete_targets = st.session_state.get("rescan_delete_targets", [])
     waiting_confirm = st.session_state.get("rescan_show_confirm", False)
@@ -1742,8 +1818,8 @@ with tab2:
         st.info("그룹 결과 폴더가 없습니다. 하지만 입력 폴더 또는 리포트에서 재스캔 후보를 검사할 수 있습니다.")
 
 
-# === Tab3: 정상/공백 ===
-with tab3:
+# === Tab: 정상/공백 ===
+elif st.session_state["main_tab"] == "정상/공백 답안":
     ok_dir = os.path.join(OUTPUT_DIR, "ok")
     blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
     sel = st.session_state.get("ok_view_mode", "모두 보기")
@@ -1771,8 +1847,8 @@ with tab3:
                 st.image(_safe_image_open(disp), caption=f, use_container_width=True)
 
 
-# === Tab4: 전체 보기 ===
-with tab4:
+# === Tab: 전체 보기 ===
+elif st.session_state["main_tab"] == "전체 보기":
     quality_profile = st.session_state.get("gallery_quality_profile", "균형")
     render_mode = st.session_state.get("gallery_render_mode", "리샘플(권장)")
     grid_cols_local = max(2, int(st.session_state.get("gallery_grid_cols", 5)))
