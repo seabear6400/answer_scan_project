@@ -342,9 +342,10 @@ except Exception:
 
 
 def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Dict[str, float]) -> Dict:
-    """실행에 대한 간단한 특성(피처)을 수집하여 성능 로깅에 사용합니다.
-
+    """ 
+    실행에 대한 간단한 특성(피처)을 수집하여 성능 로깅에 사용합니다.
     CSV에 바로 추가할 수 있는 평탄한 딕셔너리를 반환합니다.
+    
     """
     sizes = []
     widths = []
