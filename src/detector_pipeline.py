@@ -2,8 +2,7 @@ import os
 import shutil
 import itertools
 import warnings
-import importlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
@@ -34,43 +33,54 @@ try:
 except Exception:
     _HAS_TIMM = False
 
-# 선택적 의존성 헬퍼 (import 실패 시 경고 억제)
-def _optional_import(module_name: str, attr_name: Optional[str] = None):
-    try:
-        module = importlib.import_module(module_name)
-    except Exception:
-        return None
-    if attr_name:
-        return getattr(module, attr_name, None)
-    return module
-
-
 # 선택적: FAISS
-faiss = _optional_import("faiss")
-_HAS_FAISS = faiss is not None
+try:
+    import faiss  # type: ignore
+    _HAS_FAISS = True
+except Exception:
+    _HAS_FAISS = False
 
 # 선택적: HNSW
-hnswlib = _optional_import("hnswlib")
-_HAS_HNSW = hnswlib is not None
+try:
+    import hnswlib
+    _HAS_HNSW = True
+except Exception:
+    _HAS_HNSW = False
 
 # 선택적: LPIPS
-lpips = _optional_import("lpips")
-_HAS_LPIPS = lpips is not None
+try:
+    import lpips
+    
+    _HAS_LPIPS = True
+except Exception:
+    _HAS_LPIPS = False
 
 # 선택적: PDQ 해시
-pdqhash = _optional_import("pdqhash")
-_HAS_PDQ = pdqhash is not None
+try:
+    import pdqhash 
+    _HAS_PDQ = True
+except Exception:
+    _HAS_PDQ = False
 
 # 선택적: OCR + RapidFuzz
-PaddleOCR = _optional_import("paddleocr", "PaddleOCR")
-_HAS_OCR = PaddleOCR is not None
+try:
+    from paddleocr import PaddleOCR
+    _HAS_OCR = True
+except Exception:
+    _HAS_OCR = False
 
-token_set_ratio = _optional_import("rapidfuzz.fuzz", "token_set_ratio")
-_HAS_RAPIDFUZZ = callable(token_set_ratio)
+try:
+    from rapidfuzz.fuzz import token_set_ratio
+    _HAS_RAPIDFUZZ = True
+except Exception:
+    _HAS_RAPIDFUZZ = False
 
 # 선택적: Sauvola
-threshold_sauvola = _optional_import("skimage.filters", "threshold_sauvola")
-_HAS_SAUVOLA = callable(threshold_sauvola)
+try:
+    from skimage.filters import threshold_sauvola
+    _HAS_SAUVOLA = True
+except Exception:
+    _HAS_SAUVOLA = False
 
 # 선택적: NetworkX (Blossom 매칭)
 try:
@@ -86,6 +96,45 @@ import logging
 logger = logging.getLogger(__name__)
 # 로거 비활성화 - 토스트 창에서 진행상황을 보여주므로 콘솔 출력 숨김
 logger.setLevel(logging.CRITICAL)  # CRITICAL만 표시 (거의 없음)
+
+
+def diagnose_gpu():
+    """GPU 상태를 진단하고 문제점을 찾습니다."""
+    print("=" * 60)
+    print("🔍 GPU 진단 시작")
+    print("=" * 60)
+    
+    print(f"PyTorch 버전: {torch.__version__}")
+    print(f"CUDA 사용 가능: {torch.cuda.is_available()}")
+    
+    if torch.cuda.is_available():
+        print(f"CUDA 버전: {torch.version.cuda}")
+        print(f"GPU 개수: {torch.cuda.device_count()}")
+        
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            print(f"GPU {i}: {props.name}")
+            print(f"  메모리: {props.total_memory / (1024**3):.1f}GB")
+            print(f"  Compute Capability: {props.major}.{props.minor}")
+            
+        try:
+            # 더 작은 테스트 텐서로 빠른 확인
+            test_tensor = torch.zeros(100, 100).cuda()
+            print("✅ GPU 텐서 생성 테스트 성공")
+            del test_tensor
+            torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"❌ GPU 텐서 생성 테스트 실패: {e}")
+    else:
+        print("❌ CUDA 사용 불가능")
+        print("가능한 원인:")
+        print("  - NVIDIA GPU 드라이버가 설치되지 않음")
+        print("  - CUDA Toolkit이 설치되지 않음")
+        print("  - PyTorch가 CPU 버전으로 설치됨")
+        
+    print("=" * 60)
+
+
 @dataclass
 class DetectorConfig:
     # 백엔드 (성능 최적화를 위해 auto 우선)
@@ -120,7 +169,7 @@ class DetectorConfig:
     blank_auto_tune: bool = True         # 데이터 기반 자동 임계값 조정
     blank_auto_suffix: str = "2"         # 자동 임계값을 적용할 파일명 접미사
     blank_auto_min_samples: int = 6      # 자동 임계값 계산에 필요한 최소 샘플 수
-    blank_auto_margin: float = 0.002     # 자동 임계값에 추가할 완충값
+    blank_auto_margin: float = 0.005     # 자동 임계값에 적용할 안전 완충값 (기본 0.5%)
     blank_auto_cap: float = 0.12         # 자동 임계값 상한
     blank_binary_weight: float = 0.55    # 밀도 기반 점수 가중치
     blank_contrast_weight: float = 0.25  # 대비 기반 점수 가중치
@@ -167,17 +216,23 @@ def get_device_info():
                 # 빠른 GPU 정보 수집
                 try:
                     props = torch.cuda.get_device_properties(0)
-                    device_info.update({
-                        'has_gpu': True,
-                        'gpu_count': gpu_count,
-                        'gpu_memory_gb': props.total_memory / (1024**3),
-                        'gpu_name': props.name,
-                        'device': torch.device('cuda:0'),
-                    })
-
+                    device_info['has_gpu'] = True
+                    device_info['gpu_count'] = gpu_count
+                    device_info['gpu_memory_gb'] = props.total_memory / (1024**3)
+                    device_info['gpu_name'] = props.name
+                    device_info['device'] = torch.device('cuda:0')
+                    
+                    # GPU 감지 (조용히)
+                    device_info['has_gpu'] = True
+                    device_info['gpu_count'] = gpu_count
+                    device_info['gpu_memory_gb'] = props.total_memory / (1024**3)
+                    device_info['gpu_name'] = props.name
+                    device_info['device'] = torch.device('cuda:0')
+                    
                     # 빠른 GPU 테스트
                     try:
-                        _ = torch.zeros(2, device=device_info['device'])
+                        test_tensor = torch.zeros(2).cuda()
+                        del test_tensor
                         torch.cuda.empty_cache()
                     except Exception:
                         device_info['has_gpu'] = False
@@ -197,9 +252,9 @@ def get_device_info():
     
     # 최종 디바이스만 간단히 표시
     if device_info['has_gpu']:
-        logger.info("GPU mode detected")
+        logger.info(f"� GPU 모드")
     else:
-        logger.info("CPU mode detected")
+        logger.info("� CPU 모드")
     
     return device_info
 
@@ -222,7 +277,42 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
         device_info = get_device_info()
     
     # 새로운 설정 객체 생성 (원본 보존)
-    optimized = replace(cfg)
+    optimized = DetectorConfig(
+        embed_backend=cfg.embed_backend,
+        ann_backend=cfg.ann_backend,
+        k=cfg.k,
+        hnsw_M=cfg.hnsw_M,
+        hnsw_efC=cfg.hnsw_efC,
+        hnsw_efS=cfg.hnsw_efS,
+        prefilter=cfg.prefilter,
+        phash_thresh=cfg.phash_thresh,
+        pdq_thresh=cfg.pdq_thresh,
+        density_diff_thresh=cfg.density_diff_thresh,
+        cnn_thresh=cfg.cnn_thresh,
+        suspect_low=cfg.suspect_low,
+        blank_method=cfg.blank_method,
+        blank_density_thresh=cfg.blank_density_thresh,
+        blank_border_trim=cfg.blank_border_trim,
+        blank_min_component_ratio=cfg.blank_min_component_ratio,
+        blank_auto_tune=cfg.blank_auto_tune,
+        blank_auto_suffix=cfg.blank_auto_suffix,
+        blank_auto_min_samples=cfg.blank_auto_min_samples,
+        blank_auto_margin=cfg.blank_auto_margin,
+        blank_auto_cap=cfg.blank_auto_cap,
+    blank_binary_weight=cfg.blank_binary_weight,
+    blank_contrast_weight=cfg.blank_contrast_weight,
+    blank_edge_weight=cfg.blank_edge_weight,
+    blank_laplacian_ksize=cfg.blank_laplacian_ksize,
+        use_lpips=cfg.use_lpips,
+        lpips_thresh=cfg.lpips_thresh,
+        use_ocr=cfg.use_ocr,
+        text_sim_thresh=cfg.text_sim_thresh,
+        use_alignment=cfg.use_alignment,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.num_workers,
+        roi_ratio=cfg.roi_ratio,
+        auto_optimize=cfg.auto_optimize
+    )
     
     cpu_count = os.cpu_count() or 2
     has_gpu = device_info['has_gpu']
@@ -323,7 +413,14 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
             optimized.prefilter = "both"
     
     # 공통 최적화 - 속도 우선
-
+    
+    # OCR/LPIPS는 50개 이하에서만 비활성화 (속도 최적화)
+    if n_images < 30:  # 더 작은 임계값으로 변경
+        if optimized.use_ocr and not cfg.use_ocr:  # 명시적으로 설정하지 않았다면
+            optimized.use_ocr = False
+        if optimized.use_lpips and not cfg.use_lpips:
+            optimized.use_lpips = False
+    
     # k 값이 데이터 크기보다 클 경우 조정
     optimized.k = min(optimized.k, max(1, n_images - 1))
     
@@ -342,10 +439,9 @@ except Exception:
 
 
 def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Dict[str, float]) -> Dict:
-    """ 
-    실행에 대한 간단한 특성(피처)을 수집하여 성능 로깅에 사용합니다.
+    """실행에 대한 간단한 특성(피처)을 수집하여 성능 로깅에 사용합니다.
+
     CSV에 바로 추가할 수 있는 평탄한 딕셔너리를 반환합니다.
-    
     """
     sizes = []
     widths = []
@@ -1111,7 +1207,10 @@ def _auto_blank_threshold(values: List[float], cfg: DetectorConfig) -> Optional[
 
     if c1 > c2:
         c1, c2 = c2, c1
-    threshold = float((c1 + c2) / 2.0) + cfg.blank_auto_margin
+    # 기본적으로 두 클러스터의 중간값을 반환합니다.
+    # 실제 판정에서는 별도의 안전 완충(blank_auto_margin)을 적용하여
+    # 임계 바로 아래의 경계 케이스에서 오탐을 줄입니다.
+    threshold = float((c1 + c2) / 2.0)
     threshold = max(cfg.blank_density_thresh, threshold)
     threshold = min(cfg.blank_auto_cap, max(0.0, threshold))
     if threshold <= cfg.blank_density_thresh + 1e-6:
@@ -1131,7 +1230,19 @@ def _build_blank_flags(files: List[str], densities: Dict[str, float], cfg: Detec
                 if os.path.splitext(f)[0].endswith(target_suffix):
                     thresholds[f] = max(thresholds[f], auto_threshold)
 
-    blank_flags = {f: densities.get(f, 0.0) <= thresholds[f] for f in files}
+    # 적용할 안전 여유(margin)를 가져옵니다.
+    margin = float(getattr(cfg, "blank_auto_margin", 0.0))
+
+    blank_flags: Dict[str, bool] = {}
+    # thresholds 딕셔너리에 실제 판정에 사용된 유효 임계값(effective threshold)을 기록합니다.
+    for f in files:
+        d = float(densities.get(f, 0.0))
+        t = float(thresholds.get(f, cfg.blank_density_thresh))
+        # eff_t는 auto에서 계산된 t에서 margin을 빼고, 전역 최소 임계값을 넘지 않도록 보호합니다.
+        eff_t = max(t - margin, float(cfg.blank_density_thresh))
+        thresholds[f] = eff_t
+        blank_flags[f] = d < eff_t
+
     return blank_flags, thresholds, auto_threshold
 
 
@@ -1324,10 +1435,26 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
     os.makedirs(bdir, exist_ok=True)
 
     grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
+    # 디버그: 빈칸 판단 로그를 artifacts에 남김
+    try:
+        dbg_dir = os.path.join(output_dir, "artifacts")
+        os.makedirs(dbg_dir, exist_ok=True)
+        dbg_csv = os.path.join(dbg_dir, "blank_debug.csv")
+        with open(dbg_csv, "w", encoding="utf-8") as fdbg:
+            fdbg.write("파일,밀도,임계값,빈칸여부\n")
+            for f in files:
+                dens = densities.get(f, 0.0)
+                th = blank_thresholds.get(f, cfg.blank_density_thresh)
+                flag = bool(blank_flags.get(f, dens < th))
+                fdbg.write(f"{f},{dens:.6f},{th:.6f},{int(flag)}\n")
+    except Exception:
+        pass
+
     for f in files:
         src = path_map[f] if path_map is not None else os.path.join(input_dir or "", f)
         name_wo_ext = os.path.splitext(f)[0]
-        is_blank = bool(blank_flags.get(f, densities.get(f, 0.0) <= blank_thresholds.get(f, cfg.blank_density_thresh)))
+        # 변경: 일관성 있게 '<' 기준으로 판단
+        is_blank = bool(blank_flags.get(f, densities.get(f, 0.0) < blank_thresholds.get(f, cfg.blank_density_thresh)))
 
         if path_map is None:
             # detect_pipeline 동작: 기본적으로 blank는 blank_answers로, 단 파일명 끝이 '1'이면 ok로 재분류
@@ -1863,8 +1990,6 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
         device_info['has_gpu'] = True
         # GPU 메모리 정리
         torch.cuda.empty_cache()
-
-    # logger.info(f"🎯 최종 디바이스: {device} ({'GTX 1660 Ti' if device.type == 'cuda' else 'CPU'})")  # 간소화
 
     # Prepare output dirs (same behavior as detect_pipeline)
     if not _safe_recreate_dir(output_dir, retries=3, delay=0.2):
