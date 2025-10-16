@@ -34,6 +34,9 @@ _tk_thread = threading.Thread(target=_warm_tk, daemon=True)
 _tk_thread.start()
 
 def parse_args():
+    # PyInstaller로 빌드한 실행 파일이 멀티프로세싱을 사용할 때
+    # '--multiprocessing-fork ...' 같은 내부 인자를 전달하는데,
+    # 이를 무시하도록 parse_known_args를 사용합니다.
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
     p.add_argument("--output_dir", default="output")
 
@@ -81,7 +84,9 @@ def parse_args():
     p.add_argument("--detach", action="store_true", help="윈도우에서 Streamlit을 새 창으로 분리 실행합니다 (비차단).")
     # 파일 수집 재귀 옵션
     p.add_argument("--recursive", action="store_true", help="선택한 폴더에서 하위 폴더까지 재귀적으로 이미지를 검색합니다")
-    return p.parse_args()
+    # 알 수 없는 내부 인자(예: --multiprocessing-fork ...)는 무시
+    args, _unknown = p.parse_known_args()
+    return args
 
 def main():
     args = parse_args()
@@ -468,4 +473,15 @@ def main():
         print(f"❌ 대시보드 실행 오류: {e}")
 
 if __name__ == "__main__":
+    # Windows(PyInstaller) 멀티프로세싱 호환: 내부 포크 인자 처리
+    try:
+        from multiprocessing import freeze_support, set_start_method
+        freeze_support()
+        # Windows 기본은 'spawn'이지만, 다른 환경에서 실행될 가능성 대비
+        try:
+            set_start_method('spawn')
+        except Exception:
+            pass
+    except Exception:
+        pass
     main()
