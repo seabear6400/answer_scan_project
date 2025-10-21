@@ -3,6 +3,7 @@ import sys
 import hashlib
 import re
 import importlib
+from pathlib import Path
 from typing import Tuple, List, Dict, Optional
 import base64
 
@@ -49,7 +50,9 @@ def parse_streamlit_args():
     else:
         user_args = []
     p = argparse.ArgumentParser(add_help=False)
-    p.add_argument('--output_dir', default='output')
+    p.add_argument('--output_dir', default=None)
+    p.add_argument('--base_dir', default=None)
+    p.add_argument('--default_result', default=None)
     try:
         ns, _ = p.parse_known_args(user_args)
     except SystemExit:
@@ -57,24 +60,192 @@ def parse_streamlit_args():
         ns = X()
     return ns
 
+
+def _request_rerun() -> None:
+    if hasattr(st, "rerun") and callable(st.rerun):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun") and callable(st.experimental_rerun):
+        st.experimental_rerun()
+    else:
+        stop_fn = getattr(st, "stop", None)
+        if callable(stop_fn):
+            try:
+                stop_fn()
+            except Exception:
+                pass
+
 ns = parse_streamlit_args()
-OUTPUT_DIR = ns.output_dir
-REPORT_PARQUET = os.path.join(OUTPUT_DIR, "report.parquet")
-REPORT_CSV = os.path.join(OUTPUT_DIR, "report.csv")
-IMG_SUMMARY = os.path.join(OUTPUT_DIR, "images_summary.csv")
-THUMB_DIR = os.path.join(OUTPUT_DIR, "artifacts", "thumbnails")
+CLI_OUTPUT_DIR = Path(ns.output_dir).expanduser().resolve() if ns.output_dir else Path.cwd()
+CLI_DEFAULT_RESULT = Path(ns.default_result).expanduser().resolve() if ns.default_result else None
+if ns.base_dir:
+    CLI_BASE_DIR = Path(ns.base_dir).expanduser().resolve()
+elif CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
+    CLI_BASE_DIR = CLI_DEFAULT_RESULT.parent.resolve()
+else:
+    CLI_BASE_DIR = CLI_OUTPUT_DIR
+
+if "_cli_base_marker" not in st.session_state or st.session_state.get("_cli_base_marker") != str(CLI_BASE_DIR):
+    st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+    st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
+elif "result_base_dir" not in st.session_state:
+    st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+
+BASE_OUTPUT_DIR = Path(st.session_state["result_base_dir"]).expanduser().resolve()
+
+if CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
+    if not CLI_DEFAULT_RESULT.is_dir():
+        CLI_DEFAULT_RESULT = CLI_DEFAULT_RESULT.parent
+    try:
+        CLI_DEFAULT_RESULT.relative_to(BASE_OUTPUT_DIR)
+    except ValueError:
+        BASE_OUTPUT_DIR = CLI_DEFAULT_RESULT.parent.resolve()
+        st.session_state["result_base_dir"] = str(BASE_OUTPUT_DIR)
+
+
+def _has_result_files(path: Path) -> bool:
+    if not path.exists():
+        return False
+    for fname in ("report.parquet", "report.csv"):
+        if (path / fname).exists():
+            return True
+    return False
+
+
+def _looks_like_result_dir(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    if _has_result_files(path):
+        return True
+    if path.name.endswith("_결과"):
+        marker_files = {"images_summary.csv", "report.json", "summary.csv"}
+        for fname in marker_files:
+            if (path / fname).exists():
+                return True
+        marker_dirs = {"grouped", "artifacts", "blank_answers", "ok"}
+        try:
+            for child in path.iterdir():
+                if child.name in marker_dirs:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _discover_result_dirs(base_dir: Path, max_depth: int = 6) -> List[Path]:
+    candidates: List[Path] = []
+    base_dir = base_dir.resolve()
+
+    if _looks_like_result_dir(base_dir):
+        candidates.append(base_dir)
+
+    skip_names = {"grouped", "ok", "blank_answers", "artifacts", "thumbnails", "disp_cache"}
+
+    for current_root, dirnames, filenames in os.walk(base_dir):
+        cur_path = Path(current_root)
+        try:
+            depth = len(cur_path.relative_to(base_dir).parts)
+        except ValueError:
+            continue
+
+        if depth > max_depth:
+            dirnames[:] = []
+            continue
+
+        if cur_path != base_dir and _looks_like_result_dir(cur_path):
+            candidates.append(cur_path)
+            dirnames[:] = []
+            continue
+
+        dirnames[:] = [d for d in dirnames if d not in skip_names]
+
+    unique_candidates = []
+    seen = set()
+    for cand in sorted(candidates):
+        if str(cand) not in seen:
+            unique_candidates.append(cand)
+            seen.add(str(cand))
+
+    return unique_candidates
+
+
+RESULT_DIRS = _discover_result_dirs(BASE_OUTPUT_DIR)
+
+# ===== 페이지 설정 =====
+st.set_page_config(page_title="답안지 검수 대시보드", layout="wide")
+st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized)")
+
+if "selected_result_dir" in st.session_state and st.session_state["selected_result_dir"] not in [str(p) for p in RESULT_DIRS]:
+    st.session_state.pop("selected_result_dir", None)
+
+result_options = [str(p) for p in RESULT_DIRS]
+
+if CLI_DEFAULT_RESULT:
+    default_str = str(CLI_DEFAULT_RESULT)
+    if default_str in result_options and "selected_result_dir" not in st.session_state:
+        st.session_state["selected_result_dir"] = default_str
+
+def _format_result_option(path_str: str) -> str:
+    p = Path(path_str)
+    try:
+        rel = p.relative_to(BASE_OUTPUT_DIR)
+        label = str(rel) if rel.parts else str(p)
+    except ValueError:
+        label = str(p)
+    return label
+
+base_input = st.sidebar.text_input(
+    "검색 시작 경로",
+    value=str(BASE_OUTPUT_DIR),
+    key="result_base_input",
+)
+
+if st.sidebar.button("경로 적용", key="apply_base_dir"):
+    new_base = Path(base_input).expanduser()
+    st.session_state["result_base_dir"] = str(new_base)
+    st.cache_data.clear()
+    _request_rerun()
+
+if st.sidebar.button("기본 경로로 복원", key="reset_base_dir"):
+    st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+    st.cache_data.clear()
+    _request_rerun()
+
+if not result_options:
+    st.sidebar.warning("결과 폴더를 찾지 못했습니다. 좌측 입력에서 분석 루트를 지정한 뒤 다시 시도하세요.")
+    st.stop()
+
+selected_dir_str = st.sidebar.selectbox(
+    "분석 결과 폴더",
+    options=result_options,
+    format_func=_format_result_option,
+    key="selected_result_dir",
+)
+
+if st.sidebar.button("🔄 목록 새로고침", key="refresh_result_list"):
+    st.cache_data.clear()
+    _request_rerun()
+
+st.sidebar.caption(f"기본 경로: {BASE_OUTPUT_DIR}")
+st.sidebar.write(f"검색된 결과 폴더: {len(result_options)}개")
+st.sidebar.caption(f"현재 선택: {selected_dir_str}")
+
+OUTPUT_DIR = Path(selected_dir_str).resolve()
+REPORT_PARQUET = os.path.join(str(OUTPUT_DIR), "report.parquet")
+REPORT_CSV = os.path.join(str(OUTPUT_DIR), "report.csv")
+IMG_SUMMARY = os.path.join(str(OUTPUT_DIR), "images_summary.csv")
+THUMB_DIR = os.path.join(str(OUTPUT_DIR), "artifacts", "thumbnails")
 
 REPORT_BASE_COLUMNS = ["그룹ID", "상태", "파일1", "파일2", "유사도"]
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(os.path.dirname(THUMB_DIR), exist_ok=True)
-os.makedirs(THUMB_DIR, exist_ok=True)
-
-# ===== 페이지 설정 =====
-st.set_page_config(page_title="답안지 검수 대시보드", layout="wide")
-st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized)")
+if OUTPUT_DIR.exists():
+    os.makedirs(os.path.join(str(OUTPUT_DIR), "artifacts"), exist_ok=True)
+    os.makedirs(THUMB_DIR, exist_ok=True)
+    if not _has_result_files(OUTPUT_DIR):
+        st.warning("선택한 폴더에 report.csv / report.parquet 파일이 없습니다. 결과를 생성한 뒤 다시 확인하세요.")
+else:
+    st.warning("선택한 폴더가 존재하지 않습니다. 올바른 경로를 입력하세요.")
 
 # --- 메인 탭 상태 관리 ---
 if "main_tab" not in st.session_state:
@@ -263,7 +434,7 @@ def build_basename_map(root: str, cache_buster: float = 0) -> Dict[str, str]:
             best_pri[bn] = rank
     return best
 
-BASENAME_MAP = build_basename_map(OUTPUT_DIR)
+BASENAME_MAP = build_basename_map(str(OUTPUT_DIR))
 
 def resolve_image_path(name_or_path: str) -> Optional[str]:
     """
@@ -374,7 +545,7 @@ def compute_kpis(df: pd.DataFrame, img_df: pd.DataFrame) -> Dict[str, int]:
     except Exception:
         pass
 
-    # 공백 수: output/blank_answers 폴더에 있는 이미지 파일 수를 센다
+    # 공백 수: 선택된 결과 폴더의 blank_answers 폴더에 있는 이미지 개수
     try:
         blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
         blank_cnt = 0
@@ -983,7 +1154,7 @@ def refresh_image_caches():
     except AttributeError:
         pass
     try:
-        BASENAME_MAP = build_basename_map(OUTPUT_DIR, cache_buster=time.time())
+        BASENAME_MAP = build_basename_map(str(OUTPUT_DIR), cache_buster=time.time())
     except Exception as exc:
         logger.debug(f"BASENAME_MAP 갱신 실패: {exc}")
 
@@ -1426,13 +1597,7 @@ if st.session_state["main_tab"] == "재스캔 필요":
                 st.session_state.rescan_delete_mode = False
                 st.session_state.rescan_show_confirm = False
 
-                rerun_fn = getattr(st, "rerun", None)
-                if callable(rerun_fn):
-                    rerun_fn()
-                else:
-                    rerun_fn = getattr(st, "experimental_rerun", None)
-                    if callable(rerun_fn):
-                        rerun_fn()
+                _request_rerun()
 
         with confirm_cols[1]:
             if st.button("취소", key="rescan_delete_confirm_no"):
@@ -1922,17 +2087,7 @@ elif st.session_state["main_tab"] == "전체 보기":
         if st.button("더 보기"): 
             # 한 번에 60장씩 추가
             st.session_state.gallery_limit = min(total_items, st.session_state.gallery_limit + 60)
-            rerun_fn = getattr(st, 'experimental_rerun', None)
-            if callable(rerun_fn):
-                try:
-                    rerun_fn()
-                except Exception:
-                    logger.debug("experimental_rerun 실패: 더 보기에서 재실행 실패")
-            else:
-                try:
-                    st.stop()
-                except Exception:
-                    pass
+            _request_rerun()
 
     # 우선 비교 토글로 대체 — 모달형 미리보기 버튼 제거
 
