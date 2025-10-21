@@ -233,6 +233,10 @@ selected_dir_str = st.sidebar.selectbox(
     key="selected_result_dir",
 )
 
+prev_selected_dir = st.session_state.get("_last_selected_dir")
+dir_changed = prev_selected_dir is not None and prev_selected_dir != selected_dir_str
+st.session_state["_last_selected_dir"] = selected_dir_str
+
 if st.sidebar.button("🔄 목록 새로고침", key="refresh_result_list"):
     st.cache_data.clear()
     _request_rerun()
@@ -445,6 +449,14 @@ def build_basename_map(root: str, cache_buster: float = 0) -> Dict[str, str]:
             best[bn] = p
             best_pri[bn] = rank
     return best
+
+if dir_changed:
+    # 다른 결과 폴더로 전환 시 캐시와 선택 상태를 초기화해 전체 보기 탭이 즉시 반영되도록 보정
+    load_img_summary.clear()
+    list_all_images.clear()
+    build_basename_map.clear()
+    st.session_state.gallery_limit = 120
+    st.session_state.gallery_selected = []
 
 BASENAME_MAP = build_basename_map(str(OUTPUT_DIR))
 
