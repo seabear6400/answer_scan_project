@@ -58,13 +58,11 @@ def _extract_session_code(parts: Sequence[Path]) -> Optional[str]:
 
 
 def _extract_candidate_code(name: str) -> Optional[str]:
-    digits = re.findall(r"(\d+)", name)
-    if not digits:
+    matches = re.findall(r"(\d{3,})", name)
+    if not matches:
         return None
-    candidate = digits[-1]
-    if len(candidate) >= 3:
-        return candidate[-3:]
-    return candidate.zfill(3)
+    candidate = matches[-1]
+    return candidate[-3:]
 
 
 def _has_images(path: Path) -> bool:
