@@ -1,6 +1,6 @@
 paths:
   input_dir: "input_images"
-  output_dir: "output"
+  output_dir: null
 
 similarity:
   threshold: 0.90   # 유사도 0.9 이상이면 중복으로 판정

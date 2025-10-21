@@ -163,7 +163,7 @@ class DetectorConfig:
 
     # 공백(빈칸) 감지 (성능 최적화 + 정밀도 향상)
     blank_method: str = "sauvola"   # otsu/sauvola
-    blank_density_thresh: float = 0.02  # 개선된 노이즈 필터링과 함께 빈칸 탐지 안정성 향상
+    blank_density_thresh: float = 0.03  # 변경: 기본 임계값을 0.03으로 상향
     blank_border_trim: float = 0.02      # 공백 감지 시 가장자리 잘라내기 비율
     blank_min_component_ratio: float = 0.0008  # 노이즈 제거를 위한 최소 컴포넌트 비율
     blank_auto_tune: bool = True         # 데이터 기반 자동 임계값 조정
@@ -171,6 +171,8 @@ class DetectorConfig:
     blank_auto_min_samples: int = 6      # 자동 임계값 계산에 필요한 최소 샘플 수
     blank_auto_margin: float = 0.005     # 자동 임계값에 적용할 안전 완충값 (기본 0.5%)
     blank_auto_cap: float = 0.12         # 자동 임계값 상한
+    # 전역 아티팩트 경로
+    perf_model_dir: Optional[str] = None
     blank_binary_weight: float = 0.55    # 밀도 기반 점수 가중치
     blank_contrast_weight: float = 0.25  # 대비 기반 점수 가중치
     blank_edge_weight: float = 0.20      # 에지/텍스처 기반 점수 가중치
@@ -1912,9 +1914,13 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
 
     # 학습된 성능 모델이 있으면 불러와서 전체 시간을 보정 예측 시도
     try:
-        art_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "artifacts")
-        model_path = os.path.join(art_dir, "perf_model.pkl")
-        if os.path.exists(model_path):
+        perf_dir = os.environ.get("ANSWER_SCAN_PERF_MODEL_DIR") or getattr(cfg, "perf_model_dir", None)
+        if perf_dir:
+            art_dir = pathlib.Path(perf_dir).expanduser()
+        else:
+            art_dir = pathlib.Path(__file__).resolve().parent.parent / "artifacts"
+        model_path = art_dir / "perf_model.pkl"
+        if model_path.exists():
             try:
                 import joblib
                 mdl = joblib.load(model_path)

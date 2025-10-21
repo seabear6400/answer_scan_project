@@ -6,6 +6,8 @@ import stat
 import subprocess
 import threading
 import time
+import sys
+from pathlib import Path
 from typing import Optional, Tuple
 
 # OpenCV 로깅 레벨 설정 (경고 메시지 숨김)
@@ -33,12 +35,43 @@ def _warm_tk():
 _tk_thread = threading.Thread(target=_warm_tk, daemon=True)
 _tk_thread.start()
 
+
+def _print_run_summary(summary: Optional[dict]) -> None:
+    if not summary:
+        return
+    mode = summary.get("mode")
+    runs = int(summary.get("runs", 0))
+    scopes = summary.get("scopes", []) or []
+    if mode == "scoped" and runs:
+        print(f"📦 총 {runs}개의 응시 데이터를 처리했습니다.")
+        preview = scopes[: min(len(scopes), 6)]
+        for scope in preview:
+            try:
+                result_str = str(scope.result_path)
+                source_str = str(scope.source_dir)
+                print(f" - {result_str} ← {source_str}")
+            except Exception:
+                pass
+        if len(scopes) > len(preview):
+            remaining = len(scopes) - len(preview)
+            print(f"   … 외 {remaining}건")
+    elif mode == "single":
+        print("📦 단일 폴더 분석을 완료했습니다.")
+
+    issues = summary.get("issues", []) or []
+    if issues:
+        print("⚠️ 추가 확인이 필요한 항목:")
+        for issue in issues:
+            print(f" - {issue}")
+
+
 def parse_args():
+
     # PyInstaller로 빌드한 실행 파일이 멀티프로세싱을 사용할 때
     # '--multiprocessing-fork ...' 같은 내부 인자를 전달하는데,
     # 이를 무시하도록 parse_known_args를 사용합니다.
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
-    p.add_argument("--output_dir", default="output")
+    p.add_argument("--output_dir", default=None)
 
     # 백엔드
     p.add_argument("--embed_backend", choices=["resnet18", "dinov2"], default="dinov2")
@@ -114,45 +147,69 @@ def main():
     # 사용자가 폴더를 선택한 직후의 타임스탬프를 기록합니다.
     # (요구사항: "폴더 선택 시점 → 대시보드 준비 완료"의 실제 경과를 측정)
     selection_ts = time.time() if sel else None
-    # 안전한 초기화: output 하위의 기존 내용을 삭제(읽기전용 파일 처리)한 뒤 재생성합니다.
-    def _handle_remove_readonly(func, path, exc_info):
-        try:
-            os.chmod(path, stat.S_IWRITE)
-        except Exception:
-            pass
-        try:
-            func(path)
-        except Exception:
-            pass
-
-    for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        out_sub = os.path.join(args.output_dir, sub)
-        try:
-            if os.path.exists(out_sub):
-                shutil.rmtree(out_sub, onerror=_handle_remove_readonly)
-        except Exception:
-            # 삭제 실패 시 안전하게 넘어가고 기존 디렉터리를 덮어쓰지 않습니다.
-            pass
-        os.makedirs(out_sub, exist_ok=True)
-
-    # 무거운 detector pipeline은 폴더 선택 대화상자를 표시한 이후에 지연 임포트합니다.
-    print("🔍 탐지 시작...")
-    try:
-        # 패키지(python -m src.main)로 실행할 때는 상대 임포트가 작동합니다;
-        # 스크립트(python src/main.py)로 실행할 때는 절대 임포트가 필요할 수 있습니다.
-        # 먼저 상대 임포트를 시도하고 실패하면 절대 임포트로 대체합니다.
-        try:
-            from .detector_pipeline import detect_pipeline, DetectorConfig
-        except Exception:
-            from detector_pipeline import detect_pipeline, DetectorConfig
-    except Exception as e:
-        print(f"검사 도중 모듈을 불러오지 못했습니다: {e}")
-        return
 
     # sel은 디렉터리 경로 문자열입니다. 비어 있으면 중단합니다.
     if not sel:
         print("중단: 처리할 폴더가 선택되지 않았습니다.")
         return
+
+    # 무거운 detector pipeline은 폴더 선택 대화상자를 표시한 이후에 지연 임포트합니다.
+    print("🔍 탐지 시작...")
+    summary: Optional[dict] = None
+    default_result_path: Optional[str] = None
+
+    try:
+        # 패키지(python -m src.main)로 실행할 때는 상대 임포트가 작동합니다;
+        # 스크립트(python src/main.py)로 실행할 때는 절대 임포트가 필요할 수 있습니다.
+        # 먼저 상대 임포트를 시도하고 실패하면 절대 임포트로 대체합니다.
+        try:
+            from .detector_pipeline import DetectorConfig
+            from .scope_runner import discover_exam_scopes, run_scoped_pipeline
+        except Exception:
+            from detector_pipeline import DetectorConfig
+            from scope_runner import discover_exam_scopes, run_scoped_pipeline
+    except Exception as e:
+        print(f"검사 도중 모듈을 불러오지 못했습니다: {e}")
+        return
+
+    try:
+        pre_scopes, _pre_issues = discover_exam_scopes(sel)
+    except Exception:
+        pre_scopes, _pre_issues = [], []
+
+    multi_scope_mode = len(pre_scopes) > 0
+    sel_path = Path(sel).resolve()
+    if multi_scope_mode:
+        effective_output_dir = str(sel_path)
+    else:
+        if args.output_dir:
+            effective_output_dir = str(Path(args.output_dir).expanduser().resolve())
+        else:
+            if sel_path.name.endswith("_결과"):
+                effective_output_dir = str(sel_path)
+            else:
+                effective_output_dir = str(sel_path.with_name(f"{sel_path.name}_결과"))
+
+    if not multi_scope_mode:
+        def _handle_remove_readonly(func, path, exc_info):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+            except Exception:
+                pass
+            try:
+                func(path)
+            except Exception:
+                pass
+
+        for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
+            out_sub = os.path.join(effective_output_dir, sub)
+            try:
+                if os.path.exists(out_sub):
+                    shutil.rmtree(out_sub, onerror=_handle_remove_readonly)
+            except Exception:
+                # 삭제 실패 시 안전하게 넘어가고 기존 디렉터리를 덮어쓰지 않습니다.
+                pass
+            os.makedirs(out_sub, exist_ok=True)
 
     cfg = DetectorConfig(
         embed_backend=args.embed_backend,
@@ -180,7 +237,6 @@ def main():
         auto_optimize=not args.no_auto_optimize,  # 기본값은 True, --no_auto_optimize 플래그로 비활성화
     )
 
-    # progress callback: 콘솔에 단계/퍼센트/메시지를 출력 (진행바 + ETA 포함)
     _progress_state = {"start": time.time(), "stages": {}}
 
     # 진행 상황 표시 전략 선택
@@ -244,7 +300,10 @@ def main():
     except Exception as e:
         print(f"폴더 검사 중 예외: {e}")
 
-    if not detected:
+    if not detected and pre_scopes:
+        print(f"선택된 폴더에서 {len(pre_scopes)}개의 응시 데이터 폴더를 발견했습니다. 해당 폴더의 이미지를 분석합니다.")
+
+    if not detected and not pre_scopes:
         print("오류: 선택한 폴더에 지원 이미지 파일이 없습니다.")
         print(f"선택 폴더: {sel}")
         try:
@@ -409,10 +468,23 @@ def main():
                     pass
 
         # 파이프라인 스레드 시작 (토스트 창용 - 조용한 모드)
-        pipeline_thread = threading.Thread(
-            target=lambda: detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer_silent),
-            daemon=True
-        )
+        _run_summary = {}
+
+        def _worker():
+            try:
+                summary = run_scoped_pipeline(
+                    sel,
+                    effective_output_dir,
+                    config=cfg,
+                    recursive=args.recursive,
+                    progress_callback=progress_printer_silent,
+                )
+                _run_summary["summary"] = summary
+            except Exception as worker_exc:
+                _run_summary["error"] = worker_exc
+                raise
+
+        pipeline_thread = threading.Thread(target=_worker, daemon=True)
         pipeline_thread.start()
 
         # 토스트 창을 메인 스레드에서 실행 (blocking until closed)
@@ -425,15 +497,56 @@ def main():
             # 실패하면 블록킹 방식으로 대체 실행
             pipeline_thread.join()
             print("\n✅ 분석 완료!")
+
+        pipeline_thread.join()
+        if "error" in _run_summary:
+            raise _run_summary["error"]
+        summary = _run_summary.get("summary")
+        if summary:
+            _print_run_summary(summary)
     except Exception:
         # tkinter가 없거나 실패 시 기존 동기 호출로 폴백 (콘솔 출력 모드)
-        detect_pipeline(sel, args.output_dir, config=cfg, recursive=args.recursive, progress_callback=progress_printer_console)
+        summary = run_scoped_pipeline(
+            sel,
+            effective_output_dir,
+            config=cfg,
+            recursive=args.recursive,
+            progress_callback=progress_printer_console,
+        )
+        if summary:
+            _print_run_summary(summary)
         print("\n✅ 분석 완료!")
+
+    dashboard_output_dir = effective_output_dir
+    if summary:
+        paths = summary.get("result_paths") or []
+        if summary.get("mode") == "scoped":
+            if paths:
+                default_result_path = paths[0]
+        else:
+            if paths:
+                default_result_path = paths[0]
+    if default_result_path:
+        dashboard_output_dir = default_result_path
+    if not default_result_path and os.path.isdir(effective_output_dir):
+        default_result_path = effective_output_dir
+        dashboard_output_dir = effective_output_dir
 
     print("🌐 대시보드 실행 중...")
     # 사용자가 선택한 폴더를 대시보드에서 처리하도록 명령어를 구성합니다
-    cmd = ["python", "-m", "streamlit", "run", "src/dashboard.py", "--",
-           f"--output_dir={args.output_dir}"]
+    dashboard_py = os.path.join(os.path.dirname(__file__), "dashboard.py")
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        dashboard_py,
+        "--",
+        f"--output_dir={dashboard_output_dir}",
+        f"--base_dir={effective_output_dir}",
+    ]
+    if default_result_path:
+        cmd.append(f"--default_result={default_result_path}")
     # 기준 시점: 사용자가 폴더를 선택한 시점을 우선 사용, 없으면 지금부터 측정
     start_to_dashboard = selection_ts or time.time()
 
@@ -461,11 +574,29 @@ def main():
 
     try:
         if args.detach and os.name == 'nt':
-            # 윈도우에서 새 창으로 띄우는 경우
-            subprocess.Popen(["cmd", "/c", "start"] + cmd)
+            cmdline = [
+                "cmd",
+                "/c",
+                "start",
+                "",
+                sys.executable,
+                "-m",
+                "streamlit",
+                "run",
+                dashboard_py,
+                "--",
+                f"--output_dir={dashboard_output_dir}",
+                f"--base_dir={effective_output_dir}",
+            ]
+            if default_result_path:
+                cmdline.append(f"--default_result={default_result_path}")
+            subprocess.Popen(cmdline, cwd=os.path.dirname(os.path.dirname(__file__)))
             print(f"✅ 대시보드 시작됨 ({time.time() - start_to_dashboard:.1f}초)")
         else:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            cwd = os.path.dirname(os.path.dirname(__file__))
+            proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
             _wait_streamlit_ready_and_report(proc, timeout=90)
     except KeyboardInterrupt:
         print("\n❌ 사용자가 실행을 취소했습니다.")
