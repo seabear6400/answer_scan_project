@@ -518,19 +518,28 @@ def main():
         print("\n✅ 분석 완료!")
 
     dashboard_output_dir = effective_output_dir
+    dashboard_base_dir = str(sel_path if multi_scope_mode else Path(effective_output_dir).parent if Path(effective_output_dir).parent != Path(effective_output_dir) else Path(effective_output_dir))
     if summary:
         paths = summary.get("result_paths") or []
-        if summary.get("mode") == "scoped":
-            if paths:
-                default_result_path = paths[0]
-        else:
-            if paths:
-                default_result_path = paths[0]
-    if default_result_path:
-        dashboard_output_dir = default_result_path
+        if paths:
+            dashboard_output_dir = paths[0]
+            default_result_path = paths[0]
+            try:
+                common = Path(os.path.commonpath(paths)).resolve()
+                if common.name.endswith("_결과"):
+                    common = common.parent
+                dashboard_base_dir = str(common)
+            except Exception:
+                dashboard_base_dir = str(sel_path)
+        if not paths and summary.get("mode") != "scoped" and default_result_path:
+            dashboard_output_dir = default_result_path
     if not default_result_path and os.path.isdir(effective_output_dir):
         default_result_path = effective_output_dir
         dashboard_output_dir = effective_output_dir
+    if not dashboard_base_dir:
+        dashboard_base_dir = dashboard_output_dir if os.path.isdir(dashboard_output_dir) else effective_output_dir
+    if Path(dashboard_base_dir).name.endswith("_결과"):
+        dashboard_base_dir = str(Path(dashboard_base_dir).parent)
 
     print("🌐 대시보드 실행 중...")
     # 사용자가 선택한 폴더를 대시보드에서 처리하도록 명령어를 구성합니다
@@ -543,7 +552,7 @@ def main():
         dashboard_py,
         "--",
         f"--output_dir={dashboard_output_dir}",
-        f"--base_dir={effective_output_dir}",
+        f"--base_dir={dashboard_base_dir}",
     ]
     if default_result_path:
         cmd.append(f"--default_result={default_result_path}")
@@ -573,6 +582,14 @@ def main():
             return None
 
     try:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["ANSWER_SCAN_OUTPUT_DIR"] = str(dashboard_output_dir)
+        env["ANSWER_SCAN_BASE_DIR"] = str(dashboard_base_dir)
+        env["ANSWER_SCAN_SELECTION_ROOT"] = str(sel_path)
+        if default_result_path:
+            env["ANSWER_SCAN_DEFAULT_RESULT"] = str(default_result_path)
+
         if args.detach and os.name == 'nt':
             cmdline = [
                 "cmd",
@@ -586,15 +603,13 @@ def main():
                 dashboard_py,
                 "--",
                 f"--output_dir={dashboard_output_dir}",
-                f"--base_dir={effective_output_dir}",
+                f"--base_dir={dashboard_base_dir}",
             ]
             if default_result_path:
                 cmdline.append(f"--default_result={default_result_path}")
-            subprocess.Popen(cmdline, cwd=os.path.dirname(os.path.dirname(__file__)))
+            subprocess.Popen(cmdline, cwd=os.path.dirname(os.path.dirname(__file__)), env=env)
             print(f"✅ 대시보드 시작됨 ({time.time() - start_to_dashboard:.1f}초)")
         else:
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
             cwd = os.path.dirname(os.path.dirname(__file__))
             proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
             _wait_streamlit_ready_and_report(proc, timeout=90)
