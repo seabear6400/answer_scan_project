@@ -56,7 +56,11 @@ def parse_streamlit_args():
     try:
         ns, _ = p.parse_known_args(user_args)
     except SystemExit:
-        class X: output_dir = 'output'
+        class X:
+            output_dir = None
+            base_dir = None
+            default_result = None
+
         ns = X()
     return ns
 
@@ -75,10 +79,18 @@ def _request_rerun() -> None:
                 pass
 
 ns = parse_streamlit_args()
-CLI_OUTPUT_DIR = Path(ns.output_dir).expanduser().resolve() if ns.output_dir else Path.cwd()
-CLI_DEFAULT_RESULT = Path(ns.default_result).expanduser().resolve() if ns.default_result else None
-if ns.base_dir:
-    CLI_BASE_DIR = Path(ns.base_dir).expanduser().resolve()
+ENV_OUTPUT_DIR = os.environ.get("ANSWER_SCAN_OUTPUT_DIR")
+ENV_BASE_DIR = os.environ.get("ANSWER_SCAN_BASE_DIR")
+ENV_DEFAULT_RESULT = os.environ.get("ANSWER_SCAN_DEFAULT_RESULT")
+
+output_arg = ns.output_dir or ENV_OUTPUT_DIR
+default_arg = ns.default_result or ENV_DEFAULT_RESULT
+base_arg = ns.base_dir or ENV_BASE_DIR
+
+CLI_OUTPUT_DIR = Path(output_arg).expanduser().resolve() if output_arg else Path.cwd()
+CLI_DEFAULT_RESULT = Path(default_arg).expanduser().resolve() if default_arg else None
+if base_arg:
+    CLI_BASE_DIR = Path(base_arg).expanduser().resolve()
 elif CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
     CLI_BASE_DIR = CLI_DEFAULT_RESULT.parent.resolve()
 else:

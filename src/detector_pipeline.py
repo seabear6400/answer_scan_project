@@ -313,7 +313,8 @@ def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_inf
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
         roi_ratio=cfg.roi_ratio,
-        auto_optimize=cfg.auto_optimize
+        auto_optimize=cfg.auto_optimize,
+        perf_model_dir=cfg.perf_model_dir,
     )
     
     cpu_count = os.cpu_count() or 2
