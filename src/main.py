@@ -72,6 +72,7 @@ def _print_run_summary(summary: Optional[dict], duration: Optional[float]) -> No
         print(f"📦 총 {dataset_count}개의 {dataset_label} 분석을 완료했습니다.")
     else:
         print("📦 분석이 완료되었습니다.")
+    print(f"📊 처리 데이터 수: {dataset_count}개")
 
     if readable_duration:
         print(f"⏱️ 소요 시간: {readable_duration}")
@@ -237,16 +238,13 @@ def main():
             except Exception:
                 pass
 
-        for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-            out_sub = os.path.join(effective_output_dir, sub)
-            try:
-                if os.path.exists(out_sub):
-                    shutil.rmtree(out_sub, onerror=_handle_remove_readonly)
-            except Exception:
-                # 삭제 실패 시 안전하게 넘어가고 기존 디렉터리를 덮어쓰지 않습니다.
-                pass
-            if sub == "artifacts":
-                os.makedirs(out_sub, exist_ok=True)
+        artifacts_dir = os.path.join(effective_output_dir, "artifacts")
+        try:
+            if os.path.exists(artifacts_dir):
+                shutil.rmtree(artifacts_dir, onerror=_handle_remove_readonly)
+        except Exception:
+            pass
+        os.makedirs(artifacts_dir, exist_ok=True)
 
     cfg = DetectorConfig(
         embed_backend=args.embed_backend,

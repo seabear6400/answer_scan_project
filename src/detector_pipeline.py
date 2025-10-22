@@ -1425,19 +1425,7 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
     except Exception:
         logger.warning("images_summary 저장 실패")
 
-    # grouped 복사
-    for gid, members in groups.items():
-        gdir = os.path.join(output_dir, "grouped", gid)
-        for m in members:
-            src = path_map[m] if path_map is not None else os.path.join(input_dir or "", m)
-            _copy_to_dir(src, gdir)
-
-    okdir = os.path.join(output_dir, "ok")
-    bdir = os.path.join(output_dir, "blank_answers")
-    os.makedirs(okdir, exist_ok=True)
-    os.makedirs(bdir, exist_ok=True)
-
-    grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
+    # 더 이상 결과 디렉터리에 그룹/정상/공백 복사본을 생성하지 않습니다.
     # 디버그: 빈칸 판단 로그를 artifacts에 남김
     try:
         dbg_dir = os.path.join(output_dir, "artifacts")
@@ -1453,32 +1441,7 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
     except Exception:
         pass
 
-    for f in files:
-        src = path_map[f] if path_map is not None else os.path.join(input_dir or "", f)
-        name_wo_ext = os.path.splitext(f)[0]
-        # 변경: 일관성 있게 '<' 기준으로 판단
-        is_blank = bool(blank_flags.get(f, densities.get(f, 0.0) < blank_thresholds.get(f, cfg.blank_density_thresh)))
-
-        if path_map is None:
-            # detect_pipeline 동작: 기본적으로 blank는 blank_answers로, 단 파일명 끝이 '1'이면 ok로 재분류
-            if is_blank:
-                if name_wo_ext.endswith('1'):
-                    _copy_to_dir(src, okdir)
-                else:
-                    _copy_to_dir(src, bdir)
-            elif f not in grouped_set:
-                _copy_to_dir(src, okdir)
-        else:
-            # detect_pipeline_files 동작: blank는 '*2'로 끝나는 것만 bdir로 복사, '1'은 ok
-            if is_blank:
-                if name_wo_ext.endswith('2'):
-                    _copy_to_dir(src, bdir)
-                elif name_wo_ext.endswith('1'):
-                    _copy_to_dir(src, okdir)
-                else:
-                    pass
-            elif f not in grouped_set:
-                _copy_to_dir(src, okdir)
+    # 파일 복사는 생략하고 메타데이터/리포트만 저장합니다.
 
     # 아티팩트 저장
     try:
@@ -1519,12 +1482,11 @@ def detect_pipeline(input_dir: str, output_dir: str,
     if not ok:
         # 재시도에도 실패하면 명확한 에러를 던집니다.
         raise RuntimeError(f"Failed to initialize output dir: {output_dir}")
-    # 하위 폴더도 재생성
-    for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        subp = os.path.join(output_dir, sub)
-        if not _safe_recreate_dir(subp, retries=3, delay=0.2):
-            warnings.warn(f"하위 디렉터리(서브 디렉터리/하위 폴더) 생성이 실패했음 계속 진행 : {subp}")
-    if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=3, delay=0.2):
+    artifacts_dir = os.path.join(output_dir, "artifacts")
+    if not _safe_recreate_dir(artifacts_dir, retries=3, delay=0.2):
+        warnings.warn(f"아티팩트 디렉터리 생성이 실패했음 계속 진행 : {artifacts_dir}")
+    thumbs_dir = os.path.join(artifacts_dir, "thumbnails")
+    if not _safe_recreate_dir(thumbs_dir, retries=3, delay=0.2):
         warnings.warn("썸네일 디렉터리 생성에 실패했으나 계속 진행합니다.")
     _cb("init", 0.03, "하위 폴더 생성 완료")
 
@@ -2001,10 +1963,10 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     # Prepare output dirs (same behavior as detect_pipeline)
     if not _safe_recreate_dir(output_dir, retries=3, delay=0.2):
         raise RuntimeError(f"출력 디렉토리 준비 실패: {output_dir}")
-    for sub in ["grouped", "ok", "blank_answers", "artifacts"]:
-        if not _safe_recreate_dir(os.path.join(output_dir, sub), retries=2, delay=0.1):
-            logger.warning(f"하위 디렉토리 생성 실패에도 불구하고 진행합니다: {sub}")
-    if not _safe_recreate_dir(os.path.join(output_dir, "artifacts", "thumbnails"), retries=2, delay=0.1):
+    artifacts_dir = os.path.join(output_dir, "artifacts")
+    if not _safe_recreate_dir(artifacts_dir, retries=2, delay=0.1):
+        logger.warning(f"아티팩트 디렉토리 생성 실패에도 불구하고 진행합니다: {artifacts_dir}")
+    if not _safe_recreate_dir(os.path.join(artifacts_dir, "thumbnails"), retries=2, delay=0.1):
         logger.warning("썸네일 디렉토리 생성 실패; 계속 진행합니다")
 
     # 파일: 파일 이름(basenames) 리스트 (보고서에 사용됨)와 '파일 이름 → 전체 경로' 매핑 정보.
