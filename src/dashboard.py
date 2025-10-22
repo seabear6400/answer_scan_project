@@ -338,6 +338,14 @@ REPORT_BASE_COLUMNS = ["그룹ID", "상태", "파일1", "파일2", "유사도"]
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
+
+def _is_back_page(filename: str) -> bool:
+    try:
+        stem = os.path.splitext(os.path.basename(str(filename)))[0]
+    except Exception:
+        return False
+    return stem.endswith("2")
+
 if OUTPUT_DIR.exists():
     os.makedirs(os.path.join(str(OUTPUT_DIR), "artifacts"), exist_ok=True)
     os.makedirs(THUMB_DIR, exist_ok=True)
@@ -697,14 +705,27 @@ def compute_kpis(df: pd.DataFrame, img_df: pd.DataFrame) -> Dict[str, int]:
     except Exception:
         pass
 
-    # 공백 수: 이미지 요약 또는 리포트에서 파생
+    # 공백 수: 이미지 요약 또는 리포트에서 파생 (뒷장 파일 기준)
     try:
         if isinstance(img_df, pd.DataFrame) and '빈칸여부' in img_df.columns:
-            blanks = img_df['빈칸여부'].astype(bool).sum()
-            kpis["공백 수"] = int(blanks)
+            blanks_mask = img_df['빈칸여부'].astype(bool)
+            if '파일' in img_df.columns:
+                file_series = img_df.loc[blanks_mask, '파일'].astype(str)
+                filtered = [name for name in file_series if _is_back_page(name)]
+                kpis["공백 수"] = len(filtered)
+            else:
+                kpis["공백 수"] = int(blanks_mask.sum())
         elif isinstance(df, pd.DataFrame) and '상태' in df.columns:
-            blanks = df['상태'].astype(str).str.contains('공백', na=False)
-            kpis["공백 수"] = int(blanks.sum())
+            blanks_mask = df['상태'].astype(str).str.contains('공백', na=False)
+            if blanks_mask.any():
+                names: List[str] = []
+                for col in ("파일1", "파일2"):
+                    if col in df.columns:
+                        names.extend(df.loc[blanks_mask, col].astype(str).tolist())
+                filtered = {name for name in names if _is_back_page(name)}
+                kpis["공백 수"] = len(filtered)
+            else:
+                kpis["공백 수"] = 0
     except Exception:
         pass
 
@@ -916,8 +937,43 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     except Exception:
         pass
 
-theme_tab, rescan_tab, ok_tab, gallery_tab = st.sidebar.tabs(["테마", "재스캔 필요", "정상/공백 답안", "전체 보기"])
+path_tab, theme_tab, rescan_tab, ok_tab, gallery_tab = st.sidebar.tabs(["분석 경로", "테마", "재스캔 필요", "정상/공백 답안", "전체 보기"])
 quality_options_common = ["빠름", "균형", "선명"]
+
+with path_tab:
+    st.markdown("**분석 경로 설정**")
+    base_input = st.text_input(
+        "검색 시작 경로",
+        value=str(BASE_OUTPUT_DIR),
+        key="result_base_input",
+    )
+
+    path_cols = st.columns(3)
+    with path_cols[0]:
+        if st.button("경로 적용", key="apply_base_dir"):
+            new_base = Path(base_input).expanduser()
+            normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
+            st.session_state["result_base_dir"] = str(normalized_base)
+            st.session_state.pop("selected_result_dir", None)
+            st.cache_data.clear()
+            _request_rerun()
+    with path_cols[1]:
+        if st.button("기본 경로로 복원", key="reset_base_dir"):
+            st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+            st.session_state.pop("selected_result_dir", None)
+            st.cache_data.clear()
+            _request_rerun()
+    with path_cols[2]:
+        if st.button("🔄 목록 새로고침", key="refresh_result_list"):
+            st.cache_data.clear()
+            _request_rerun()
+
+    st.selectbox(
+        "분석 결과 폴더",
+        options=result_options,
+        format_func=_format_result_option,
+        key="selected_result_dir",
+    )
 
 with theme_tab:
     st.markdown("**대시보드 테마**")
@@ -942,43 +998,6 @@ with theme_tab:
     swatch_html += '</div>'
     st.markdown(swatch_html, unsafe_allow_html=True)
     st.write(THEMES[sel].get('desc',''))
-
-    st.markdown("---")
-    st.markdown("**분석 경로 설정**")
-    base_input = st.text_input(
-        "검색 시작 경로",
-        value=str(BASE_OUTPUT_DIR),
-        key="result_base_input",
-    )
-
-    path_cols = st.columns(2)
-    with path_cols[0]:
-        if st.button("경로 적용", key="apply_base_dir"):
-            new_base = Path(base_input).expanduser()
-            normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
-            st.session_state["result_base_dir"] = str(normalized_base)
-            st.cache_data.clear()
-            _request_rerun()
-    with path_cols[1]:
-        if st.button("기본 경로로 복원", key="reset_base_dir"):
-            st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
-            st.cache_data.clear()
-            _request_rerun()
-
-    selected_dir_str = st.selectbox(
-        "분석 결과 폴더",
-        options=result_options,
-        format_func=_format_result_option,
-        key="selected_result_dir",
-    )
-
-    if st.button("🔄 목록 새로고침", key="refresh_result_list"):
-        st.cache_data.clear()
-        _request_rerun()
-
-    st.caption(f"기본 경로: {BASE_OUTPUT_DIR}")
-    st.write(f"검색된 결과 폴더: {len(result_options)}개")
-    st.caption(f"현재 선택: {selected_dir_str}")
 
 with rescan_tab:
     st.markdown("**재스캔 워크플로**")
@@ -2318,13 +2337,13 @@ elif st.session_state["main_tab"] == "정상/공백 답안":
 
         if sel in ["모두 보기", "공백만"] and os.path.isdir(blank_dir):
             st.subheader("⭕ 공백 답안")
-            files = [f for f in sorted(os.listdir(blank_dir)) if is_2file(f)]
-            cols = st.columns(grid_cols)
-            for idx, f in enumerate(files):
-                img_path = os.path.join(blank_dir, f)
-                disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
-                with cols[idx % grid_cols]:
-                    st.image(_safe_image_open(disp), caption=f, use_container_width=True)
+            files = [f for f in sorted(os.listdir(blank_dir)) if is_2file(f) and _is_back_page(f)]
+            if not files:
+                st.caption("표시할 항목이 없습니다.")
+            else:
+                st.caption(f"총 {len(files)}건")
+                for name in files:
+                    st.write(name)
     else:
         def _render_from_summary(title: str, mask: pd.Series) -> None:
             subset = img_df[mask] if isinstance(img_df, pd.DataFrame) else pd.DataFrame()
@@ -2332,18 +2351,13 @@ elif st.session_state["main_tab"] == "정상/공백 답안":
             if subset.empty or "파일" not in subset.columns:
                 st.caption("표시할 이미지가 없습니다.")
                 return
-            files = [f for f in subset["파일"].astype(str).tolist() if is_2file(f)]
+            files = [f for f in subset["파일"].astype(str).tolist() if is_2file(f) and _is_back_page(f)]
             if not files:
-                st.caption("표시할 이미지가 없습니다.")
+                st.caption("표시할 항목이 없습니다.")
                 return
-            cols = st.columns(grid_cols)
-            for idx, f in enumerate(files):
-                img_path = resolve_image_path(f)
-                if not img_path or not os.path.exists(img_path):
-                    continue
-                disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
-                with cols[idx % grid_cols]:
-                    st.image(_safe_image_open(disp), caption=f, use_container_width=True)
+            st.caption(f"총 {len(files)}건")
+            for name in files:
+                st.write(name)
 
         if sel in ["모두 보기", "정상만"]:
             if "빈칸여부" in img_df.columns:
