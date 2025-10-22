@@ -182,6 +182,58 @@ def _discover_result_dirs(base_dir: Path, max_depth: int = 6) -> List[Path]:
 
 RESULT_DIRS = _discover_result_dirs(BASE_OUTPUT_DIR)
 
+
+def _result_dir_has_rescan(path: Path) -> bool:
+    targets = {"유사 후보", "중복/그룹"}
+    parquet = path / "report.parquet"
+    if parquet.exists():
+        try:
+            lf = pl.scan_parquet(str(parquet)).filter(pl.col("상태").is_in(list(targets))).limit(1)
+            if lf.collect(streaming=True).height > 0:
+                return True
+        except Exception:
+            pass
+    csv_path = path / "report.csv"
+    if csv_path.exists():
+        try:
+            for chunk in pd.read_csv(csv_path, usecols=["상태"], chunksize=2000):
+                if chunk["상태"].isin(targets).any():
+                    return True
+        except Exception:
+            pass
+    grouped = path / "grouped"
+    try:
+        if grouped.exists():
+            for root, _dirs, files in os.walk(grouped):
+                if files:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _build_result_meta(paths: List[Path]) -> Dict[str, Dict[str, bool]]:
+    meta: Dict[str, Dict[str, bool]] = {}
+    for path in paths:
+        raw = str(path)
+        try:
+            resolved = str(path.resolve())
+        except Exception:
+            resolved = str(path)
+        has_report = _has_result_files(path)
+        needs_rescan = _result_dir_has_rescan(path) if has_report else False
+        entry = {
+            "has_report": has_report,
+            "needs_rescan": needs_rescan,
+        }
+        meta[raw] = entry
+        if resolved != raw:
+            meta[resolved] = entry
+    return meta
+
+
+RESULT_META = _build_result_meta(RESULT_DIRS)
+
 # ===== 페이지 설정 =====
 st.set_page_config(page_title="답안지 검수 대시보드", layout="wide")
 st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized)")
@@ -196,6 +248,10 @@ if CLI_DEFAULT_RESULT:
     if default_str in result_options and "selected_result_dir" not in st.session_state:
         st.session_state["selected_result_dir"] = default_str
 
+if "selected_result_dir" not in st.session_state and result_options:
+    preferred = next((opt for opt in result_options if RESULT_META.get(opt, {}).get("has_report")), None)
+    st.session_state["selected_result_dir"] = preferred or result_options[0]
+
 def _format_result_option(path_str: str) -> str:
     p = Path(path_str)
     try:
@@ -203,7 +259,13 @@ def _format_result_option(path_str: str) -> str:
         label = str(rel) if rel.parts else str(p)
     except ValueError:
         label = str(p)
-    return label
+    meta = RESULT_META.get(path_str, {})
+    prefix = ""
+    if meta.get("needs_rescan"):
+        prefix = "[재스캔] "
+    elif not meta.get("has_report"):
+        prefix = "[결과 대기] "
+    return f"{prefix}{label}" if prefix else label
 
 if not result_options:
     st.sidebar.warning("결과 폴더를 찾지 못했습니다. 좌측 입력에서 분석 루트를 지정한 뒤 다시 시도하세요.")
@@ -717,6 +779,33 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         background-color: {accent} !important;
         color: white !important;
         font-weight: 500 !important;
+    }}
+
+    /* 재스캔 필요 옵션 강조 표현: BaseWeb aria-label을 활용해 매칭합니다. */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"] {{
+        color: #d62839 !important;
+        font-weight: 600 !important;
+        background-color: rgba(214,40,57,0.08) !important;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"][aria-label^="[재스캔]"] {{
+        background-color: rgba(214,40,57,0.14) !important;
+        color: #d62839 !important;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"]::before {{
+        content: "⚠ ";
+        font-weight: 700;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"] {{
+        color: #d62839 !important;
+        font-weight: 600 !important;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"]::before {{
+        content: "⚠ ";
+        margin-right: 4px;
     }}
     </style>
     """
