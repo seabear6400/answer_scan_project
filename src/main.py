@@ -319,6 +319,187 @@ def main():
 
     # 파이프라인을 백그라운드 스레드에서 실행하고,
     # 메인(UI) 스레드에서는 토스트 창을 띄워 진행을 보여줍니다.
+    start_to_dashboard = selection_ts or time.time()
+
+    _run_summary: dict = {}
+    first_scope_event = threading.Event()
+    first_scope_info: dict = {}
+    dashboard_lock = threading.Lock()
+    dashboard_state = {"started": False, "proc": None}
+
+    def _wait_streamlit_ready_and_report(proc, timeout: int = 90):
+        ready_patterns = ("Local URL:", "Network URL:", "You can now view your Streamlit app", "Running on")
+        t0 = time.time()
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if any(p in line for p in ready_patterns):
+                    elapsed = time.time() - start_to_dashboard
+                    print(f"\n✅ 대시보드 준비 완료! ({elapsed:.1f}초)")
+                    return elapsed
+                if time.time() - t0 > timeout:
+                    print(f"⚠️ 대시보드 시작 대기 시간 초과 ({timeout}s)")
+                    return None
+        except Exception as e:
+            print(f"대시보드 모니터링 오류: {e}")
+            return None
+
+    def _maybe_launch_dashboard(
+        trigger: str,
+        output_dir: Optional[str],
+        base_dir: Optional[str],
+        default_result: Optional[str],
+    ) -> None:
+        if not output_dir:
+            return
+
+        try:
+            resolved_output = str(Path(output_dir).resolve())
+        except Exception:
+            resolved_output = str(output_dir)
+
+        resolved_base = base_dir
+        if not resolved_base:
+            if multi_scope_mode:
+                resolved_base = str(sel_path)
+            else:
+                base_candidate = Path(effective_output_dir)
+                parent_candidate = base_candidate.parent if base_candidate.parent != base_candidate else base_candidate
+                resolved_base = str(parent_candidate)
+        try:
+            resolved_base = str(Path(resolved_base).resolve())
+        except Exception:
+            resolved_base = str(resolved_base)
+
+        resolved_default = default_result or resolved_output
+
+        dashboard_py = os.path.join(os.path.dirname(__file__), "dashboard.py")
+        cmd = [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            dashboard_py,
+            "--",
+            f"--output_dir={resolved_output}",
+            f"--base_dir={resolved_base}",
+        ]
+        if resolved_default:
+            cmd.append(f"--default_result={resolved_default}")
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["ANSWER_SCAN_OUTPUT_DIR"] = resolved_output
+        env["ANSWER_SCAN_BASE_DIR"] = resolved_base
+        env["ANSWER_SCAN_SELECTION_ROOT"] = str(sel_path)
+        if resolved_default:
+            env["ANSWER_SCAN_DEFAULT_RESULT"] = resolved_default
+
+        if args.detach and os.name == 'nt':
+            with dashboard_lock:
+                if dashboard_state["started"]:
+                    return
+                cmdline = [
+                    "cmd",
+                    "/c",
+                    "start",
+                    "",
+                    sys.executable,
+                    "-m",
+                    "streamlit",
+                    "run",
+                    dashboard_py,
+                    "--",
+                    f"--output_dir={resolved_output}",
+                    f"--base_dir={resolved_base}",
+                ]
+                if resolved_default:
+                    cmdline.append(f"--default_result={resolved_default}")
+                subprocess.Popen(
+                    cmdline,
+                    cwd=os.path.dirname(os.path.dirname(__file__)),
+                    env=env,
+                )
+                dashboard_state["started"] = True
+            elapsed = time.time() - start_to_dashboard
+            print(f"🌐 대시보드 실행 중... ({trigger})")
+            print(f"✅ 대시보드 시작됨 ({elapsed:.1f}초)")
+            return
+
+        with dashboard_lock:
+            if dashboard_state["started"]:
+                return
+            print(f"🌐 대시보드 실행 중... ({trigger})")
+            cwd = os.path.dirname(os.path.dirname(__file__))
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                )
+            except Exception as launch_exc:
+                print(f"❌ 대시보드 실행 오류: {launch_exc}")
+                return
+            dashboard_state["started"] = True
+            dashboard_state["proc"] = proc
+
+        proc = dashboard_state.get("proc")
+        if proc is not None:
+            _wait_streamlit_ready_and_report(proc, timeout=90)
+
+    def _scope_complete(scope, index, total, destination):
+        if first_scope_event.is_set():
+            return
+        try:
+            resolved_destination = str(Path(destination).resolve())
+        except Exception:
+            resolved_destination = str(destination)
+        base_dir_path = scope.source_dir.parent
+        if base_dir_path.name.endswith("_결과"):
+            base_dir_path = base_dir_path.parent
+        try:
+            base_dir_resolved = str(base_dir_path.resolve())
+        except Exception:
+            base_dir_resolved = str(base_dir_path)
+        first_scope_info["output_dir"] = resolved_destination
+        first_scope_info["default_result"] = resolved_destination
+        first_scope_info["base_dir"] = base_dir_resolved
+        first_scope_event.set()
+
+    def _worker():
+        try:
+            summary = run_scoped_pipeline(
+                sel,
+                effective_output_dir,
+                config=cfg,
+                recursive=args.recursive,
+                progress_callback=progress_printer_silent,
+                scope_complete_callback=_scope_complete,
+            )
+            _run_summary["summary"] = summary
+        except Exception as worker_exc:
+            _run_summary["error"] = worker_exc
+            raise
+
+    def _dashboard_waiter():
+        first_scope_event.wait()
+        info = first_scope_info.copy()
+        output_dir = info.get("output_dir")
+        if not output_dir:
+            return
+        base_dir = info.get("base_dir")
+        default_result = info.get("default_result") or output_dir
+        _maybe_launch_dashboard("first-scope", output_dir, base_dir, default_result)
+
+    threading.Thread(target=_dashboard_waiter, daemon=True).start()
+
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -468,22 +649,6 @@ def main():
                     pass
 
         # 파이프라인 스레드 시작 (토스트 창용 - 조용한 모드)
-        _run_summary = {}
-
-        def _worker():
-            try:
-                summary = run_scoped_pipeline(
-                    sel,
-                    effective_output_dir,
-                    config=cfg,
-                    recursive=args.recursive,
-                    progress_callback=progress_printer_silent,
-                )
-                _run_summary["summary"] = summary
-            except Exception as worker_exc:
-                _run_summary["error"] = worker_exc
-                raise
-
         pipeline_thread = threading.Thread(target=_worker, daemon=True)
         pipeline_thread.start()
 
@@ -501,9 +666,6 @@ def main():
         pipeline_thread.join()
         if "error" in _run_summary:
             raise _run_summary["error"]
-        summary = _run_summary.get("summary")
-        if summary:
-            _print_run_summary(summary)
     except Exception:
         # tkinter가 없거나 실패 시 기존 동기 호출로 폴백 (콘솔 출력 모드)
         summary = run_scoped_pipeline(
@@ -512,10 +674,14 @@ def main():
             config=cfg,
             recursive=args.recursive,
             progress_callback=progress_printer_console,
+            scope_complete_callback=_scope_complete,
         )
-        if summary:
-            _print_run_summary(summary)
+        _run_summary["summary"] = summary
         print("\n✅ 분석 완료!")
+
+    summary = _run_summary.get("summary")
+    if summary:
+        _print_run_summary(summary)
 
     dashboard_output_dir = effective_output_dir
     dashboard_base_dir = str(sel_path if multi_scope_mode else Path(effective_output_dir).parent if Path(effective_output_dir).parent != Path(effective_output_dir) else Path(effective_output_dir))
@@ -541,82 +707,14 @@ def main():
     if Path(dashboard_base_dir).name.endswith("_결과"):
         dashboard_base_dir = str(Path(dashboard_base_dir).parent)
 
-    print("🌐 대시보드 실행 중...")
-    # 사용자가 선택한 폴더를 대시보드에서 처리하도록 명령어를 구성합니다
-    dashboard_py = os.path.join(os.path.dirname(__file__), "dashboard.py")
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        dashboard_py,
-        "--",
-        f"--output_dir={dashboard_output_dir}",
-        f"--base_dir={dashboard_base_dir}",
-    ]
-    if default_result_path:
-        cmd.append(f"--default_result={default_result_path}")
-    # 기준 시점: 사용자가 폴더를 선택한 시점을 우선 사용, 없으면 지금부터 측정
-    start_to_dashboard = selection_ts or time.time()
+    if not first_scope_info.get("output_dir") and default_result_path:
+        first_scope_info["output_dir"] = dashboard_output_dir
+        first_scope_info["default_result"] = default_result_path
+        first_scope_info["base_dir"] = dashboard_base_dir
 
-    def _wait_streamlit_ready_and_report(proc, timeout: int = 90):
-        ready_patterns = ("Local URL:", "Network URL:", "You can now view your Streamlit app", "Running on")
-        t0 = time.time()
-        try:
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    break
-                line = line.strip()
-                # Streamlit 출력은 너무 많으므로 숨김
-                # print(f"[streamlit] {line}")  # 간소화
-                if any(p in line for p in ready_patterns):
-                    elapsed = time.time() - start_to_dashboard
-                    print(f"\n✅ 대시보드 준비 완료! ({elapsed:.1f}초)")
-                    return elapsed
-                if time.time() - t0 > timeout:
-                    print(f"⚠️ 대시보드 시작 대기 시간 초과 ({timeout}s)")
-                    return None
-        except Exception as e:
-            print(f"대시보드 모니터링 오류: {e}")
-            return None
-
-    try:
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        env["ANSWER_SCAN_OUTPUT_DIR"] = str(dashboard_output_dir)
-        env["ANSWER_SCAN_BASE_DIR"] = str(dashboard_base_dir)
-        env["ANSWER_SCAN_SELECTION_ROOT"] = str(sel_path)
-        if default_result_path:
-            env["ANSWER_SCAN_DEFAULT_RESULT"] = str(default_result_path)
-
-        if args.detach and os.name == 'nt':
-            cmdline = [
-                "cmd",
-                "/c",
-                "start",
-                "",
-                sys.executable,
-                "-m",
-                "streamlit",
-                "run",
-                dashboard_py,
-                "--",
-                f"--output_dir={dashboard_output_dir}",
-                f"--base_dir={dashboard_base_dir}",
-            ]
-            if default_result_path:
-                cmdline.append(f"--default_result={default_result_path}")
-            subprocess.Popen(cmdline, cwd=os.path.dirname(os.path.dirname(__file__)), env=env)
-            print(f"✅ 대시보드 시작됨 ({time.time() - start_to_dashboard:.1f}초)")
-        else:
-            cwd = os.path.dirname(os.path.dirname(__file__))
-            proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
-            _wait_streamlit_ready_and_report(proc, timeout=90)
-    except KeyboardInterrupt:
-        print("\n❌ 사용자가 실행을 취소했습니다.")
-    except Exception as e:
-        print(f"❌ 대시보드 실행 오류: {e}")
+    _maybe_launch_dashboard("summary", dashboard_output_dir, dashboard_base_dir, default_result_path)
+    if not first_scope_event.is_set():
+        first_scope_event.set()
 
 if __name__ == "__main__":
     # Windows(PyInstaller) 멀티프로세싱 호환: 내부 포크 인자 처리

@@ -205,45 +205,17 @@ def _format_result_option(path_str: str) -> str:
         label = str(p)
     return label
 
-base_input = st.sidebar.text_input(
-    "검색 시작 경로",
-    value=str(BASE_OUTPUT_DIR),
-    key="result_base_input",
-)
-
-if st.sidebar.button("경로 적용", key="apply_base_dir"):
-    new_base = Path(base_input).expanduser()
-    st.session_state["result_base_dir"] = str(new_base)
-    st.cache_data.clear()
-    _request_rerun()
-
-if st.sidebar.button("기본 경로로 복원", key="reset_base_dir"):
-    st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
-    st.cache_data.clear()
-    _request_rerun()
-
 if not result_options:
     st.sidebar.warning("결과 폴더를 찾지 못했습니다. 좌측 입력에서 분석 루트를 지정한 뒤 다시 시도하세요.")
     st.stop()
 
-selected_dir_str = st.sidebar.selectbox(
-    "분석 결과 폴더",
-    options=result_options,
-    format_func=_format_result_option,
-    key="selected_result_dir",
-)
+if "selected_result_dir" not in st.session_state:
+    st.session_state["selected_result_dir"] = result_options[0]
 
+selected_dir_str = st.session_state.get("selected_result_dir", result_options[0])
 prev_selected_dir = st.session_state.get("_last_selected_dir")
 dir_changed = prev_selected_dir is not None and prev_selected_dir != selected_dir_str
 st.session_state["_last_selected_dir"] = selected_dir_str
-
-if st.sidebar.button("🔄 목록 새로고침", key="refresh_result_list"):
-    st.cache_data.clear()
-    _request_rerun()
-
-st.sidebar.caption(f"기본 경로: {BASE_OUTPUT_DIR}")
-st.sidebar.write(f"검색된 결과 폴더: {len(result_options)}개")
-st.sidebar.caption(f"현재 선택: {selected_dir_str}")
 
 OUTPUT_DIR = Path(selected_dir_str).resolve()
 REPORT_PARQUET = os.path.join(str(OUTPUT_DIR), "report.parquet")
@@ -779,6 +751,42 @@ with theme_tab:
     swatch_html += '</div>'
     st.markdown(swatch_html, unsafe_allow_html=True)
     st.write(THEMES[sel].get('desc',''))
+
+    st.markdown("---")
+    st.markdown("**분석 경로 설정**")
+    base_input = st.text_input(
+        "검색 시작 경로",
+        value=str(BASE_OUTPUT_DIR),
+        key="result_base_input",
+    )
+
+    path_cols = st.columns(2)
+    with path_cols[0]:
+        if st.button("경로 적용", key="apply_base_dir"):
+            new_base = Path(base_input).expanduser()
+            st.session_state["result_base_dir"] = str(new_base)
+            st.cache_data.clear()
+            _request_rerun()
+    with path_cols[1]:
+        if st.button("기본 경로로 복원", key="reset_base_dir"):
+            st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+            st.cache_data.clear()
+            _request_rerun()
+
+    selected_dir_str = st.selectbox(
+        "분석 결과 폴더",
+        options=result_options,
+        format_func=_format_result_option,
+        key="selected_result_dir",
+    )
+
+    if st.button("🔄 목록 새로고침", key="refresh_result_list"):
+        st.cache_data.clear()
+        _request_rerun()
+
+    st.caption(f"기본 경로: {BASE_OUTPUT_DIR}")
+    st.write(f"검색된 결과 폴더: {len(result_options)}개")
+    st.caption(f"현재 선택: {selected_dir_str}")
 
 with rescan_tab:
     st.markdown("**재스캔 워크플로**")
