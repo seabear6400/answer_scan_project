@@ -36,27 +36,45 @@ _tk_thread = threading.Thread(target=_warm_tk, daemon=True)
 _tk_thread.start()
 
 
-def _print_run_summary(summary: Optional[dict]) -> None:
+def _format_duration(seconds: Optional[float]) -> Optional[str]:
+    if seconds is None:
+        return None
+    try:
+        total = int(round(max(0.0, seconds)))
+    except Exception:
+        return None
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}시간")
+    if minutes or hours:
+        parts.append(f"{minutes}분")
+    parts.append(f"{secs}초")
+    return " ".join(parts)
+
+
+def _print_run_summary(summary: Optional[dict], duration: Optional[float]) -> None:
+    readable_duration = _format_duration(duration)
     if not summary:
+        if readable_duration:
+            print(f"⏱️ 소요 시간: {readable_duration}")
         return
+
     mode = summary.get("mode")
     runs = int(summary.get("runs", 0))
-    scopes = summary.get("scopes", []) or []
-    if mode == "scoped" and runs:
-        print(f"📦 총 {runs}개의 응시 데이터를 처리했습니다.")
-        preview = scopes[: min(len(scopes), 6)]
-        for scope in preview:
-            try:
-                result_str = str(scope.result_path)
-                source_str = str(scope.source_dir)
-                print(f" - {result_str} ← {source_str}")
-            except Exception:
-                pass
-        if len(scopes) > len(preview):
-            remaining = len(scopes) - len(preview)
-            print(f"   … 외 {remaining}건")
-    elif mode == "single":
-        print("📦 단일 폴더 분석을 완료했습니다.")
+    result_paths = summary.get("result_paths") or []
+    total_scopes = len(summary.get("scopes") or [])
+    dataset_label = "응시 데이터" if mode == "scoped" else "폴더"
+    dataset_count = len(result_paths) or runs or total_scopes or (1 if mode == "single" else 0)
+
+    if dataset_count:
+        print(f"📦 총 {dataset_count}개의 {dataset_label} 분석을 완료했습니다.")
+    else:
+        print("📦 분석이 완료되었습니다.")
+
+    if readable_duration:
+        print(f"⏱️ 소요 시간: {readable_duration}")
 
     issues = summary.get("issues", []) or []
     if issues:
@@ -227,7 +245,8 @@ def main():
             except Exception:
                 # 삭제 실패 시 안전하게 넘어가고 기존 디렉터리를 덮어쓰지 않습니다.
                 pass
-            os.makedirs(out_sub, exist_ok=True)
+            if sub == "artifacts":
+                os.makedirs(out_sub, exist_ok=True)
 
     cfg = DetectorConfig(
         embed_backend=args.embed_backend,
@@ -469,15 +488,11 @@ def main():
                     env=env,
                 )
                 dashboard_state["started"] = True
-            elapsed = time.time() - start_to_dashboard
-            print(f"🌐 대시보드 실행 중... ({trigger})")
-            print(f"✅ 대시보드 시작됨 ({elapsed:.1f}초)")
             return
 
         with dashboard_lock:
             if dashboard_state["started"]:
                 return
-            print(f"🌐 대시보드 실행 중... ({trigger})")
             cwd = os.path.dirname(os.path.dirname(__file__))
             try:
                 proc = subprocess.Popen(
@@ -538,6 +553,9 @@ def main():
         _maybe_launch_dashboard("first-scope", output_dir, base_dir, default_result)
 
     threading.Thread(target=_dashboard_waiter, daemon=True).start()
+
+    analysis_start = time.time()
+    analysis_duration: Optional[float] = None
 
     try:
         import tkinter as tk
@@ -703,6 +721,7 @@ def main():
             print("\n✅ 분석 완료!")
 
         pipeline_thread.join()
+        analysis_duration = time.time() - analysis_start
         if "error" in _run_summary:
             raise _run_summary["error"]
     except Exception:
@@ -716,11 +735,14 @@ def main():
             scope_complete_callback=_scope_complete,
         )
         _run_summary["summary"] = summary
+        analysis_duration = time.time() - analysis_start
         print("\n✅ 분석 완료!")
 
     summary = _run_summary.get("summary")
     if summary:
-        _print_run_summary(summary)
+        _print_run_summary(summary, analysis_duration)
+    elif analysis_duration is not None:
+        _print_run_summary(None, analysis_duration)
 
     dashboard_output_dir = effective_output_dir
     base_candidate = sel_path if multi_scope_mode else (Path(effective_output_dir).parent if Path(effective_output_dir).parent != Path(effective_output_dir) else Path(effective_output_dir))
