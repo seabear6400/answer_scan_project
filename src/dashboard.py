@@ -955,12 +955,16 @@ with path_tab:
             normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
             st.session_state["result_base_dir"] = str(normalized_base)
             st.session_state.pop("selected_result_dir", None)
+            # mark CLI base to the applied base so subsequent init honors it
+            st.session_state["_cli_base_marker"] = str(normalized_base)
             st.cache_data.clear()
             _request_rerun()
     with path_cols[1]:
-        if st.button("기본 경로로 복원", key="reset_base_dir"):
+        if st.button("기본 경로 복원", key="reset_base_dir"):
             st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
             st.session_state.pop("selected_result_dir", None)
+            # ensure marker matches CLI default so init logic won't override
+            st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
             st.cache_data.clear()
             _request_rerun()
     with path_cols[2]:
@@ -2234,85 +2238,85 @@ if st.session_state["main_tab"] == "재스캔 필요":
 
     else:
         group_rows = pd.DataFrame()
+        groups = []
         if report_available and isinstance(df, pd.DataFrame):
             required_cols = {"그룹ID", "파일1", "파일2"}
             if required_cols.issubset(df.columns):
                 group_rows = df[df["그룹ID"].astype(str).str.strip().ne("-")]
+                # 그룹 목록은 리포트의 그룹ID 고유값으로 생성
+                try:
+                    groups = sorted(group_rows["그룹ID"].astype(str).unique().tolist())
+                except Exception:
+                    groups = []
 
-        if group_rows.empty:
-            st.info("그룹 결과 폴더가 없습니다. 하지만 리포트 데이터를 기준으로 재스캔 후보를 확인할 수 있습니다.")
+            # 사이드바에서 선택한 그룹으로 필터링
+            if group_filter != "전체":
+                groups = [g for g in groups if g == group_filter]
+
+        if not groups:
+            st.info("표시할 재스캔 후보 그룹이 없습니다.")
         else:
-            groups = sorted(group_rows["그룹ID"].dropna().astype(str).unique())
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                st.metric("그룹 수", len(groups))
-            with col2:
-                st.write("리포트 기반으로 그룹을 표시합니다. 실제 출력 폴더에는 별도 복사본이 생성되지 않습니다.")
+            for gid in groups:
+                rows = group_rows[group_rows["그룹ID"].astype(str) == gid]
+                if rows.empty:
+                    continue
+                st.markdown(f"### 그룹 {gid}")
+                file_candidates = set()
+                for _, row in rows.iterrows():
+                    for col in ("파일1", "파일2"):
+                        val = row.get(col)
+                        if isinstance(val, str) and val:
+                            file_candidates.add(val)
 
-            if not groups:
-                st.info("표시할 재스캔 후보 그룹이 없습니다.")
-            else:
-                for gid in groups:
-                    rows = group_rows[group_rows["그룹ID"].astype(str) == gid]
-                    if rows.empty:
+                files = [f for f in sorted(file_candidates) if is_2file(f)]
+                if not files:
+                    st.caption("표시 가능한 이미지가 없습니다.")
+                    continue
+
+                cols = st.columns(4)
+                if "rescan_selected" not in st.session_state:
+                    st.session_state["rescan_selected"] = []
+
+                for idx, f in enumerate(files):
+                    back_path = resolve_image_path(f)
+                    if not back_path or not os.path.exists(back_path):
                         continue
-                    st.markdown(f"### 그룹 {gid}")
-                    file_candidates = set()
-                    for _, row in rows.iterrows():
-                        for col in ("파일1", "파일2"):
-                            val = row.get(col)
-                            if isinstance(val, str) and val:
-                                file_candidates.add(val)
-
-                    files = [f for f in sorted(file_candidates) if is_2file(f)]
-                    if not files:
-                        st.caption("표시 가능한 이미지가 없습니다.")
-                        continue
-
-                    cols = st.columns(4)
-                    if "rescan_selected" not in st.session_state:
-                        st.session_state["rescan_selected"] = []
-
-                    for idx, f in enumerate(files):
-                        back_path = resolve_image_path(f)
-                        if not back_path or not os.path.exists(back_path):
+                    front_name = corresponding_front_filename(f)
+                    front_path_candidate = resolve_image_path(front_name) or front_name
+                    items = [
+                        ("앞면", front_name, front_path_candidate),
+                        ("뒷면", f, back_path),
+                    ]
+                    for item_idx, (kind, name, pth) in enumerate(items):
+                        if not pth or not os.path.exists(pth):
                             continue
-                        front_name = corresponding_front_filename(f)
-                        front_path_candidate = resolve_image_path(front_name) or front_name
-                        items = [
-                            ("앞면", front_name, front_path_candidate),
-                            ("뒷면", f, back_path),
-                        ]
-                        for item_idx, (kind, name, pth) in enumerate(items):
-                            if not pth or not os.path.exists(pth):
-                                continue
-                            with cols[(idx * len(items) + item_idx) % 4]:
-                                if st.session_state.get("rescan_delete_mode", False):
-                                    render_rescan_image_card(
-                                        pth,
-                                        f"{kind}: {name}",
-                                        f"{gid}_{idx}_{item_idx}",
-                                        rescan_thumb_px,
-                                        rescan_disp_quality,
-                                        card_height=220,
-                                    )
-                                else:
-                                    selected = pth in st.session_state.get("gallery_selected", [])
-                                    label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                                    if st.button(label, key=f"cmp_rescan_{gid}_{idx}_{item_idx}"):
-                                        toggle_compare(pth)
-                                        st.rerun()
-                                    disp = make_display_image(
-                                        pth,
-                                        size=rescan_thumb_px,
-                                        fmt=disp_fmt,
-                                        quality=rescan_disp_quality,
-                                    )
-                                    st.image(
-                                        _safe_image_open(disp),
-                                        caption=f"{kind}: {name}",
-                                        use_container_width=True,
-                                    )
+                        with cols[(idx * len(items) + item_idx) % 4]:
+                            if st.session_state.get("rescan_delete_mode", False):
+                                render_rescan_image_card(
+                                    pth,
+                                    f"{kind}: {name}",
+                                    f"{gid}_{idx}_{item_idx}",
+                                    rescan_thumb_px,
+                                    rescan_disp_quality,
+                                    card_height=220,
+                                )
+                            else:
+                                selected = pth in st.session_state.get("gallery_selected", [])
+                                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
+                                if st.button(label, key=f"cmp_rescan_{gid}_{idx}_{item_idx}"):
+                                    toggle_compare(pth)
+                                    st.rerun()
+                                disp = make_display_image(
+                                    pth,
+                                    size=rescan_thumb_px,
+                                    fmt=disp_fmt,
+                                    quality=rescan_disp_quality,
+                                )
+                                st.image(
+                                    _safe_image_open(disp),
+                                    caption=f"{kind}: {name}",
+                                    use_container_width=True,
+                                )
 
 
 # === Tab: 정상/공백 ===
@@ -2341,9 +2345,14 @@ elif st.session_state["main_tab"] == "정상/공백 답안":
             if not files:
                 st.caption("표시할 항목이 없습니다.")
             else:
-                st.caption(f"총 {len(files)}건")
-                for name in files:
-                    st.write(name)
+                cols = st.columns(grid_cols)
+                for idx, f in enumerate(files):
+                    img_path = os.path.join(blank_dir, f)
+                    if not os.path.exists(img_path):
+                        continue
+                    disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
+                    with cols[idx % grid_cols]:
+                        st.image(_safe_image_open(disp), caption=f, use_container_width=True)
     else:
         def _render_from_summary(title: str, mask: pd.Series) -> None:
             subset = img_df[mask] if isinstance(img_df, pd.DataFrame) else pd.DataFrame()
@@ -2355,9 +2364,14 @@ elif st.session_state["main_tab"] == "정상/공백 답안":
             if not files:
                 st.caption("표시할 항목이 없습니다.")
                 return
-            st.caption(f"총 {len(files)}건")
-            for name in files:
-                st.write(name)
+            cols = st.columns(grid_cols)
+            for idx, f in enumerate(files):
+                img_path = resolve_image_path(f)
+                if not img_path or not os.path.exists(img_path):
+                    continue
+                disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
+                with cols[idx % grid_cols]:
+                    st.image(_safe_image_open(disp), caption=f, use_container_width=True)
 
         if sel in ["모두 보기", "정상만"]:
             if "빈칸여부" in img_df.columns:
