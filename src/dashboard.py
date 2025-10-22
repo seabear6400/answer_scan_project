@@ -998,6 +998,8 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         padding: 10px 12px !important;
         font-size: 14px !important;
     }}
+
+    /* 닫힌 상태 표시 박스 스타일은 기본으로 유지합니다. (사용자 요청: 하단은 회색 적용 안 함) */
     
     /* select 드롭다운 화살표 스타일링 */
     [data-testid="stSidebar"] .stSelectbox svg {{
@@ -1060,6 +1062,130 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         content: "⚠ ";
         margin-right: 4px;
     }}
+
+    /* 드롭다운 목록에서 '선택된 옵션'을 더 시각적으로 강조합니다. */
+    /* 선택된 옵션은 파란색 대신 회색 배경으로 고정하여 '선택 중'을 표시합니다. */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"] {{
+        /* 목록 내부에서 선택된 항목을 더 진한 회색으로 표시 */
+        background-color: rgba(0,0,0,0.12) !important; /* 약간 더 진한 회색 */
+        color: {sidebar_text} !important; /* 진한 텍스트 */
+        font-weight: 700 !important;
+        border-radius: 0 0 6px 6px !important;
+        position: relative !important;
+    }}
+
+    /* 다양한 구현에서 선택 상태를 나타내는 속성에 모두 대응하여 회색 강조를 강제합니다. */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
+        position: relative !important;
+        overflow: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+    }}
+
+    /* 선택 상태에 대한 공통 규칙(목록 내부에서만 적용) */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-current="true"] {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+    }}
+
+    /* 선택된 항목은 목록에서 상단에 고정(sticky)되도록 함: 이미지2 스타일과 유사하게 보이게 함 */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"] {{
+        position: -webkit-sticky !important;
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 10 !important;
+        margin-top: 0 !important;
+    }}
+
+    /* hover가 선택 스타일을 덮어쓰지 않도록 유지 */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"]:hover {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+    }}
+
+    /* ===== 포털(overlay)로 렌더되는 BaseWeb/Select의 드롭다운을 직접 타깃합니다. =====
+       Streamlit은 드롭다운을 sidebar 바깥(포털)으로 렌더할 수 있어 기존 사이드바 내부 선택자로 매칭되지 않을 수 있습니다.
+       아래 규칙은 포털 내부의 listbox/option에 대해 동일한 강조(회색 배경, 진한 텍스트, sticky)를 강제합니다. */
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"],
+    .baseweb-portal [role="listbox"] [role="option"][data-selected="true"],
+    body > [role="listbox"] [role="option"][aria-selected="true"] {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 9999 !important;
+    }}
+
+    /* 포털 내 선택된 옵션이 hover에 의해 덮어쓰이지 않도록 함 */
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"]:hover {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+    }}
+
+    /* ------------------------------------------------------------------
+       Streamlit이 생성하는 emotion 클래스(예: st-emotion-cache-xxxxx etx0m6x1)
+       를 직접 타깃해 내부 텍스트 컨테이너에도 회색 배경/패딩을 강제합니다.
+       - 사이드바 내부 렌더링과 포털(overlay) 렌더링을 모두 커버합니다.
+       - 특정 동적 클래스명이 바뀔 수 있으므로, etx-prefixed 클래스도 함께 지정합니다.
+    ------------------------------------------------------------------ */
+    /* 사이드바 내부 listbox */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
+        background-color: rgba(0,0,0,0.12) !important;
+        display: block !important;
+        padding: 8px 12px !important;
+        margin: -8px -12px !important; /* 옵션 컨테이너 패딩과 겹치지 않게 보정 */
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        border-radius: 4px !important;
+    }}
+
+    /* 포털(overlay)로 렌더된 listbox */
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1,
+    body > [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    body > [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
+        background-color: rgba(0,0,0,0.12) !important;
+        display: block !important;
+        padding: 8px 12px !important;
+        margin: -8px -12px !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        border-radius: 4px !important;
+    }}
+
+    /* 선택된 옵션에 체크 표시를 추가해 사용자가 어떤 항목이 선택됐는지 바로 알 수 있도록 함 */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::after {{
+        content: "✔";
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: {sidebar_text} !important; /* 회색 배경에 어울리는 진한 색상 */
+        font-weight: 700;
+    }}
+
+    /* 선택된 옵션 왼쪽에 컬러 바 추가하여 '현재 선택'을 시각적으로 강조 */
+    /* 왼쪽 컬러 바는 회색 톤으로 변경하여 전체가 회색 강조로 보이도록 함 */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::before {{
+        content: "";
+        position: absolute;
+        left: 6px;
+        top: 8px;
+        bottom: 8px;
+        width: 4px;
+        background: rgba(0,0,0,0.25) !important; /* 진한 회색 바 */
+        border-radius: 2px;
+    }}
+
+    /* 옵션 텍스트가 왼쪽 컬러 바와 겹치지 않도록 패딩 보정 */
+    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
+        padding-left: 18px !important;
+    }}
     </style>
     """
     try:
@@ -1072,35 +1198,56 @@ quality_options_common = ["빠름", "균형", "선명"]
 
 with path_tab:
     st.markdown("**분석 경로 설정**")
+    # 텍스트 입력의 표시값은 현재의 result_base_dir을 사용합니다.
+    # 버튼으로 기본 경로를 적용/복원하면 st.session_state['result_base_dir']이 변경되고
+    # _request_rerun()로 재실행될 때 이 입력의 값이 갱신되어 보이게 됩니다.
     base_input = st.text_input(
         "검색 시작 경로",
-        value=str(BASE_OUTPUT_DIR),
+        value=st.session_state.get("result_base_dir", str(BASE_OUTPUT_DIR)),
         key="result_base_input",
     )
 
-    path_cols = st.columns(3)
-    with path_cols[0]:
-        if st.button("경로 적용", key="apply_base_dir"):
-            new_base = Path(base_input).expanduser()
+    # 안전하게 세션 상태를 변경하기 위한 콜백 함수들
+    def _apply_base_dir_cb():
+        raw = st.session_state.get("result_base_input", "")
+        try:
+            new_base = Path(raw).expanduser()
             normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
             st.session_state["result_base_dir"] = str(normalized_base)
             st.session_state.pop("selected_result_dir", None)
-            # mark CLI base to the applied base so subsequent init honors it
             st.session_state["_cli_base_marker"] = str(normalized_base)
+        except Exception:
+            # 실패 시 기존 동작 유지
+            pass
+        # 콜백 내부에서는 st.rerun()이 no-op일 수 있으므로 여기서는 명시적 재실행을 호출하지 않습니다.
+        # 세션 상태를 변경하면 Streamlit이 콜백 종료 후 자동으로 스크립트를 재실행합니다.
+        try:
             st.cache_data.clear()
-            _request_rerun()
-    with path_cols[1]:
-        if st.button("기본 경로 복원", key="reset_base_dir"):
+        except Exception:
+            pass
+
+    def _reset_base_dir_cb():
+        # CLI 기본값으로 복원: 마커과 result_base_dir만 갱신합니다.
+        try:
             st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
             st.session_state.pop("selected_result_dir", None)
-            # ensure marker matches CLI default so init logic won't override
             st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
+            # 텍스트 입력도 같은 값을 반영하도록 설정
+            st.session_state["result_base_input"] = str(CLI_BASE_DIR)
+        except Exception:
+            pass
+        # 콜백 내부에서 강제 rerun을 호출하지 않음: 세션 상태 변경으로 자동 재실행됩니다.
+        try:
             st.cache_data.clear()
-            _request_rerun()
-    with path_cols[2]:
-        if st.button("🔄 목록 새로고침", key="refresh_result_list"):
-            st.cache_data.clear()
-            _request_rerun()
+        except Exception:
+            pass
+
+    path_cols = st.columns(3)
+    with path_cols[0]:
+        st.button("경로 적용", key="apply_base_dir", on_click=_apply_base_dir_cb)
+    with path_cols[1]:
+        st.button("기본 경로 복원", key="reset_base_dir", on_click=_reset_base_dir_cb)
+    # (목록 새로고침 버튼 제거됨)
 
     st.selectbox(
         "분석 결과 폴더",
@@ -2588,9 +2735,21 @@ elif st.session_state["main_tab"] == "전체 보기":
             disp = make_display_image(path, size=target_px_eff, fmt=disp_fmt_eff, quality=disp_quality_eff)
 
         with cols[idx % grid_cols_local]:
-            # 이미지
+            # 이미지 (클릭하면 비교 선택 토글)
             img_name = os.path.basename(path)
-            st.image(_safe_image_open(disp), caption=img_name, use_container_width=True)
+            try:
+                st.image(
+                    _safe_image_open(disp),
+                    caption=img_name,
+                    use_container_width=True,
+                    key=f"gallery_img_{idx}",
+                    on_click=on_image_click,
+                    args=(path,),
+                )
+            except Exception:
+                # 일부 streamlit 버전에서는 st.image가 on_click을 지원하지 않을 수 있으므로
+                # 실패하면 폴백으로 클릭 없는 이미지를 표시합니다.
+                st.image(_safe_image_open(disp), caption=img_name, use_container_width=True)
 
     # ---------- 더 보기 버튼 ----------
     if st.session_state.gallery_limit < total_items:
