@@ -65,6 +65,24 @@ def _print_run_summary(summary: Optional[dict]) -> None:
             print(f" - {issue}")
 
 
+def _result_dir_has_payload(path: Path) -> bool:
+    markers = ("report.parquet", "report.csv", "images_summary.csv")
+    for marker in markers:
+        try:
+            if (path / marker).exists():
+                return True
+        except Exception:
+            continue
+    try:
+        grouped = path / "grouped"
+        if grouped.exists():
+            for _child in grouped.iterdir():
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def parse_args():
 
     # PyInstaller로 빌드한 실행 파일이 멀티프로세싱을 사용할 때
@@ -686,18 +704,25 @@ def main():
     dashboard_output_dir = effective_output_dir
     dashboard_base_dir = str(sel_path if multi_scope_mode else Path(effective_output_dir).parent if Path(effective_output_dir).parent != Path(effective_output_dir) else Path(effective_output_dir))
     if summary:
-        paths = summary.get("result_paths") or []
+        raw_paths = summary.get("result_paths") or []
+        paths = [Path(p).resolve() for p in raw_paths]
+        usable_paths = [p for p in paths if _result_dir_has_payload(p)]
+        if usable_paths:
+            dashboard_output_dir = str(usable_paths[0])
+            default_result_path = str(usable_paths[0])
+        elif paths:
+            dashboard_output_dir = str(paths[0])
+            default_result_path = str(paths[0])
+            print("ℹ️ 결과 폴더가 생성되었지만 주요 리포트 파일이 보이지 않습니다. 대시보드에서 확인 후 적절한 폴더를 선택하세요.")
         if paths:
-            dashboard_output_dir = paths[0]
-            default_result_path = paths[0]
             try:
-                common = Path(os.path.commonpath(paths)).resolve()
+                common = Path(os.path.commonpath([str(p) for p in paths])).resolve()
                 if common.name.endswith("_결과"):
                     common = common.parent
                 dashboard_base_dir = str(common)
             except Exception:
                 dashboard_base_dir = str(sel_path)
-        if not paths and summary.get("mode") != "scoped" and default_result_path:
+        if not raw_paths and summary.get("mode") != "scoped" and default_result_path:
             dashboard_output_dir = default_result_path
     if not default_result_path and os.path.isdir(effective_output_dir):
         default_result_path = effective_output_dir
