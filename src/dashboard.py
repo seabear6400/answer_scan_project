@@ -576,6 +576,8 @@ def build_basename_map(root: str, cache_buster: float = 0) -> Dict[str, str]:
             best_pri[bn] = rank
     return best
 
+SEARCH_CACHE: Dict[str, Optional[str]] = {}
+
 if dir_changed:
     # 다른 결과 폴더로 전환 시 캐시와 선택 상태를 초기화해 전체 보기 탭이 즉시 반영되도록 보정
     load_img_summary.clear()
@@ -583,8 +585,83 @@ if dir_changed:
     build_basename_map.clear()
     st.session_state.gallery_limit = 120
     st.session_state.gallery_selected = []
+    SEARCH_CACHE.clear()
 
 BASENAME_MAP = build_basename_map(str(OUTPUT_DIR))
+
+
+def _candidate_roots() -> List[str]:
+    """이미지를 탐색할 후보 루트 디렉터리를 우선순위 순으로 반환합니다."""
+    raw: List[Optional[Path]] = [
+        OUTPUT_DIR,
+        BASE_OUTPUT_DIR,
+        CLI_BASE_DIR,
+        CLI_OUTPUT_DIR,
+    ]
+    if SELECTION_ROOT is not None:
+        raw.append(SELECTION_ROOT)
+    try:
+        parent = OUTPUT_DIR.parent
+        if parent != OUTPUT_DIR:
+            raw.append(parent)
+    except Exception:
+        pass
+
+    roots: List[str] = []
+    seen: set[str] = set()
+    for cand in raw:
+        if cand is None:
+            continue
+        try:
+            cand_str = str(cand)
+        except Exception:
+            continue
+        try:
+            abs_path = os.path.abspath(cand_str)
+        except Exception:
+            continue
+        if abs_path in seen:
+            continue
+        if os.path.isdir(abs_path):
+            seen.add(abs_path)
+            roots.append(abs_path)
+    return roots
+
+
+def _normalize_lookup_key(value: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    normalized = re.sub(r"/+", "/", normalized)
+    return f"{OUTPUT_DIR}|{normalized.lower()}"
+
+
+def _search_basename_in_root(root: str, bn_lower: str, max_depth: int = 6) -> Optional[str]:
+    if not bn_lower:
+        return None
+    try:
+        root_path = Path(root)
+    except Exception:
+        return None
+    if not root_path.exists():
+        return None
+
+    skip_dirs = {"disp_cache", "__pycache__", ".git", ".venv"}
+    try:
+        for current_root, dirnames, filenames in os.walk(root):
+            try:
+                depth = len(Path(current_root).relative_to(root_path).parts)
+            except Exception:
+                depth = 0
+            if depth > max_depth:
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            for fname in filenames:
+                if fname.lower() == bn_lower:
+                    return os.path.normpath(os.path.join(current_root, fname))
+    except Exception as exc:
+        logger.debug(f"베이스네임 검색 실패: {root} / {bn_lower}: {exc}")
+    return None
+
 
 def resolve_image_path(name_or_path: str) -> Optional[str]:
     """
@@ -593,23 +670,76 @@ def resolve_image_path(name_or_path: str) -> Optional[str]:
     """
     if not name_or_path:
         return None
-    if os.path.isfile(name_or_path):
-        return name_or_path
-    rel = os.path.join(OUTPUT_DIR, name_or_path)
-    if os.path.isfile(rel):
-        return rel
-    bn = os.path.basename(name_or_path).lower()
-    resolved = BASENAME_MAP.get(bn)
-    if resolved:
-        return resolved
+    raw = name_or_path.strip()
+    if not raw:
+        return None
+
+    def _cache_and_return(cache_key: str, value: Optional[str]) -> Optional[str]:
+        SEARCH_CACHE[cache_key] = value
+        return value
+
+    candidate_roots: Optional[List[str]] = None
+
+    def _roots() -> List[str]:
+        nonlocal candidate_roots
+        if candidate_roots is None:
+            candidate_roots = _candidate_roots()
+        return candidate_roots
+
+    # 직접 경로 우선 검사
     try:
-        input_map = load_input_basename_map()
-        candidates = input_map.get(bn, [])
-        if candidates:
-            return candidates[0]
+        expanded = os.path.expanduser(raw)
     except Exception:
-        pass
-    return None
+        expanded = raw
+    if os.path.isfile(expanded):
+        normed = os.path.normpath(expanded)
+        return _cache_and_return(_normalize_lookup_key(raw), normed)
+
+    rel = os.path.normpath(os.path.join(str(OUTPUT_DIR), raw))
+    if os.path.isfile(rel):
+        return _cache_and_return(_normalize_lookup_key(raw), rel)
+
+    cache_key = _normalize_lookup_key(raw)
+    if cache_key in SEARCH_CACHE:
+        return SEARCH_CACHE[cache_key]
+
+    bn = os.path.basename(raw).lower()
+
+    if bn:
+        mapped = BASENAME_MAP.get(bn)
+        if mapped and os.path.isfile(mapped):
+            return _cache_and_return(cache_key, mapped)
+
+    # 상대 경로를 각 후보 루트와 결합해 확인
+    if not os.path.isabs(raw):
+        sanitized = raw.lstrip("./\\")
+        for root in _roots():
+            joined = os.path.normpath(os.path.join(root, sanitized))
+            if os.path.isfile(joined):
+                return _cache_and_return(cache_key, joined)
+
+    if bn:
+        try:
+            input_map = load_input_basename_map()
+            for cand in input_map.get(bn, []):
+                if os.path.isfile(cand):
+                    return _cache_and_return(cache_key, os.path.normpath(cand))
+        except Exception:
+            pass
+
+        for root in _roots():
+            root_key = f"root::{root}|{bn}"
+            if root_key in SEARCH_CACHE:
+                cached = SEARCH_CACHE[root_key]
+                if cached:
+                    return _cache_and_return(cache_key, cached)
+                continue
+            found = _search_basename_in_root(root, bn)
+            SEARCH_CACHE[root_key] = found
+            if found:
+                return _cache_and_return(cache_key, found)
+
+    return _cache_and_return(cache_key, None)
 
 
 # ===== 번호/앞뒷장 유틸 =====
@@ -1399,6 +1529,10 @@ def refresh_image_caches():
     try:
         build_basename_map.clear()
     except AttributeError:
+        pass
+    try:
+        SEARCH_CACHE.clear()
+    except Exception:
         pass
     try:
         BASENAME_MAP = build_basename_map(str(OUTPUT_DIR), cache_buster=time.time())
