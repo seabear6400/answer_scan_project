@@ -1,4 +1,5 @@
 import argparse
+import csv
 import logging
 import os
 import shutil
@@ -54,6 +55,61 @@ def _format_duration(seconds: Optional[float]) -> Optional[str]:
     return " ".join(parts)
 
 
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+
+
+def _count_csv_rows(csv_path: Path) -> Optional[int]:
+    for enc in ("utf-8-sig", "utf-8", "cp949"):
+        try:
+            with csv_path.open("r", encoding=enc, newline="") as fh:
+                reader = csv.reader(fh)
+                next(reader, None)
+                return sum(1 for _ in reader)
+        except FileNotFoundError:
+            return None
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            break
+    return None
+
+
+def _count_image_files(root: Path) -> Optional[int]:
+    if not root.exists():
+        return None
+    total = 0
+    try:
+        for current_root, _dirs, files in os.walk(root):
+            for fname in files:
+                if fname.lower().endswith(IMAGE_EXTS):
+                    total += 1
+    except Exception:
+        return None
+    return total
+
+
+def _total_processed_items(result_paths) -> Optional[int]:
+    if not result_paths:
+        return None
+    total = 0
+    any_found = False
+    for raw in result_paths:
+        if not raw:
+            continue
+        summary_path = Path(raw) / "images_summary.csv"
+        if summary_path.exists():
+            count = _count_csv_rows(summary_path)
+            if count is not None:
+                total += count
+                any_found = True
+                continue
+        fallback = _count_image_files(Path(raw))
+        if fallback is not None:
+            total += fallback
+            any_found = True
+    return total if any_found else None
+
+
 def _print_run_summary(summary: Optional[dict], duration: Optional[float]) -> None:
     readable_duration = _format_duration(duration)
     if not summary:
@@ -72,7 +128,11 @@ def _print_run_summary(summary: Optional[dict], duration: Optional[float]) -> No
         print(f"📦 총 {dataset_count}개의 {dataset_label} 분석을 완료했습니다.")
     else:
         print("📦 분석이 완료되었습니다.")
-    print(f"📊 처리 데이터 수: {dataset_count}개")
+    processed_total = _total_processed_items(result_paths)
+    if processed_total is not None:
+        print(f"📊 처리 데이터 수: {processed_total}개")
+    else:
+        print(f"📊 처리 데이터 수: {dataset_count}개")
 
     if readable_duration:
         print(f"⏱️ 소요 시간: {readable_duration}")
