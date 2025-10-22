@@ -365,6 +365,31 @@ def main():
             print(f"대시보드 모니터링 오류: {e}")
             return None
 
+    def _resolve_top_level_base(raw_base: Optional[str]) -> str:
+        try:
+            selection_root = sel_path.resolve()
+        except Exception:
+            selection_root = sel_path
+        if not raw_base:
+            return str(selection_root)
+        try:
+            base_path = Path(raw_base).resolve()
+        except Exception:
+            base_path = Path(raw_base)
+        try:
+            base_path.relative_to(selection_root)
+            return str(selection_root)
+        except Exception:
+            pass
+        while base_path.name.endswith("_결과") and base_path.parent != base_path:
+            base_path = base_path.parent
+            try:
+                base_path.relative_to(selection_root)
+                return str(selection_root)
+            except Exception:
+                continue
+        return str(base_path)
+
     def _maybe_launch_dashboard(
         trigger: str,
         output_dir: Optional[str],
@@ -391,6 +416,8 @@ def main():
             resolved_base = str(Path(resolved_base).resolve())
         except Exception:
             resolved_base = str(resolved_base)
+
+        resolved_base = _resolve_top_level_base(resolved_base)
 
         resolved_default = default_result or resolved_output
 
@@ -479,13 +506,7 @@ def main():
             resolved_destination = str(Path(destination).resolve())
         except Exception:
             resolved_destination = str(destination)
-        base_dir_path = scope.source_dir.parent
-        if base_dir_path.name.endswith("_결과"):
-            base_dir_path = base_dir_path.parent
-        try:
-            base_dir_resolved = str(base_dir_path.resolve())
-        except Exception:
-            base_dir_resolved = str(base_dir_path)
+        base_dir_resolved = _resolve_top_level_base(str(scope.source_dir.parent))
         first_scope_info["output_dir"] = resolved_destination
         first_scope_info["default_result"] = resolved_destination
         first_scope_info["base_dir"] = base_dir_resolved
@@ -702,7 +723,8 @@ def main():
         _print_run_summary(summary)
 
     dashboard_output_dir = effective_output_dir
-    dashboard_base_dir = str(sel_path if multi_scope_mode else Path(effective_output_dir).parent if Path(effective_output_dir).parent != Path(effective_output_dir) else Path(effective_output_dir))
+    base_candidate = sel_path if multi_scope_mode else (Path(effective_output_dir).parent if Path(effective_output_dir).parent != Path(effective_output_dir) else Path(effective_output_dir))
+    dashboard_base_dir = _resolve_top_level_base(str(base_candidate))
     if summary:
         raw_paths = summary.get("result_paths") or []
         paths = [Path(p).resolve() for p in raw_paths]
@@ -717,20 +739,19 @@ def main():
         if paths:
             try:
                 common = Path(os.path.commonpath([str(p) for p in paths])).resolve()
-                if common.name.endswith("_결과"):
-                    common = common.parent
-                dashboard_base_dir = str(common)
+                dashboard_base_dir = _resolve_top_level_base(str(common))
             except Exception:
-                dashboard_base_dir = str(sel_path)
+                dashboard_base_dir = _resolve_top_level_base(str(sel_path))
         if not raw_paths and summary.get("mode") != "scoped" and default_result_path:
             dashboard_output_dir = default_result_path
     if not default_result_path and os.path.isdir(effective_output_dir):
         default_result_path = effective_output_dir
         dashboard_output_dir = effective_output_dir
     if not dashboard_base_dir:
-        dashboard_base_dir = dashboard_output_dir if os.path.isdir(dashboard_output_dir) else effective_output_dir
-    if Path(dashboard_base_dir).name.endswith("_결과"):
-        dashboard_base_dir = str(Path(dashboard_base_dir).parent)
+        candidate = dashboard_output_dir if os.path.isdir(dashboard_output_dir) else effective_output_dir
+        dashboard_base_dir = _resolve_top_level_base(candidate)
+    else:
+        dashboard_base_dir = _resolve_top_level_base(dashboard_base_dir)
 
     if not first_scope_info.get("output_dir") and default_result_path:
         first_scope_info["output_dir"] = dashboard_output_dir

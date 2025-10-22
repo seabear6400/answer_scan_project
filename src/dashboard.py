@@ -78,10 +78,45 @@ def _request_rerun() -> None:
             except Exception:
                 pass
 
+
+def _normalize_base_dir(raw, selection_root: Optional[Path]) -> Path:
+    if raw is None:
+        if selection_root is not None:
+            return selection_root
+        return Path.cwd()
+    candidate = Path(raw)
+    try:
+        candidate = candidate.expanduser().resolve()
+    except Exception:
+        candidate = candidate.expanduser()
+    if selection_root is not None:
+        try:
+            candidate.relative_to(selection_root)
+            return selection_root
+        except Exception:
+            pass
+    while candidate.name.endswith("_결과") and candidate.parent != candidate:
+        candidate = candidate.parent
+        if selection_root is not None:
+            try:
+                candidate.relative_to(selection_root)
+                return selection_root
+            except Exception:
+                pass
+    return candidate
+
 ns = parse_streamlit_args()
 ENV_OUTPUT_DIR = os.environ.get("ANSWER_SCAN_OUTPUT_DIR")
 ENV_BASE_DIR = os.environ.get("ANSWER_SCAN_BASE_DIR")
 ENV_DEFAULT_RESULT = os.environ.get("ANSWER_SCAN_DEFAULT_RESULT")
+ENV_SELECTION_ROOT = os.environ.get("ANSWER_SCAN_SELECTION_ROOT")
+
+SELECTION_ROOT: Optional[Path] = None
+if ENV_SELECTION_ROOT:
+    try:
+        SELECTION_ROOT = Path(ENV_SELECTION_ROOT).expanduser().resolve()
+    except Exception:
+        SELECTION_ROOT = Path(ENV_SELECTION_ROOT).expanduser()
 
 output_arg = ns.output_dir or ENV_OUTPUT_DIR
 default_arg = ns.default_result or ENV_DEFAULT_RESULT
@@ -90,11 +125,15 @@ base_arg = ns.base_dir or ENV_BASE_DIR
 CLI_OUTPUT_DIR = Path(output_arg).expanduser().resolve() if output_arg else Path.cwd()
 CLI_DEFAULT_RESULT = Path(default_arg).expanduser().resolve() if default_arg else None
 if base_arg:
-    CLI_BASE_DIR = Path(base_arg).expanduser().resolve()
+    base_candidate = Path(base_arg)
+elif SELECTION_ROOT is not None:
+    base_candidate = SELECTION_ROOT
 elif CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
-    CLI_BASE_DIR = CLI_DEFAULT_RESULT.parent.resolve()
+    base_candidate = CLI_DEFAULT_RESULT.parent
 else:
-    CLI_BASE_DIR = CLI_OUTPUT_DIR
+    base_candidate = CLI_OUTPUT_DIR
+
+CLI_BASE_DIR = _normalize_base_dir(base_candidate, SELECTION_ROOT)
 
 if "_cli_base_marker" not in st.session_state or st.session_state.get("_cli_base_marker") != str(CLI_BASE_DIR):
     st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
@@ -102,7 +141,14 @@ if "_cli_base_marker" not in st.session_state or st.session_state.get("_cli_base
 elif "result_base_dir" not in st.session_state:
     st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
 
-BASE_OUTPUT_DIR = Path(st.session_state["result_base_dir"]).expanduser().resolve()
+_base_session = Path(st.session_state["result_base_dir"]).expanduser()
+try:
+    _base_session = _base_session.resolve()
+except Exception:
+    pass
+BASE_OUTPUT_DIR = _normalize_base_dir(_base_session, SELECTION_ROOT)
+if st.session_state.get("result_base_dir") != str(BASE_OUTPUT_DIR):
+    st.session_state["result_base_dir"] = str(BASE_OUTPUT_DIR)
 
 if CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
     if not CLI_DEFAULT_RESULT.is_dir():
@@ -110,8 +156,11 @@ if CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
     try:
         CLI_DEFAULT_RESULT.relative_to(BASE_OUTPUT_DIR)
     except ValueError:
-        BASE_OUTPUT_DIR = CLI_DEFAULT_RESULT.parent.resolve()
+        fallback_base = _normalize_base_dir(CLI_DEFAULT_RESULT.parent, SELECTION_ROOT)
+        BASE_OUTPUT_DIR = fallback_base
         st.session_state["result_base_dir"] = str(BASE_OUTPUT_DIR)
+        CLI_BASE_DIR = BASE_OUTPUT_DIR
+        st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
 
 
 def _has_result_files(path: Path) -> bool:
@@ -853,7 +902,8 @@ with theme_tab:
     with path_cols[0]:
         if st.button("경로 적용", key="apply_base_dir"):
             new_base = Path(base_input).expanduser()
-            st.session_state["result_base_dir"] = str(new_base)
+            normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
+            st.session_state["result_base_dir"] = str(normalized_base)
             st.cache_data.clear()
             _request_rerun()
     with path_cols[1]:
