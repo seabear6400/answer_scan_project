@@ -2,7 +2,7 @@ import os
 import shutil
 import itertools
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
@@ -17,63 +17,12 @@ import polars as pl
 
 import stat
 import time
-import threading
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.models import resnet18, ResNet18_Weights
 import concurrent.futures
-import hashlib
-
-# 선택적: timm (DINOv2)
-try:
-    import timm
-    _HAS_TIMM = True
-except Exception:
-    _HAS_TIMM = False
-
-# 선택적: FAISS
-try:
-    import faiss  # type: ignore
-    _HAS_FAISS = True
-except Exception:
-    _HAS_FAISS = False
-
-# 선택적: HNSW
-try:
-    import hnswlib
-    _HAS_HNSW = True
-except Exception:
-    _HAS_HNSW = False
-
-# 선택적: LPIPS
-try:
-    import lpips
-    
-    _HAS_LPIPS = True
-except Exception:
-    _HAS_LPIPS = False
-
-# 선택적: PDQ 해시
-try:
-    import pdqhash 
-    _HAS_PDQ = True
-except Exception:
-    _HAS_PDQ = False
-
-# 선택적: OCR + RapidFuzz
-try:
-    from paddleocr import PaddleOCR
-    _HAS_OCR = True
-except Exception:
-    _HAS_OCR = False
-
-try:
-    from rapidfuzz.fuzz import token_set_ratio
-    _HAS_RAPIDFUZZ = True
-except Exception:
-    _HAS_RAPIDFUZZ = False
 
 # 선택적: Sauvola
 try:
@@ -81,15 +30,6 @@ try:
     _HAS_SAUVOLA = True
 except Exception:
     _HAS_SAUVOLA = False
-
-# 선택적: NetworkX (Blossom 매칭)
-try:
-    import networkx as nx
-    _HAS_NX = True
-except Exception:
-    _HAS_NX = False
-
-from sklearn.neighbors import NearestNeighbors
 
 # 모듈 로거 (조용한 모드)
 import logging
@@ -137,63 +77,42 @@ def diagnose_gpu():
 
 @dataclass
 class DetectorConfig:
-    # 백엔드 (성능 최적화를 위해 auto 우선)
-    embed_backend: str = "auto"     # auto/dinov2/resnet18 - 자동 선택으로 최적화
-    ann_backend: str = "auto"       # auto/brute/faiss/hnsw
+    # 디바이스 제어
+    force_gpu: bool = False
+    fallback_to_cpu: bool = True
+    auto_optimize: bool = True
 
-    # GPU 사용 설정
-    force_gpu: bool = False         # GPU를 강제로 시도 (False로 변경: 안정성 우선)
-    fallback_to_cpu: bool = True    # GPU 실패 시 CPU로 fallback (항상 True)
-
-    # ANN 파라미터
-    k: int = 20
-    hnsw_M: int = 32
-    hnsw_efC: int = 200
-    hnsw_efS: int = 64
-
-    # 사전 필터 설정 (성능 최적화)
-    prefilter: str = "phash"        # phash/pdq/both (phash가 더 빠름)
-    phash_thresh: int = 12          # 약간 관대하게 설정
-    pdq_thresh: int = 75            # 약간 엄격하게 설정  
-    density_diff_thresh: float = 0.20  # 약간 관대하게 설정
-
-    # 유사도 임계값 (성능 최적화를 위해 약간 관대하게)
-    cnn_thresh: float = 0.98  # 약간 낮춰서 더 빠른 처리
-    suspect_low: float = 0.93  # 의심 구간도 약간 낮춤
-
-    # 공백(빈칸) 감지 (성능 최적화 + 정밀도 향상)
-    blank_method: str = "sauvola"   # otsu/sauvola
-    blank_density_thresh: float = 0.03  # 변경: 기본 임계값을 0.03으로 상향
-    blank_border_trim: float = 0.02      # 공백 감지 시 가장자리 잘라내기 비율
-    blank_min_component_ratio: float = 0.0008  # 노이즈 제거를 위한 최소 컴포넌트 비율
-    blank_auto_tune: bool = True         # 데이터 기반 자동 임계값 조정
-    blank_auto_suffix: str = "2"         # 자동 임계값을 적용할 파일명 접미사
-    blank_auto_min_samples: int = 6      # 자동 임계값 계산에 필요한 최소 샘플 수
-    blank_auto_margin: float = 0.005     # 자동 임계값에 적용할 안전 완충값 (기본 0.5%)
-    blank_auto_cap: float = 0.12         # 자동 임계값 상한
-    # 전역 아티팩트 경로
-    perf_model_dir: Optional[str] = None
-    blank_binary_weight: float = 0.55    # 밀도 기반 점수 가중치
-    blank_contrast_weight: float = 0.25  # 대비 기반 점수 가중치
-    blank_edge_weight: float = 0.20      # 에지/텍스처 기반 점수 가중치
-    blank_laplacian_ksize: int = 3       # 에지 추출 커널 크기 (홀수)
-
-    # 재정렬 / OCR
-    use_lpips: bool = False
-    lpips_thresh: float = 0.2
-    use_ocr: bool = False
-    text_sim_thresh: float = 0.85
-
-    # 정렬(Alignment) (현재 그룹핑에 사용되지 않음, main.py 호환용)
-    use_alignment: bool = False
-
-    # 임베딩 설정 (성능 최적화)
-    batch_size: int = 128  # 더 큰 배치 크기로 처리량 향상
-    num_workers: int = 4   # 멀티프로세싱 활성화
+    # 임베딩 설정 (소규모 배치를 우선)
+    batch_size: int = 32
+    num_workers: int = 0
     roi_ratio: Tuple[float, float, float, float] = (0.15, 0.15, 0.85, 0.85)
-    
-    # 자동 최적화 설정
-    auto_optimize: bool = True  # 데이터 크기에 따른 자동 최적화 활성화
+
+    # 후보 탐색 매개변수
+    k: int = 12
+    prefilter: str = "phash"  # phash/none
+    phash_thresh: int = 12
+    density_diff_thresh: float = 0.20
+
+    # 유사도 임계값
+    cnn_thresh: float = 0.98
+    suspect_low: float = 0.93
+
+    # 공백(빈칸) 감지 파라미터
+    blank_method: str = "sauvola"
+    blank_density_thresh: float = 0.03
+    blank_border_trim: float = 0.02
+    blank_min_component_ratio: float = 0.0008
+    blank_auto_tune: bool = True
+    blank_auto_suffix: str = "2"
+    blank_auto_min_samples: int = 6
+    blank_auto_margin: float = 0.005
+    blank_auto_cap: float = 0.12
+    blank_binary_weight: float = 0.55
+    blank_contrast_weight: float = 0.25
+    blank_edge_weight: float = 0.20
+    blank_laplacian_ksize: int = 3
+
+    perf_model_dir: Optional[str] = None
 
 
 # -------------------------- 적응적 최적화 ---------------------
@@ -262,172 +181,33 @@ def get_device_info():
 
 
 def optimize_config_for_data_size(cfg: DetectorConfig, n_images: int, device_info: dict = None) -> DetectorConfig:
-    """
-    데이터 크기 및 GPU 사양에 따라 설정을 적응적으로 최적화합니다.
-    
-    최적화 전략:
-    - GPU 우선: GTX 1660 Ti 같은 GPU가 있으면 최대한 활용
-    - 소규모 데이터(< 50): 고정 오버헤드 최소화
-    - 중간 규모(50-500): 균형잡힌 설정  
-    - 대규모 데이터(> 500): 배치 처리 최적화, 고성능 백엔드 활용
-    """
+    """소규모 배치(≈100장 이하)를 기준으로 간단한 파라미터 조정을 수행합니다."""
     if not cfg.auto_optimize:
         return cfg
-    
-    # 디바이스 정보 가져오기
+
     if device_info is None:
         device_info = get_device_info()
-    
-    # 새로운 설정 객체 생성 (원본 보존)
-    optimized = DetectorConfig(
-        embed_backend=cfg.embed_backend,
-        ann_backend=cfg.ann_backend,
-        k=cfg.k,
-        hnsw_M=cfg.hnsw_M,
-        hnsw_efC=cfg.hnsw_efC,
-        hnsw_efS=cfg.hnsw_efS,
-        prefilter=cfg.prefilter,
-        phash_thresh=cfg.phash_thresh,
-        pdq_thresh=cfg.pdq_thresh,
-        density_diff_thresh=cfg.density_diff_thresh,
-        cnn_thresh=cfg.cnn_thresh,
-        suspect_low=cfg.suspect_low,
-        blank_method=cfg.blank_method,
-        blank_density_thresh=cfg.blank_density_thresh,
-        blank_border_trim=cfg.blank_border_trim,
-        blank_min_component_ratio=cfg.blank_min_component_ratio,
-        blank_auto_tune=cfg.blank_auto_tune,
-        blank_auto_suffix=cfg.blank_auto_suffix,
-        blank_auto_min_samples=cfg.blank_auto_min_samples,
-        blank_auto_margin=cfg.blank_auto_margin,
-        blank_auto_cap=cfg.blank_auto_cap,
-    blank_binary_weight=cfg.blank_binary_weight,
-    blank_contrast_weight=cfg.blank_contrast_weight,
-    blank_edge_weight=cfg.blank_edge_weight,
-    blank_laplacian_ksize=cfg.blank_laplacian_ksize,
-        use_lpips=cfg.use_lpips,
-        lpips_thresh=cfg.lpips_thresh,
-        use_ocr=cfg.use_ocr,
-        text_sim_thresh=cfg.text_sim_thresh,
-        use_alignment=cfg.use_alignment,
-        batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers,
-        roi_ratio=cfg.roi_ratio,
-        auto_optimize=cfg.auto_optimize,
-        perf_model_dir=cfg.perf_model_dir,
-    )
-    
+
+    optimized = replace(cfg)
     cpu_count = os.cpu_count() or 2
-    has_gpu = device_info['has_gpu']
-    gpu_memory_gb = device_info['gpu_memory_gb']
-    
-    if n_images < 50:
-    # 소규모: 최적화된 처리
-        
-        # 메모리와 처리량 최적화된 배치 크기
-        if has_gpu:
-            optimized.batch_size = min(32, max(8, n_images))  # GPU 활용도 증대
-        else:
-            optimized.batch_size = min(16, max(4, n_images))
-        
-        # 적극적인 병렬 처리
-        optimized.num_workers = min(2, max(1, cpu_count // 4))
-        
-        # 가벼운 백엔드 우선 선택
-        if optimized.embed_backend == "auto":
-            optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
-        
-        # 빠른 검색을 위한 brute force
-        if optimized.ann_backend == "auto":
-            optimized.ann_backend = "brute"
-        
-        # k 값을 데이터 크기에 맞게 조정
-        optimized.k = min(optimized.k, max(5, n_images - 1))
-        
-        # 간단한 사전필터만 사용
-        if optimized.prefilter == "both":
-            optimized.prefilter = "phash"
-            
-    elif n_images < 500:
-    # 중간 규모: 균형잡힌 고성능 설정
-        
-        # GPU 메모리에 따른 배치 크기 최적화 (더 적극적)
-        if has_gpu:
-            if gpu_memory_gb >= 6:  # GTX 1660 Ti급 이상
-                optimized.batch_size = min(128, max(32, n_images // 3))  # 더 큰 배치
-            else:  # 저메모리 GPU
-                optimized.batch_size = min(64, max(16, n_images // 4))
-        else:
-            optimized.batch_size = min(32, max(8, n_images // 6))
-        
-        # 적극적인 병렬 처리
-        optimized.num_workers = min(6, max(2, cpu_count // 2))
-        
-        # GPU가 있으면 DINOv2 우선, 없으면 ResNet18
-        if optimized.embed_backend == "auto":
-            optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
-        
-        # 효율적인 ANN 백엔드 선택
-        if optimized.ann_backend == "auto":
-            if _HAS_HNSW and n_images >= 80:  # 더 빠른 HNSW 활용
-                optimized.ann_backend = "hnsw"
-            else:
-                optimized.ann_backend = "brute"
-                
+    has_gpu = device_info.get('has_gpu', False)
+
+    if n_images <= 40:
+        optimized.batch_size = min(32, max(4, n_images))
+        optimized.num_workers = 0
+        optimized.k = min(optimized.k, max(2, n_images - 1))
+    elif n_images <= 120:
+        optimized.batch_size = 48 if has_gpu else 24
+        optimized.num_workers = min(2, max(0, cpu_count // 4))
+        optimized.k = min(optimized.k, max(4, n_images - 1))
     else:
-    # 대규모: 최대 성능 배치 처리 최적화
-        
-        # GPU 메모리에 따른 대용량 배치 처리 (더 적극적)
-        if has_gpu:
-            if gpu_memory_gb >= 8:  # 고사양 GPU
-                optimized.batch_size = min(256, max(64, n_images // 8))  # 더 큰 배치
-            elif gpu_memory_gb >= 6:  # GTX 1660 Ti급 (6GB)
-                optimized.batch_size = min(192, max(48, n_images // 12))
-            else:  # 저메모리 GPU (4GB 이하)
-                optimized.batch_size = min(128, max(32, n_images // 16))
-        else:
-            # CPU는 메모리를 더 보수적으로 사용하지만 배치 크기 증가
-            optimized.batch_size = min(64, max(16, n_images // 25))
-        
-        # 최대 병렬 처리 (더 적극적)
-        optimized.num_workers = min(12, max(4, cpu_count))
-        
-        # GPU가 있으면 무조건 DINOv2, 없으면 ResNet18
-        if optimized.embed_backend == "auto":
-            optimized.embed_backend = "dinov2" if (_HAS_TIMM and has_gpu) else "resnet18"
-        
-        # 고성능 백엔드 우선 선택 (더 빠른 임계값)
-        if optimized.ann_backend == "auto":
-            if _HAS_FAISS and n_images >= 800:  # FAISS 더 빨리 활용
-                optimized.ann_backend = "faiss"
-            elif _HAS_HNSW and n_images >= 200:  # HNSW 더 빨리 활용
-                optimized.ann_backend = "hnsw"
-            else:
-                optimized.ann_backend = "brute"
-        
-        # HNSW 파라미터 최적화 (대규모 데이터용, 더 빠른 설정)
-        if n_images >= 1000:
-            optimized.hnsw_M = min(96, max(32, int(np.log2(n_images)) * 6))  # 더 큰 M
-            optimized.hnsw_efC = min(600, max(200, n_images // 3))  # 더 큰 efC
-            optimized.hnsw_efS = min(300, max(64, n_images // 8))   # 더 큰 efS
-        
-        # 고급 필터링 활성화 (대규모에서 효과적)
-        if _HAS_PDQ and optimized.prefilter == "phash":
-            optimized.prefilter = "both"
-    
-    # 공통 최적화 - 속도 우선
-    
-    # OCR/LPIPS는 50개 이하에서만 비활성화 (속도 최적화)
-    if n_images < 30:  # 더 작은 임계값으로 변경
-        if optimized.use_ocr and not cfg.use_ocr:  # 명시적으로 설정하지 않았다면
-            optimized.use_ocr = False
-        if optimized.use_lpips and not cfg.use_lpips:
-            optimized.use_lpips = False
-    
-    # k 값이 데이터 크기보다 클 경우 조정
-    optimized.k = min(optimized.k, max(1, n_images - 1))
-    
-    # 설정 최적화 완료 (로그 간소화)
+        optimized.batch_size = 64 if has_gpu else 32
+        optimized.num_workers = min(4, max(1, cpu_count // 4))
+        optimized.k = min(optimized.k, max(6, n_images - 1))
+
+    if optimized.prefilter not in ("phash", "none"):
+        optimized.prefilter = "phash"
+
     return optimized
 
 
@@ -477,9 +257,6 @@ def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Di
         "mean_h": float(np.mean(heights)) if n else 0.0,
         "batch_size": int(getattr(cfg, "batch_size", 0)),
         "num_workers": int(getattr(cfg, "num_workers", 0)),
-        "use_ocr": int(bool(getattr(cfg, "use_ocr", False))),
-        "use_lpips": int(bool(getattr(cfg, "use_lpips", False))),
-        "embed_backend": str(getattr(cfg, "embed_backend", "")),
         "gpu": int(device_info['has_gpu']),
         "gpu_count": int(device_info['gpu_count']),
         "gpu_memory_gb": round(device_info['gpu_memory_gb'], 1),
@@ -550,28 +327,6 @@ def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> Optiona
     except Exception as e:
         logger.warning(f"phash 계산 실패: {path} -> {e}")
         return None
-
-
-def pdq_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> Optional[np.ndarray]:
-    try:
-        if not _HAS_PDQ:
-            return None
-        img = Image.open(path).convert('RGB')
-        img = crop_roi(img, roi_ratio)
-        arr = np.array(img)
-        # pdqhash 라이브러리가 제공하는 API 사용
-        if 'pdqhash' in globals():
-            # compute_pdq_hash -> (hash_vec, metadata)
-            hash_vec, _ = pdqhash.compute_pdq_hash(arr)
-            return hash_vec.astype(np.uint8)
-        return None
-    except Exception as e:
-        logger.warning(f"PDQ 계산 실패: {path} -> {e}")
-        return None
-
-
-def hamming_distance_bits(a_bits: np.ndarray, b_bits: np.ndarray) -> int:
-    return int(np.sum(a_bits ^ b_bits))
 
 
 def ink_density(
@@ -678,26 +433,14 @@ def ink_density(
 
 # -------------------------- 데이터셋 / 임베딩 ----------------------
 class ImgDataset(Dataset):
-    def __init__(self, paths: List[str], roi_ratio: Tuple[float, float, float, float], backend: str):
+    def __init__(self, paths: List[str], roi_ratio: Tuple[float, float, float, float]):
         self.paths = paths
         self.roi = roi_ratio
-        self.backend = backend
-        
-        # DINOv2 입력 크기 문제 해결
-        if backend == "dinov2":
-            self.tf = transforms.Compose([
-                transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-                transforms.CenterCrop(224),  # DINOv2는 정확히 224x224 필요
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),  # ImageNet 정규화
-            ])
-        else:  # ResNet18
-            self.tf = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225]),
-            ])
+        self.tf = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
 
     def __len__(self):
         return len(self.paths)
@@ -728,117 +471,47 @@ class ImgDataset(Dataset):
         return tensor, p
 
 
-def load_model(device: torch.device, backend: str, force_gpu: bool = False, fallback_to_cpu: bool = True) -> nn.Module:
-    """
-    안정적인 모델 로딩: GPU 실패 시 항상 CPU로 fallback
-    DINOv2 입력 크기 문제 해결
-    """
-    model_name = None
-    
-    # GPU 강제 사용 체크
+def load_model(device: torch.device, force_gpu: bool = False, fallback_to_cpu: bool = True) -> nn.Module:
+    """ResNet18 임베딩 모델을 로드하고 필요 시 CPU로 폴백합니다."""
+
     if force_gpu and torch.cuda.is_available() and device.type == "cpu":
-        logger.info("💡 GPU 강제 사용 시도: CPU → GPU")
         device = torch.device("cuda:0")
         try:
             torch.cuda.empty_cache()
-        except:
-            pass
-    
-    # GPU/CPU 정보 (간소화)
-    if device.type == "cuda":
-        try:
-            pass
         except Exception:
-            if fallback_to_cpu:
-                device = torch.device("cpu")
-    else:
-        pass
-    
-    # DINOv2 시도 (입력 크기 문제 해결)
-    if backend == "dinov2" and _HAS_TIMM:
-        try:
-            # DINOv2 모델 로딩 시 정확한 설정
-            model = timm.create_model(
-                "vit_base_patch14_dinov2.lvd142m", 
-                pretrained=True, 
-                num_classes=0,  # 분류층 제거
-                img_size=224    # 명시적으로 224x224 입력 크기 설정
-            )
-            model = model.eval().to(device)
-            model_name = "DINOv2 ViT-Base"
-            
-            # 입력 크기 테스트 (조용히)
-            with torch.no_grad():
-                test_input = torch.randn(1, 3, 224, 224).to(device)
-                test_output = model(test_input)
-                del test_input, test_output
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
-            
-            return model
-            
-        except Exception as e:
-            logger.warning(f"❌ DINOv2 로딩 실패: {e}")
-            # GPU에서 실패했으면 CPU로 재시도
-            if device.type == "cuda" and fallback_to_cpu:
-                logger.info("🔄 CPU에서 DINOv2 재시도...")
-                device = torch.device("cpu")
-                try:
-                    model = timm.create_model(
-                        "vit_base_patch14_dinov2.lvd142m", 
-                        pretrained=True, 
-                        num_classes=0,
-                        img_size=224
-                    )
-                    model = model.eval().to(device)
-                    model_name = "DINOv2 ViT-Base"
-                    logger.info(f"✅ {model_name} CPU 로딩 완료")
-                    return model
-                except Exception as e2:
-                    logger.warning(f"❌ CPU에서도 DINOv2 실패: {e2}")
-            
-            logger.info("ResNet18로 폴백...")
-    
-    # ResNet18 폴백
+            pass
+
     try:
-        logger.info("🔄 ResNet18 모델 로딩...")
         model = resnet18(weights=ResNet18_Weights.DEFAULT)
-        model.fc = nn.Identity()  # 분류층 제거
+        model.fc = nn.Identity()
         model = model.eval().to(device)
-        model_name = "ResNet18"
-        
-        # 테스트
         with torch.no_grad():
-            test_input = torch.randn(1, 3, 224, 224).to(device)
-            test_output = model(test_input)
-            logger.info(f"✅ {model_name} 로딩 완료 - 출력 크기: {test_output.shape}")
-            del test_input, test_output
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-        
+            probe = torch.randn(1, 3, 224, 224, device=device)
+            _ = model(probe)
+            del probe
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         return model
-        
-    except Exception as e:
-        logger.error(f"❌ GPU에서 ResNet18 실패: {e}")
-        # 최후의 CPU 시도
+    except Exception as exc:
         if device.type == "cuda" and fallback_to_cpu:
-            logger.info("🔄 최후의 CPU 시도...")
             try:
-                device = torch.device("cpu")
-                model = resnet18(weights=ResNet18_Weights.DEFAULT)
-                model.fc = nn.Identity()
-                model = model.eval().to(device)
-                model_name = "ResNet18"
-                logger.info(f"✅ {model_name} CPU 최후 fallback 완료")
-                return model
-            except Exception as e2:
-                logger.error(f"❌ CPU에서도 ResNet18 실패: {e2}")
-        
-        raise RuntimeError(f"모든 모델 로딩 실패. 마지막 오류: {e}")
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            cpu_device = torch.device("cpu")
+            model = resnet18(weights=ResNet18_Weights.DEFAULT)
+            model.fc = nn.Identity()
+            model = model.eval().to(cpu_device)
+            with torch.no_grad():
+                probe = torch.randn(1, 3, 224, 224, device=cpu_device)
+                _ = model(probe)
+                del probe
+            return model
+        raise RuntimeError(f"모델 로딩 실패: {exc}")
 
 
 def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, num_workers: int,
-                       roi_ratio: Tuple[float, float, float, float], backend: str,
+                       roi_ratio: Tuple[float, float, float, float],
                        progress_callback: Optional[callable] = None, force_gpu: bool = False):
     """
     안정적인 임베딩 계산: GPU 실패 시 자동으로 CPU fallback
@@ -853,7 +526,7 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
         except:
             logger.warning("GPU 메모리 정리 실패, 계속 진행")
     
-    ds = ImgDataset(paths, roi_ratio, backend)
+    ds = ImgDataset(paths, roi_ratio)
     
     # GPU 사용 시 pin_memory 최적화
     pin_memory = False
@@ -870,13 +543,13 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
     t_model0 = time.time()
     
     try:
-        model = load_model(device, backend, force_gpu, fallback_to_cpu=True)
+        model = load_model(device, force_gpu, fallback_to_cpu=True)
         actual_device = next(model.parameters()).device
         if actual_device != device:
             device = actual_device
-    except Exception as e:
+    except Exception:
         device = torch.device("cpu")
-        model = load_model(device, "resnet18", force_gpu=False, fallback_to_cpu=True)
+        model = load_model(device, force_gpu=False, fallback_to_cpu=True)
     
     t_model1 = time.time()
     model_load_s = float(t_model1 - t_model0)
@@ -950,7 +623,7 @@ def compute_embeddings(paths: List[str], device: torch.device, batch_size: int, 
                 else:
                     D_out = int(np.prod(out.shape[1:]))
         except Exception:
-            D_out = (768 if backend == "dinov2" and _HAS_TIMM else 512)
+            D_out = 512
         embs = np.zeros((0, D_out), dtype=np.float32)
 
     # 일관성 검사
@@ -986,107 +659,24 @@ def l2_normalize(mat: np.ndarray) -> np.ndarray:
     return mat / norms
 
 
-def build_candidates(embs: np.ndarray, k: int, ann_backend: str,
-                     hnsw_M: int, hnsw_efC: int, hnsw_efS: int):
-    """
-        반환값은 (indices, sims, backend_used) 형태입니다.
-    """
-    N, D = embs.shape
+def build_candidates(embs: np.ndarray, k: int):
+    """간단한 코사인 유사도 기반 근접 후보를 계산합니다."""
+    N, _ = embs.shape
     if N == 0:
         return np.empty((0, 0), dtype=int), np.empty((0, 0), dtype=np.float32), "none"
 
-    backend = ann_backend
-    if ann_backend == "auto":
-        # 우선순위: FAISS(대규모, 설치됨) -> HNSW -> brute
-        if _HAS_FAISS and N >= 2000:
-            backend = "faiss"
-        elif _HAS_HNSW and N >= 1000:
-            backend = "hnsw"
-        else:
-            backend = "brute"
+    mat = l2_normalize(embs.astype(np.float32))
+    sims = mat @ mat.T
+    np.fill_diagonal(sims, 1.0)
 
-    # 코사인(유사도) 기반 백엔드의 경우 한 번 정규화합니다.
-    use_cosine = backend in ("faiss", "hnsw", "brute")
-    mat = embs.astype(np.float32)
-    if use_cosine and mat.size:
-        mat = l2_normalize(mat)
+    k_eff = min(k + 1, N)
+    idxs = np.argpartition(-sims, range(k_eff), axis=1)[:, :k_eff]
+    part_sims = np.take_along_axis(sims, idxs, axis=1)
+    order = np.argsort(-part_sims, axis=1)
+    idxs = np.take_along_axis(idxs, order, axis=1)
+    sims_sorted = np.take_along_axis(part_sims, order, axis=1)
 
-    if backend == "faiss" and _HAS_FAISS:
-        xb = mat
-        index = faiss.IndexFlatIP(D)  # 내적 == 정규화된 벡터에서의 코사인 유사도
-        index.add(xb)
-        # FAISS search returns (similarities, indices) for inner product
-        similarities, indices = index.search(xb, min(k + 1, N))
-        return indices, similarities, "faiss"
-
-    if backend == "hnsw" and _HAS_HNSW:
-        idx = hnswlib.Index(space='cosine', dim=D)
-        idx.init_index(max_elements=N, ef_construction=hnsw_efC, M=hnsw_M)
-        idx.add_items(mat)
-        idx.set_ef(hnsw_efS)
-        labels, dists = idx.knn_query(mat, k=min(k + 1, N))
-        sims = 1.0 - dists
-        return labels, sims, "hnsw"
-
-    nn = NearestNeighbors(n_neighbors=min(k + 1, N), metric="cosine", algorithm="brute")
-    nn.fit(mat)
-    dists, idxs = nn.kneighbors(mat, return_distance=True)
-    sims = 1.0 - dists
-    return idxs, sims, "brute"
-
-
-# -------------------------- LPIPS / OCR (선택) -------------------
-_lpips_model = None
-_lpips_lock = threading.Lock()
-def lpips_distance(a_path: str, b_path: str) -> Optional[float]:
-    global _lpips_model
-    if not _HAS_LPIPS:
-        return None
-    with _lpips_lock:
-        if _lpips_model is None:
-            _lpips_model = lpips.LPIPS(net='vgg').eval()
-    import torchvision.transforms as T
-    tf = T.Compose([T.ToTensor()])
-    Araw = cv2.imread(a_path)
-    Braw = cv2.imread(b_path)
-    if Araw is None or Braw is None:
-        logger.warning(f"LPIPS: 이미지 로드 실패 a={a_path} b={b_path}")
-        return None
-    A = cv2.cvtColor(Araw, cv2.COLOR_BGR2RGB)
-    B = cv2.cvtColor(Braw, cv2.COLOR_BGR2RGB)
-    h = min(A.shape[0], B.shape[0]); w = min(A.shape[1], B.shape[1])
-    A = cv2.resize(A, (w, h)); B = cv2.resize(B, (w, h))
-    a = tf(Image.fromarray(A)).unsqueeze(0)
-    b = tf(Image.fromarray(B)).unsqueeze(0)
-    with torch.no_grad():
-        d = _lpips_model(a, b).item()
-    return float(d)
-
-
-_ocr = None
-_ocr_lock = threading.Lock()
-def ocr_text(path: str) -> str:
-    global _ocr
-    if not (_HAS_OCR and _HAS_RAPIDFUZZ):
-        return ""
-    with _ocr_lock:
-        if _ocr is None:
-            # 한국어 손글씨 스캔
-            _ocr = PaddleOCR(lang='korean', use_angle_cls=True, show_log=False)
-    res = _ocr.ocr(path, cls=True)
-    texts = []
-    try:
-        for line in res[0]:
-            texts.append(line[1][0])
-    except Exception:
-        pass
-    return " ".join(texts)
-
-
-def text_similarity(a: str, b: str) -> float:
-    if not _HAS_RAPIDFUZZ:
-        return 0.0
-    return token_set_ratio(a, b) / 100.0
+    return idxs, sims_sorted, "brute"
 
 
 # -------------------------- 유틸 -------------------
@@ -1155,29 +745,17 @@ def _metadata_worker(args):
     # IO 중심의 메타데이터 작업을 위해 ThreadPoolExecutor에서 실행되는 워커
     f, p, cfg = args
     ph = None
-    pdq = None
     dens = 0.0
-    txt = ""
     try:
-        if cfg.prefilter in ("phash", "both"):
+        if cfg.prefilter == "phash":
             ph = phash_of(p, cfg.roi_ratio)
     except Exception:
         ph = imagehash.hex_to_hash("0" * 16)
     try:
-        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-            pdq = pdq_of(p, cfg.roi_ratio)
-    except Exception:
-        pdq = (np.zeros((256,), dtype=np.uint8) if _HAS_PDQ else None)
-    try:
         dens = ink_density(p, cfg.roi_ratio, cfg.blank_method)
     except Exception:
         dens = 0.0
-    try:
-        if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
-            txt = ocr_text(p)
-    except Exception:
-        txt = ""
-    return f, ph, pdq, float(dens), txt
+    return f, ph, float(dens)
 
 
 def _auto_blank_threshold(values: List[float], cfg: DetectorConfig) -> Optional[float]:
@@ -1250,13 +828,13 @@ def _build_blank_flags(files: List[str], densities: Dict[str, float], cfg: Detec
 
 
 def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndarray,
-                    phashes: Dict[str, imagehash.ImageHash], pdqs: Dict[str, Optional[np.ndarray]],
-                    densities: Dict[str, float], blank_flags: Dict[str, bool], texts: Dict[str, str], cfg: DetectorConfig,
+                    phashes: Dict[str, imagehash.ImageHash], densities: Dict[str, float],
+                    blank_flags: Dict[str, bool], cfg: DetectorConfig,
                     input_dir: Optional[str] = None, path_map: Optional[Dict[str, str]] = None):
     """
     공통의 페어링/그룹화 로직을 추출한 헬퍼.
     name_by_row: 행 인덱스 -> 파일명 매핑
-    input_dir OR path_map 중 하나를 제공하여 추가 검사(LPIPS/OCR)를 수행함.
+    input_dir OR path_map 중 하나를 제공하여 파일 경로를 확인함.
     blank_flags: 사전에 계산된 공백 여부 (True이면 그룹 후보에서 제거).
     반환: pair_rows, groups
     """
@@ -1270,14 +848,9 @@ def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndar
         return fname
 
     def prefilter_ok(fi: str, fj: str) -> bool:
-        if cfg.prefilter in ("phash", "both"):
+        if cfg.prefilter == "phash":
             if abs(phashes.get(fi, imagehash.hex_to_hash("0"*16)) - phashes.get(fj, imagehash.hex_to_hash("0"*16))) > cfg.phash_thresh:
                 return False
-        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-            a = pdqs.get(fi, None); b = pdqs.get(fj, None)
-            if a is not None and b is not None:
-                if hamming_distance_bits(a, b) > cfg.pdq_thresh:
-                    return False
         if abs(densities.get(fi, 0.0) - densities.get(fj, 0.0)) > cfg.density_diff_thresh:
             return False
         return True
@@ -1307,22 +880,7 @@ def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndar
             sim = float(sims[i, col])
             all_pair_records.append((fi, fj, sim))
 
-            confirmed = False
-            if sim >= cfg.cnn_thresh:
-                confirmed = True
-            elif sim >= cfg.suspect_low:
-                votes = 0
-                if cfg.use_lpips and _HAS_LPIPS:
-                    d = lpips_distance(_get_path(fi), _get_path(fj))
-                    if d is not None and d <= cfg.lpips_thresh:
-                        votes += 1
-                if cfg.use_ocr and _HAS_OCR and _HAS_RAPIDFUZZ:
-                    ta = texts.get(fi, "") or ocr_text(_get_path(fi))
-                    tb = texts.get(fj, "") or ocr_text(_get_path(fj))
-                    if text_similarity(ta, tb) >= cfg.text_sim_thresh:
-                        votes += 1
-                if votes > 0:
-                    confirmed = True
+            confirmed = sim >= cfg.cnn_thresh
 
             if confirmed:
                 confirmed_edges.append((i, j, sim))
@@ -1553,13 +1111,11 @@ def detect_pipeline(input_dir: str, output_dir: str,
             logger.warning(f"❌ GPU 강제 사용 실패, CPU 유지: {e}")
             device = torch.device("cpu")
 
-    # 2) Metadata: prefilters + density + (optional) OCR text
-    _cb("meta", 0.05, "메타데이터 수집 시작 (pHash/PDQ + density)")
+    # 2) Metadata: prefilters + density
+    _cb("meta", 0.05, "메타데이터 수집 시작 (pHash + density)")
     t_meta0 = time.time()
     phashes: Dict[str, imagehash.ImageHash] = {}
-    pdqs: Dict[str, Optional[np.ndarray]] = {}
     densities: Dict[str, float] = {}
-    texts: Dict[str, str] = {}
 
     images_summary_path = os.path.join(output_dir, "images_summary.csv")
     # 기존 요약 파일(images_summary.csv)이 최신이면 밀도 계산을 건너뛸 수 있도록 로드합니다
@@ -1582,16 +1138,12 @@ def detect_pipeline(input_dir: str, output_dir: str,
     else:
         max_workers = min(64, max(8, (os.cpu_count() or 2) * 4))  # 기본값도 더 적극적으로
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for f, ph, pdqv, dens, txt in ex.map(_metadata_worker, worker_args):
+        for f, ph, dens in ex.map(_metadata_worker, worker_args):
             if ph is not None:
                 phashes[f] = ph
-            if pdqv is not None:
-                pdqs[f] = pdqv
             # 새 요약에서 로드된 값이 없을 때만 density를 덮어씌움
             if f not in densities or densities.get(f, 0.0) == 0.0:
                 densities[f] = dens
-            if txt:
-                texts[f] = txt
 
     blank_flags, blank_thresholds, auto_blank_threshold = _build_blank_flags(files, densities, cfg)
 
@@ -1647,9 +1199,9 @@ def detect_pipeline(input_dir: str, output_dir: str,
     if embs is None:
         try:
             embs, ordered_paths, model_load_s = compute_embeddings(
-                paths, device, cfg.batch_size, cfg.num_workers, 
-                cfg.roi_ratio, cfg.embed_backend, 
-                progress_callback=_cb, force_gpu=cfg.force_gpu
+                paths, device, cfg.batch_size, cfg.num_workers,
+                cfg.roi_ratio,
+                progress_callback=_cb, force_gpu=cfg.force_gpu,
             )
         except Exception as e:
             logger.error(f"임베딩 계산 실패: {e}")
@@ -1658,8 +1210,8 @@ def detect_pipeline(input_dir: str, output_dir: str,
                 device = torch.device("cpu")
                 embs, ordered_paths, model_load_s = compute_embeddings(
                     paths, device, cfg.batch_size, 0,  # num_workers=0 for stability
-                    cfg.roi_ratio, "resnet18",  # 안전한 백엔드
-                    progress_callback=_cb, force_gpu=False
+                    cfg.roi_ratio,
+                    progress_callback=_cb, force_gpu=False,
                 )
             else:
                 raise
@@ -1679,7 +1231,7 @@ def detect_pipeline(input_dir: str, output_dir: str,
     # logger.info("[3/5] ANN을 통한 후보 이웃 검색 …")  # 간소화
     t_ann0 = time.time()
     _cb("ann", 0.60, "ANN 후보 검색 시작")
-    idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
+    idxs, sims, backend_used = build_candidates(embs, cfg.k)
     t_ann1 = time.time()
     _cb("ann", 0.78, f"ANN 완료 ({round(t_ann1 - t_ann0, 2)}s) via {backend_used}")
 
@@ -1693,10 +1245,8 @@ def detect_pipeline(input_dir: str, output_dir: str,
         idxs,
         sims,
         phashes,
-        pdqs,
         densities,
         blank_flags,
-        texts,
         cfg,
         input_dir=input_dir,
     )
@@ -1790,25 +1340,16 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
     gpu_name = device_info['gpu_name']
     
     # 메타데이터 처리 시간 (이미지당)
-    meta_per = 0.02
-    if getattr(cfg, 'use_ocr', False):
-        meta_per += 0.25
+    meta_per = 0.025
 
-    # 임베딩 처리 시간 (GPU 사양별로 세분화)
-    backend = getattr(cfg, 'embed_backend', 'dinov2')
+    # 임베딩 처리 시간 (단순 휴리스틱)
     if has_gpu:
-        if 'RTX' in gpu_name or 'GTX 1660' in gpu_name:  # GTX 1660 Ti 포함
-            # 중급 GPU
-            emb_per = 0.015 if backend == 'dinov2' else 0.003
-        elif 'GTX' in gpu_name or 'RTX 20' in gpu_name:
-            # 저급~중급 GPU
-            emb_per = 0.025 if backend == 'dinov2' else 0.005
+        if 'RTX' in gpu_name or 'GTX' in gpu_name:
+            emb_per = 0.02
         else:
-            # 기타 GPU
-            emb_per = 0.02 if backend == 'dinov2' else 0.005
+            emb_per = 0.025
     else:
-        # CPU only
-        emb_per = 0.12 if backend == 'dinov2' else 0.02
+        emb_per = 0.08
 
     k = getattr(cfg, 'k', 20)
     ann_s = max(0.2, 0.00012 * N * max(1, k))
@@ -1831,21 +1372,14 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
             t0 = _time.time()
             try:
                 logger.info(f"시간 추정을 위한 샘플링: {sample_n}개 이미지 ({gpu_name if has_gpu else 'CPU'})")
-                sample_embs, _, model_load_s = compute_embeddings(
-                    sample_paths, device, min(16, sample_n), 0, 
-                    getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend,
-                    force_gpu=getattr(cfg, 'force_gpu', True)
+                _ = compute_embeddings(
+                    sample_paths,
+                    device,
+                    min(16, sample_n),
+                    0,
+                    getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)),
+                    force_gpu=getattr(cfg, 'force_gpu', True),
                 )
-                # 모델을 한 번 로드(가능한 timm/resnet 오버헤드 포함)
-                _model = load_model(device, backend)
-                # DataLoader 준비 및 전방 전달 실행
-                ds = ImgDataset(sample_paths, getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend)
-                dl = DataLoader(ds, batch_size=min(getattr(cfg, 'batch_size', 32), sample_n), shuffle=False, num_workers=0)
-                _model.eval()
-                with torch.no_grad():
-                    for x, _p in dl:
-                        x = x.to(device)
-                        _ = _model(x)
                 t_elapsed = _time.time() - t0
                 measured = t_elapsed / max(1, len(sample_paths))
                 if measured > 0:
@@ -1903,7 +1437,6 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
                     "ann_s": float(ann_s),
                     "io_s": float(io_s),
                     "platform": platform.system(),
-                    "embed_backend": getattr(cfg, 'embed_backend', 'dinov2')
                 }
                 # 모델은 학습 시 컬럼 순서를 기대함; 단일 행 DataFrame 형태로 전달
                 import pandas as _pd
@@ -1978,11 +1511,9 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     # 변수 이름을 재사용하여 $\text{detect_pipeline}$의 로직을 상당 부분 재활용합니다.
 
     # 2) 데이터 처리 파이프라인에서 관리되는 메타데이터의 구성 요소를 설명
-    logger.info(f"[1/5] Metadata (pHash/PDQ + density)")
+    logger.info(f"[1/5] Metadata (pHash + density)")
     phashes: Dict[str, imagehash.ImageHash] = {}
-    pdqs: Dict[str, Optional[np.ndarray]] = {}
     densities: Dict[str, float] = {}
-    texts: Dict[str, str] = {}
 
     images_summary_path = os.path.join(output_dir, "images_summary.csv")
     if _is_fresh(images_summary_path, paths):
@@ -1999,15 +1530,11 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
     worker_args = [(f, path_map[f], cfg) for f in files]
     max_workers = min(32, max(2, (cfg.num_workers or 1) * 4, os.cpu_count() or 2))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for f, ph, pdqv, dens, txt in ex.map(_metadata_worker, worker_args):
+        for f, ph, dens in ex.map(_metadata_worker, worker_args):
             if ph is not None:
                 phashes[f] = ph
-            if pdqv is not None:
-                pdqs[f] = pdqv
             if f not in densities or densities.get(f, 0.0) == 0.0:
                 densities[f] = dens
-            if txt:
-                texts[f] = txt
 
     blank_flags, blank_thresholds, auto_blank_threshold = _build_blank_flags(files, densities, cfg)
 
@@ -2037,9 +1564,9 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
 
     if embs is None:
         embs, ordered_paths, model_load_s = compute_embeddings(
-            [path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers, 
-            cfg.roi_ratio, cfg.embed_backend, 
-            progress_callback=_cb, force_gpu=cfg.force_gpu
+            [path_map[f] for f in files], device, cfg.batch_size, cfg.num_workers,
+            cfg.roi_ratio,
+            progress_callback=_cb, force_gpu=cfg.force_gpu,
         )
         try:
             np.save(emb_art, embs)
@@ -2053,7 +1580,7 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
 
     # 4) ANN candidates
     logger.info("[3/5] ANN을 통한 후보 이웃 검색 …")
-    idxs, sims, backend_used = build_candidates(embs, cfg.k, cfg.ann_backend, cfg.hnsw_M, cfg.hnsw_efC, cfg.hnsw_efS)
+    idxs, sims, backend_used = build_candidates(embs, cfg.k)
 
     # 5) Pairwise scoring → reuse same grouping logic but using path_map when needed
     logger.info("[4/5] 쌍 점수 산정 및 페어링(최대 가중치 매칭) …")
@@ -2064,10 +1591,8 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
         idxs,
         sims,
         phashes,
-        pdqs,
         densities,
         blank_flags,
-        texts,
         cfg,
         path_map=path_map,
     )

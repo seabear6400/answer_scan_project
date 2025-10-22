@@ -170,20 +170,12 @@ def parse_args():
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
     p.add_argument("--output_dir", default=None)
 
-    # 백엔드
-    p.add_argument("--embed_backend", choices=["resnet18", "dinov2"], default="dinov2")
-    p.add_argument("--ann_backend", choices=["auto", "brute", "faiss", "hnsw"], default="auto")
-
     # ANN 파라미터
-    p.add_argument("--k", type=int, default=20)
-    p.add_argument("--hnsw_M", type=int, default=32)
-    p.add_argument("--hnsw_efC", type=int, default=200)
-    p.add_argument("--hnsw_efS", type=int, default=64)
+    p.add_argument("--k", type=int, default=12)
 
     # 사전 필터
-    p.add_argument("--prefilter", choices=["phash", "pdq", "both"], default="phash")
+    p.add_argument("--prefilter", choices=["phash", "none"], default="phash")
     p.add_argument("--phash_thresh", type=int, default=10)
-    p.add_argument("--pdq_thresh", type=int, default=80)
     p.add_argument("--density_diff", type=float, default=0.15)
 
     # 유사도 임계값
@@ -194,17 +186,8 @@ def parse_args():
     p.add_argument("--blank_method", choices=["otsu", "sauvola"], default="sauvola")
     p.add_argument("--blank_thresh", type=float, default=0.02)
 
-    # 재정렬 / OCR (선택)
-    p.add_argument("--use_lpips", action="store_true")
-    p.add_argument("--lpips_thresh", type=float, default=0.2)
-    p.add_argument("--use_ocr", action="store_true")
-    p.add_argument("--text_sim_thresh", type=float, default=0.85)
-
-    # 정렬 (Alignment)
-    p.add_argument("--use_alignment", action="store_true")
-
     # 임베딩
-    p.add_argument("--batch", type=int, default=64)
+    p.add_argument("--batch", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--roi", type=float, nargs=4, default=[0.15, 0.15, 0.85, 0.85])
     
@@ -307,29 +290,18 @@ def main():
         os.makedirs(artifacts_dir, exist_ok=True)
 
     cfg = DetectorConfig(
-        embed_backend=args.embed_backend,
-        ann_backend=args.ann_backend,
         k=args.k,
-        hnsw_M=args.hnsw_M,
-        hnsw_efC=args.hnsw_efC,
-        hnsw_efS=args.hnsw_efS,
         prefilter=args.prefilter,
         phash_thresh=args.phash_thresh,
-        pdq_thresh=args.pdq_thresh,
         density_diff_thresh=args.density_diff,
         cnn_thresh=args.cnn_thresh,
         suspect_low=args.suspect_low,
         blank_method=args.blank_method,
         blank_density_thresh=args.blank_thresh,
-        use_lpips=args.use_lpips,
-        lpips_thresh=args.lpips_thresh,
-        use_ocr=args.use_ocr,
-        text_sim_thresh=args.text_sim_thresh,
-        use_alignment=args.use_alignment,
         batch_size=args.batch,
         num_workers=args.num_workers,
         roi_ratio=tuple(args.roi),
-        auto_optimize=not args.no_auto_optimize,  # 기본값은 True, --no_auto_optimize 플래그로 비활성화
+        auto_optimize=not args.no_auto_optimize,
     )
 
     _progress_state = {"start": time.time(), "stages": {}}
