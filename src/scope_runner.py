@@ -164,6 +164,7 @@ def run_scoped_pipeline(
     config: Optional[DetectorConfig] = None,
     recursive: bool = False,
     progress_callback: Optional[Callable[[str, float, str], None]] = None,
+    scope_complete_callback: Optional[Callable[[ExamScope, int, int, str], None]] = None,
 ) -> Dict[str, object]:
     scopes, issues = discover_exam_scopes(root_path)
 
@@ -194,6 +195,7 @@ def run_scoped_pipeline(
         return results
 
     total = len(scopes)
+    result_paths: List[str] = []
     for idx, scope in enumerate(scopes, start=1):
         destination = scope.source_dir.parent / scope.result_dir_name
         stage_prefix = f"{scope.result_dir_name}"
@@ -213,7 +215,17 @@ def run_scoped_pipeline(
             progress_callback=_scoped_progress,
         )
         results["runs"] = idx
+        try:
+            resolved_destination = str(destination.resolve())
+        except Exception:
+            resolved_destination = str(destination)
+        result_paths.append(resolved_destination)
+        if scope_complete_callback is not None:
+            try:
+                scope_complete_callback(scope, idx, total, resolved_destination)
+            except Exception:
+                pass
 
-    results["result_paths"] = [str(scope.result_path.resolve()) for scope in scopes]
+    results["result_paths"] = result_paths
 
     return results
