@@ -516,6 +516,22 @@ def main():
             # 어떤 후보도 유효하지 않으면 exe 옆 후보(첫번째)를 기본값으로 두고 아래에서 추가 처리
             if dashboard_py_path is None:
                 dashboard_py_path = candidates[0]
+
+            # frozen 상태라면 권한/잠금 문제를 완전히 회피하기 위해
+            # 원본 dashboard.py를 임시 폴더로 복사한 뒤 그 복사본을 실행하도록 강제합니다.
+            try:
+                # tmp에 복사하여 안전하게 실행
+                tmp_dir = Path(tempfile.mkdtemp(prefix="answer_scan_dash_"))
+                tmp_dashboard = tmp_dir / "dashboard.py"
+                try:
+                    shutil.copy2(str(dashboard_py_path), str(tmp_dashboard))
+                    dashboard_py_path = tmp_dashboard
+                    print(f"ℹ️ 대시보드 스크립트를 임시 폴더로 복사하여 실행합니다: {dashboard_py_path}")
+                except Exception as copy_exc:
+                    print(f"⚠️ 대시보드 임시 복사 실패: {copy_exc} — 원본 경로 사용 시도")
+            except Exception:
+                # tmp 디렉터리 생성/복사 실패 시 무시하고 원본 경로 사용
+                pass
         else:
             dashboard_py_path = Path(__file__).with_name("dashboard.py")
 
@@ -545,18 +561,10 @@ def main():
             print(f"⚠️ 대시보드 파일 접근 중 예외: {e}")
             return
 
+        # 실행 시 PATH 의존성을 피하기 위해 현 프로세스의 파이썬 실행기를 사용합니다.
+        # frozen 상태라면 sys.executable은 exe 경로를 가리키지만
+        # '-m streamlit' 방식으로 호출하면 배포 환경의 python을 사용하도록 보장할 수 있습니다.
         python_exec = sys.executable
-        try:
-            if getattr(sys, "frozen", False):
-                from shutil import which
-
-                for cand in ("py", "python", "python3"):
-                    path = which(cand)
-                    if path:
-                        python_exec = path
-                        break
-        except Exception:
-            python_exec = sys.executable
 
         cmd = [
             python_exec,
