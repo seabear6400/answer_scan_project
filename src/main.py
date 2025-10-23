@@ -472,26 +472,77 @@ def main():
         resolved_default = default_result or resolved_output
 
         if getattr(sys, "frozen", False):
+            # frozen 상태에서는 _MEIPASS(임시 추출 폴더)와 exe 옆 폴더를 후보로 검사합니다.
+            # 문제 사례: AV 또는 OS 권한 제한으로 _MEIPASS 내부 파일 접근이 거부될 수 있음.
+            # 따라서 우선 exe 옆의 dashboard.py를 시도하고, _MEIPASS는 후순위로 처리합니다.
             candidates = []
+            try:
+                exe_dir = Path(sys.executable).resolve().parent
+            except Exception:
+                exe_dir = Path(sys.executable).parent
+            # 1) 우선 실행파일 옆에 있는 dashboard.py 우선 사용
+            candidates.append(exe_dir / "dashboard.py")
             try:
                 meipass = getattr(sys, "_MEIPASS", None)
             except Exception:
                 meipass = None
             if meipass:
+                # 2) PyInstaller가 임시로 추출한 경로(후보)
                 candidates.append(Path(meipass) / "dashboard.py")
-            try:
-                exe_dir = Path(sys.executable).resolve().parent
-            except Exception:
-                exe_dir = Path(sys.executable).parent
-            candidates.append(exe_dir / "dashboard.py")
-            dashboard_py_path = next((cand for cand in candidates if cand.exists()), candidates[-1])
+
+            dashboard_py_path = None
+            for cand in candidates:
+                try:
+                    # exists() 호출 자체가 PermissionError를 던질 수 있으므로 안전하게 처리
+                    if not cand.exists():
+                        continue
+                    # 실제로 읽을 수 있는지 확인 (권한 검사)
+                    try:
+                        with cand.open("rb"):
+                            pass
+                        dashboard_py_path = cand
+                        break
+                    except PermissionError:
+                        print(f"⚠️ 권한 거부(읽기 불가): {cand} — 다음 후보 검사")
+                        continue
+                    except Exception:
+                        # 읽기 불가면 다음 후보로
+                        continue
+                except PermissionError:
+                    print(f"⚠️ 권한 거부(존재 검사 중): {cand} — 다음 후보 검사")
+                    continue
+                except Exception:
+                    continue
+            # 어떤 후보도 유효하지 않으면 exe 옆 후보(첫번째)를 기본값으로 두고 아래에서 추가 처리
+            if dashboard_py_path is None:
+                dashboard_py_path = candidates[0]
         else:
             dashboard_py_path = Path(__file__).with_name("dashboard.py")
 
         dashboard_py = str(dashboard_py_path)
-        if not Path(dashboard_py).exists():
+        # 파일이 존재하지만 권한 문제로 읽을 수 없으면 임시 파일로 복사하여 사용을 시도합니다.
+        db_path_obj = Path(dashboard_py)
+        if not db_path_obj.exists():
             print(f"⚠️ 대시보드 스크립트를 찾을 수 없습니다: {dashboard_py}")
             print("   PyInstaller 빌드 시 dashboard.py를 데이터 파일로 포함했는지 확인하세요.")
+            return
+        try:
+            with db_path_obj.open("rb") as _f:
+                pass
+        except PermissionError:
+            # 읽기 권한이 없으면, 안전하게 임시 파일로 복사하여 대시보드를 실행하도록 시도
+            try:
+                import shutil as _sh
+                tmp = Path(tempfile.gettempdir()) / f"answer_scan_dashboard_{int(time.time())}.py"
+                _sh.copy2(str(db_path_obj), str(tmp))
+                db_path_obj = tmp
+                dashboard_py = str(db_path_obj)
+                print(f"ℹ️ 권한 문제로 원본을 복사하여 임시 파일 사용: {dashboard_py}")
+            except Exception as e:
+                print(f"❌ 대시보드 파일 접근 및 임시 복사 실패: {e}")
+                return
+        except Exception as e:
+            print(f"⚠️ 대시보드 파일 접근 중 예외: {e}")
             return
 
         python_exec = sys.executable
