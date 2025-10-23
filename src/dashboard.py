@@ -182,7 +182,7 @@ def _looks_like_result_dir(path: Path) -> bool:
         for fname in marker_files:
             if (path / fname).exists():
                 return True
-        marker_dirs = {"grouped", "artifacts", "blank_answers", "ok"}
+        marker_dirs = {"artifacts"}
         try:
             for child in path.iterdir():
                 if child.name in marker_dirs:
@@ -199,7 +199,7 @@ def _discover_result_dirs(base_dir: Path, max_depth: int = 6) -> List[Path]:
     if _looks_like_result_dir(base_dir):
         candidates.append(base_dir)
 
-    skip_names = {"grouped", "ok", "blank_answers", "artifacts", "thumbnails", "disp_cache"}
+    skip_names = {"artifacts", "thumbnails", "disp_cache"}
 
     for current_root, dirnames, filenames in os.walk(base_dir):
         cur_path = Path(current_root)
@@ -250,14 +250,7 @@ def _result_dir_has_rescan(path: Path) -> bool:
                     return True
         except Exception:
             pass
-    grouped = path / "grouped"
-    try:
-        if grouped.exists():
-            for root, _dirs, files in os.walk(grouped):
-                if files:
-                    return True
-    except Exception:
-        pass
+    # older pipelines used a 'grouped' subfolder; ignore filesystem scan for it
     return False
 
 
@@ -553,19 +546,22 @@ def list_all_images(root: str, cache_buster: float = 0) -> List[str]:
 # ===== 캐싱: 베이스네임 → 경로 맵 (탐색/해결용) =====
 @st.cache_data(show_spinner=False)
 def build_basename_map(root: str, cache_buster: float = 0) -> Dict[str, str]:
-    """
-    같은 파일명이 여러 폴더에 있으면 우선순위:
-    grouped/  → ok/ → blank_answers/ → 기타
+    """Build basename->path map. If the same filename exists in multiple locations,
+    the first discovered path is used. Priority is no longer special-cased for
+    grouped/ok/blank_answers because the pipeline no longer creates those folders.
     """
     # cache_buster는 파일 변경 시 호출자가 강제 재계산하도록 허용합니다
     _ = cache_buster
     imgs = list_all_images(root, cache_buster=cache_buster)
     def pri(p: str) -> int:
+        # Keep a deterministic pseudo-priority based on path depth and lexicographic order
         low = p.replace("\\", "/").lower()
-        if "/grouped/" in low: return 0
-        if "/ok/" in low: return 1
-        if "/blank_answers/" in low: return 2
-        return 3
+        # shorter paths (closer to root) get higher priority
+        try:
+            parts = low.count("/")
+        except Exception:
+            parts = 0
+        return parts
     best: Dict[str, str] = {}
     best_pri: Dict[str, int] = {}
     for p in imgs:
@@ -1729,17 +1725,8 @@ def _all_output_paths_by_basename(bn_lower: str) -> List[str]:
                 continue
         return results
     except Exception:
-        # 폴백: 주요 서브폴더만 순회
-        results: List[str] = []
-        for sub in ("grouped", "ok", "blank_answers"):
-            base = os.path.join(OUTPUT_DIR, sub)
-            if not os.path.isdir(base):
-                continue
-            for root, _dirs, files in os.walk(base):
-                for f in files:
-                    if os.path.basename(f).lower() == bn_lower:
-                        results.append(os.path.join(root, f))
-        return results
+        # 폴백: 실패 시 빈 목록 반환 (기본 경로 스캔에 의존)
+        return []
 
 
 def _remove_file_force(path: str) -> Optional[str]:
@@ -2408,265 +2395,164 @@ if st.session_state["main_tab"] == "재스캔 필요":
                     with c2t:
                         st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
 
-    grouped_dir = os.path.join(OUTPUT_DIR, "grouped")
-    if os.path.isdir(grouped_dir):
-        groups = sorted(os.listdir(grouped_dir))
+    # 파이프라인이 grouped/ok/blank_answers 폴더를 생성하지 않으므로
+    # 파일시스템의 grouped 디렉터리 전용 로직을 제거했습니다.
+    # 대신 리포트(df)와 images_summary(img_df)를 기반으로 후보를 렌더링합니다.
+    # 그룹이 report 기반으로만 존재하는 경우 아래 블록이 처리합니다.
+    group_rows = pd.DataFrame()
+    groups: List[str] = []
+    if report_available and isinstance(df, pd.DataFrame):
+        required_cols = {"그룹ID", "파일1", "파일2"}
+        if required_cols.issubset(df.columns):
+            group_rows = df[df["그룹ID"].astype(str).str.strip().ne("-")]
+            try:
+                groups = sorted(group_rows["그룹ID"].astype(str).unique().tolist())
+            except Exception:
+                groups = []
+
         if group_filter != "전체":
             groups = [g for g in groups if g == group_filter]
 
-                # 전역 is_2file 유틸 사용
-
-        # --- 대형 비교 모드: 페이지네이션 + 두 장을 크게 나란히 ---
-        if group_view_mode.startswith("대형"):
-            total_groups = len(groups)
-            start = max(0, (group_page - 1) * group_page_size)
-            end = min(total_groups, start + group_page_size)
-            st.caption(f"그룹 {start+1}–{end} / 총 {total_groups} (페이지 {group_page})")
-
-            for gid in groups[start:end]:
-                # 그룹 텍스트/캡션을 모두 표시함 (특정 그룹 숨김 제거)
-                st.subheader(f"그룹: {gid}")
-                files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
-                if len(files) == 0:
-                    # 파일이 없으면 조용히 다음으로
-                    continue
-                # 명확한 재스캔 안내 — 그룹의 첫 두 장을 지목하여 재스캔 권고
-                if len(files) >= 2:
-                    a_name, b_name = files[0], files[1]
-                    # 뒷장인 경우 앞면 파일명 제시
-                    a_front = corresponding_front_filename(a_name)
-                    b_front = corresponding_front_filename(b_name)
-                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 해당 뒷장이 앞면과 동일한 내용이라면, 앞면 {a_front} 및 {b_front}을 다시 스캔하세요.")
-                # 대형 표시: 앞면 2장 먼저, 그 아래 뒷장 2장 표시
-                pairs = []
-                for f in files[:2]:  # 보통 2장이므로 2장만
-                    back_path = os.path.join(grouped_dir, gid, f)
-                    front_name = corresponding_front_filename(f)
-                    front_path_candidate = os.path.join(grouped_dir, gid, front_name)
-                    if not os.path.exists(front_path_candidate):
-                        # grouped 폴더에 없으면 전역 맵에서 찾기
-                        front_path_candidate = resolve_image_path(front_name) or front_path_candidate
-                    pairs.append((front_path_candidate, back_path, front_name, f))
-
-                # 두 개의 컬럼으로 앞면을 먼저 표시
-                cols = st.columns(2)
-                for i in range(len(pairs)):
-                    front_p, back_p, front_nm, back_nm = pairs[i]
-                    with cols[i]:
-                        if os.path.exists(front_p):
-                            render_rescan_image_card(front_p, f"앞면: {front_nm}", f"{gid}_front_{i}", rescan_large_px, rescan_disp_quality, card_height=360)
-                        else:
-                            st.warning(f"앞면 파일을 찾을 수 없음: {front_nm}")
-
-                # 그리고 뒷장 표시(같은 레이아웃)
-                cols2 = st.columns(2)
-                for i in range(len(pairs)):
-                    front_p, back_p, front_nm, back_nm = pairs[i]
-                    with cols2[i]:
-                        if os.path.exists(back_p):
-                            render_rescan_image_card(back_p, f"뒷면: {back_nm}", f"{gid}_back_{i}", rescan_large_px, rescan_disp_quality, card_height=360)
-                        else:
-                            st.warning(f"뒷장 파일을 찾을 수 없음: {back_nm}")
-                # --- 그리드 모드 복원: 사용자가 탭에서 '그리드'를 선택했을 때 표시되는 블록 ---
-        else:
-            if not groups:
-                st.info("표시할 그룹이 없습니다.")
-            for gid in groups:
-                st.subheader(f"그룹: {gid}")
-                files = [f for f in sorted(os.listdir(os.path.join(grouped_dir, gid))) if is_2file(f)]
-                if len(files) == 0:
-                    continue
-                if len(files) >= 2:
-                    a_name, b_name = files[0], files[1]
-                    a_front = corresponding_front_filename(a_name)
-                    b_front = corresponding_front_filename(b_name)
-                    st.error(f"재스캔 권고: 이 그룹의 파일 A: {a_name} / B: {b_name} — 해당 뒷장이 앞면과 동일한 내용이라면, 앞면 {a_front} 및 {b_front}을 다시 스캔하세요.")
-
-                # 각 이미지를 별도 항목으로 나누어 그리드에 채움
-                items = []
-                for f in files:
-                    back_path = os.path.join(grouped_dir, gid, f)
-                    front_name = corresponding_front_filename(f)
-                    front_path_candidate = os.path.join(grouped_dir, gid, front_name)
-                    if not os.path.exists(front_path_candidate):
-                        front_path_candidate = resolve_image_path(front_name) or front_path_candidate
-                    items.append(("앞면", front_name, front_path_candidate))
-                    items.append(("뒷면", f, back_path))
-
-                # 그리드: 앞면/뒷면을 각각 별도 박스로, 한 줄에 4개 표시
-                cols = st.columns(4)
-                # rescan 탭 전용 선택 상태 초기화
-                if "rescan_selected" not in st.session_state:
-                    st.session_state["rescan_selected"] = []
-
-                for idx, (kind, name, pth) in enumerate(items):
-                    with cols[idx % 4]:
-                        if os.path.exists(pth):
-                            if st.session_state.get("rescan_delete_mode", False):
-                                # 삭제 모드: 선택 가능한 카드로 렌더링
-                                render_rescan_image_card(pth, f"{kind}: {name}", f"{gid}_{idx}", rescan_thumb_px, rescan_disp_quality, card_height=220)
-                            else:
-                                # 일반 모드: 비교 선택 버튼 + 이미지 표시
-                                selected = pth in st.session_state.get("gallery_selected", [])
-                                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                                if st.button(label, key=f"cmp_rescan_{gid}_{idx}"):
-                                    toggle_compare(pth)
-                                    st.rerun()
-                                disp = make_display_image(pth, size=rescan_thumb_px, fmt=disp_fmt, quality=rescan_disp_quality)
-                                st.image(_safe_image_open(disp), caption=f"{kind}: {name}", use_container_width=True)
-                        else:
-                            st.info(f"{kind} 파일 없음: {name}")
-
+    if not groups:
+        st.info("표시할 재스캔 후보 그룹이 없습니다.")
     else:
-        group_rows = pd.DataFrame()
-        groups = []
-        if report_available and isinstance(df, pd.DataFrame):
-            required_cols = {"그룹ID", "파일1", "파일2"}
-            if required_cols.issubset(df.columns):
-                group_rows = df[df["그룹ID"].astype(str).str.strip().ne("-")]
-                # 그룹 목록은 리포트의 그룹ID 고유값으로 생성
-                try:
-                    groups = sorted(group_rows["그룹ID"].astype(str).unique().tolist())
-                except Exception:
-                    groups = []
+        view_mode = st.session_state.get("group_view_mode", "그리드(다중 썸네일)")
+        delete_mode = st.session_state.get("rescan_delete_mode", False)
+        per_row = 2 if view_mode == "대형 비교(2열)" else 4
+        display_px = rescan_large_px if view_mode == "대형 비교(2열)" else rescan_thumb_px
+        card_height = 320 if view_mode == "대형 비교(2열)" else 220
 
-            # 사이드바에서 선택한 그룹으로 필터링
-            if group_filter != "전체":
-                groups = [g for g in groups if g == group_filter]
+        for gid in groups:
+            rows = group_rows[group_rows["그룹ID"].astype(str) == gid]
+            if rows.empty:
+                continue
 
-        if not groups:
-            st.info("표시할 재스캔 후보 그룹이 없습니다.")
-        else:
-            for gid in groups:
-                rows = group_rows[group_rows["그룹ID"].astype(str) == gid]
-                if rows.empty:
-                    continue
-                st.markdown(f"### 그룹 {gid}")
-                file_candidates = set()
-                for _, row in rows.iterrows():
-                    for col in ("파일1", "파일2"):
-                        val = row.get(col)
-                        if isinstance(val, str) and val:
-                            file_candidates.add(val)
+            st.markdown(f"### 그룹 {gid}")
 
-                files = [f for f in sorted(file_candidates) if is_2file(f)]
-                if not files:
-                    st.caption("표시 가능한 이미지가 없습니다.")
-                    continue
+            file_candidates: set[str] = set()
+            for _, row in rows.iterrows():
+                for col in ("파일1", "파일2"):
+                    val = row.get(col)
+                    if isinstance(val, str) and val:
+                        file_candidates.add(val)
 
-                cols = st.columns(4)
-                if "rescan_selected" not in st.session_state:
-                    st.session_state["rescan_selected"] = []
+            back_files = [f for f in sorted(file_candidates) if is_2file(f)]
+            if not back_files:
+                st.caption("표시 가능한 이미지가 없습니다.")
+                continue
 
-                for idx, f in enumerate(files):
-                    back_path = resolve_image_path(f)
-                    if not back_path or not os.path.exists(back_path):
-                        continue
-                    front_name = corresponding_front_filename(f)
-                    front_path_candidate = resolve_image_path(front_name) or front_name
-                    items = [
-                        ("앞면", front_name, front_path_candidate),
-                        ("뒷면", f, back_path),
-                    ]
-                    for item_idx, (kind, name, pth) in enumerate(items):
-                        if not pth or not os.path.exists(pth):
-                            continue
-                        with cols[(idx * len(items) + item_idx) % 4]:
-                            if st.session_state.get("rescan_delete_mode", False):
-                                render_rescan_image_card(
-                                    pth,
-                                    f"{kind}: {name}",
-                                    f"{gid}_{idx}_{item_idx}",
-                                    rescan_thumb_px,
-                                    rescan_disp_quality,
-                                    card_height=220,
-                                )
-                            else:
-                                selected = pth in st.session_state.get("gallery_selected", [])
-                                label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                                if st.button(label, key=f"cmp_rescan_{gid}_{idx}_{item_idx}"):
-                                    toggle_compare(pth)
-                                    st.rerun()
-                                disp = make_display_image(
-                                    pth,
-                                    size=rescan_thumb_px,
-                                    fmt=disp_fmt,
-                                    quality=rescan_disp_quality,
-                                )
-                                st.image(
-                                    _safe_image_open(disp),
-                                    caption=f"{kind}: {name}",
-                                    use_container_width=True,
-                                )
+            # 각 뒷면 파일 단위로 앞/뒤 이미지를 묶어 뷰 모드에 맞게 렌더링합니다.
+            grouped_items: List[List[Dict[str, str]]] = []
+            for back_name in back_files:
+                back_path = resolve_image_path(back_name)
+                front_name = corresponding_front_filename(back_name)
+                front_path = resolve_image_path(front_name)
+
+                entries: List[Dict[str, str]] = []
+                if front_path and os.path.exists(front_path):
+                    entries.append({"kind": "앞면", "name": front_name, "path": front_path})
+                if back_path and os.path.exists(back_path):
+                    entries.append({"kind": "뒷면", "name": back_name, "path": back_path})
+
+                if entries:
+                    grouped_items.append(entries)
+
+            if not grouped_items:
+                st.caption("표시 가능한 이미지가 없습니다.")
+                continue
+
+            def _render_tile(entry: Dict[str, str], pair_idx: int, item_idx: int) -> None:
+                key_stub = f"{gid}_{pair_idx}_{item_idx}"
+                label = f"{entry['kind']}: {entry['name']}"
+                path = entry["path"]
+
+                if delete_mode:
+                    render_rescan_image_card(
+                        path,
+                        label,
+                        key_stub,
+                        display_px,
+                        rescan_disp_quality,
+                        card_height=card_height,
+                    )
+                    return
+
+                selected = path in st.session_state.get("gallery_selected", [])
+                button_label = "✔ 비교 취소" if selected else "↔ 비교 선택"
+                button_key = f"cmp_rescan_{view_mode}_{key_stub}"
+                if st.button(button_label, key=button_key):
+                    toggle_compare(path)
+                    st.rerun()
+
+                disp = make_display_image(
+                    path,
+                    size=display_px,
+                    fmt=disp_fmt,
+                    quality=rescan_disp_quality,
+                )
+                st.image(
+                    _safe_image_open(disp),
+                    caption=label,
+                    use_container_width=True,
+                )
+
+            if view_mode == "대형 비교(2열)":
+                for pair_idx, bundle in enumerate(grouped_items):
+                    cols = st.columns(min(per_row, len(bundle)))
+                    for item_idx, entry in enumerate(bundle):
+                        with cols[item_idx]:
+                            _render_tile(entry, pair_idx, item_idx)
+                st.markdown("")
+            else:
+                cols = st.columns(per_row)
+                flat_entries = [
+                    (entry, pair_idx, item_idx)
+                    for pair_idx, bundle in enumerate(grouped_items)
+                    for item_idx, entry in enumerate(bundle)
+                ]
+                for flat_idx, (entry, pair_idx, item_idx) in enumerate(flat_entries):
+                    with cols[flat_idx % per_row]:
+                        _render_tile(entry, pair_idx, item_idx)
 
 
 # === Tab: 정상/공백 ===
 elif st.session_state["main_tab"] == "정상/공백 답안":
-    ok_dir = os.path.join(OUTPUT_DIR, "ok")
-    blank_dir = os.path.join(OUTPUT_DIR, "blank_answers")
+    # 파일 시스템의 ok/blank_answers 하위 폴더에 의존하지 않고
+    # images_summary(df)와 report(df)를 기반으로 정상/공백 뷰를 제공합니다.
     sel = st.session_state.get("ok_view_mode", "모두 보기")
 
-    # 전역 is_2file 유틸 사용
-    dir_mode = os.path.isdir(ok_dir) or os.path.isdir(blank_dir)
+    def _render_from_summary(title: str, mask: pd.Series) -> None:
+        subset = img_df[mask] if isinstance(img_df, pd.DataFrame) else pd.DataFrame()
+        st.subheader(title)
+        if subset.empty or "파일" not in subset.columns:
+            st.caption("표시할 이미지가 없습니다.")
+            return
+        files = [f for f in subset["파일"].astype(str).tolist() if is_2file(f) and _is_back_page(f)]
+        if not files:
+            st.caption("표시할 항목이 없습니다.")
+            return
+        cols = st.columns(grid_cols)
+        for idx, f in enumerate(files):
+            img_path = resolve_image_path(f)
+            if not img_path or not os.path.exists(img_path):
+                continue
+            disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
+            with cols[idx % grid_cols]:
+                st.image(_safe_image_open(disp), caption=f, use_container_width=True)
 
-    if dir_mode:
-        if sel in ["모두 보기", "정상만"] and os.path.isdir(ok_dir):
-            st.subheader("✅ 정상 답안")
-            files = [f for f in sorted(os.listdir(ok_dir)) if is_2file(f)]
-            cols = st.columns(grid_cols)
-            for idx, f in enumerate(files):
-                img_path = os.path.join(ok_dir, f)
-                disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
-                with cols[idx % grid_cols]:
-                    st.image(_safe_image_open(disp), caption=f, use_container_width=True)
+    if sel in ["모두 보기", "정상만"]:
+        if "빈칸여부" in img_df.columns:
+            mask = ~img_df["빈칸여부"].astype(bool)
+        else:
+            mask = pd.Series([False] * len(img_df), index=img_df.index)
+        _render_from_summary("✅ 정상 답안", mask)
 
-        if sel in ["모두 보기", "공백만"] and os.path.isdir(blank_dir):
-            st.subheader("⭕ 공백 답안")
-            files = [f for f in sorted(os.listdir(blank_dir)) if is_2file(f) and _is_back_page(f)]
-            if not files:
-                st.caption("표시할 항목이 없습니다.")
-            else:
-                cols = st.columns(grid_cols)
-                for idx, f in enumerate(files):
-                    img_path = os.path.join(blank_dir, f)
-                    if not os.path.exists(img_path):
-                        continue
-                    disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
-                    with cols[idx % grid_cols]:
-                        st.image(_safe_image_open(disp), caption=f, use_container_width=True)
-    else:
-        def _render_from_summary(title: str, mask: pd.Series) -> None:
-            subset = img_df[mask] if isinstance(img_df, pd.DataFrame) else pd.DataFrame()
-            st.subheader(title)
-            if subset.empty or "파일" not in subset.columns:
-                st.caption("표시할 이미지가 없습니다.")
-                return
-            files = [f for f in subset["파일"].astype(str).tolist() if is_2file(f) and _is_back_page(f)]
-            if not files:
-                st.caption("표시할 항목이 없습니다.")
-                return
-            cols = st.columns(grid_cols)
-            for idx, f in enumerate(files):
-                img_path = resolve_image_path(f)
-                if not img_path or not os.path.exists(img_path):
-                    continue
-                disp = make_display_image(img_path, size=ok_thumb_px, fmt=disp_fmt, quality=ok_disp_quality)
-                with cols[idx % grid_cols]:
-                    st.image(_safe_image_open(disp), caption=f, use_container_width=True)
-
-        if sel in ["모두 보기", "정상만"]:
-            if "빈칸여부" in img_df.columns:
-                mask = ~img_df["빈칸여부"].astype(bool)
-            else:
-                mask = pd.Series([False] * len(img_df), index=img_df.index)
-            _render_from_summary("✅ 정상 답안", mask)
-
-        if sel in ["모두 보기", "공백만"]:
-            if "빈칸여부" in img_df.columns:
-                mask = img_df["빈칸여부"].astype(bool)
-            else:
-                mask = pd.Series([False] * len(img_df), index=img_df.index)
-            _render_from_summary("⭕ 공백 답안", mask)
+    if sel in ["모두 보기", "공백만"]:
+        if "빈칸여부" in img_df.columns:
+            mask = img_df["빈칸여부"].astype(bool)
+        else:
+            mask = pd.Series([False] * len(img_df), index=img_df.index)
+        _render_from_summary("⭕ 공백 답안", mask)
 
 
 # === Tab: 전체 보기 ===

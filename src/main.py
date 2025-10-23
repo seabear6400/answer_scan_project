@@ -471,8 +471,21 @@ def main():
         resolved_default = default_result or resolved_output
 
         dashboard_py = os.path.join(os.path.dirname(__file__), "dashboard.py")
+        python_exec = sys.executable
+        try:
+            if getattr(sys, "frozen", False):
+                from shutil import which
+
+                for cand in ("py", "python", "python3"):
+                    path = which(cand)
+                    if path:
+                        python_exec = path
+                        break
+        except Exception:
+            python_exec = sys.executable
+
         cmd = [
-            sys.executable,
+            python_exec,
             "-m",
             "streamlit",
             "run",
@@ -492,16 +505,19 @@ def main():
         if resolved_default:
             env["ANSWER_SCAN_DEFAULT_RESULT"] = resolved_default
 
-        if args.detach and os.name == 'nt':
+        # On Windows, launching via 'start' creates a detached process that
+        # won't be terminated when the parent exits. Force detach when the
+        # user requested --detach OR when running as a frozen exe.
+        if os.name == 'nt' and (args.detach or getattr(sys, "frozen", False)):
             with dashboard_lock:
                 if dashboard_state["started"]:
                     return
                 cmdline = [
                     "cmd",
-                    "/c",
+                    "/k",
                     "start",
                     "",
-                    sys.executable,
+                    python_exec,
                     "-m",
                     "streamlit",
                     "run",
@@ -512,12 +528,15 @@ def main():
                 ]
                 if resolved_default:
                     cmdline.append(f"--default_result={resolved_default}")
-                subprocess.Popen(
-                    cmdline,
-                    cwd=os.path.dirname(os.path.dirname(__file__)),
-                    env=env,
-                )
-                dashboard_state["started"] = True
+                try:
+                    subprocess.Popen(
+                        cmdline,
+                        cwd=os.path.dirname(os.path.dirname(__file__)),
+                        env=env,
+                    )
+                    dashboard_state["started"] = True
+                except Exception as e:
+                    print(f"❌ 대시보드 분리 실행 실패: {e}")
             return
 
         with dashboard_lock:
