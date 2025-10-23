@@ -10,6 +10,7 @@ import time
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
+import tempfile
 
 # OpenCV 로깅 레벨 설정 (경고 메시지 숨김)
 os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
@@ -470,7 +471,29 @@ def main():
 
         resolved_default = default_result or resolved_output
 
-        dashboard_py = os.path.join(os.path.dirname(__file__), "dashboard.py")
+        if getattr(sys, "frozen", False):
+            candidates = []
+            try:
+                meipass = getattr(sys, "_MEIPASS", None)
+            except Exception:
+                meipass = None
+            if meipass:
+                candidates.append(Path(meipass) / "dashboard.py")
+            try:
+                exe_dir = Path(sys.executable).resolve().parent
+            except Exception:
+                exe_dir = Path(sys.executable).parent
+            candidates.append(exe_dir / "dashboard.py")
+            dashboard_py_path = next((cand for cand in candidates if cand.exists()), candidates[-1])
+        else:
+            dashboard_py_path = Path(__file__).with_name("dashboard.py")
+
+        dashboard_py = str(dashboard_py_path)
+        if not Path(dashboard_py).exists():
+            print(f"⚠️ 대시보드 스크립트를 찾을 수 없습니다: {dashboard_py}")
+            print("   PyInstaller 빌드 시 dashboard.py를 데이터 파일로 포함했는지 확인하세요.")
+            return
+
         python_exec = sys.executable
         try:
             if getattr(sys, "frozen", False):
@@ -505,10 +528,13 @@ def main():
         if resolved_default:
             env["ANSWER_SCAN_DEFAULT_RESULT"] = resolved_default
 
-        # On Windows, launching via 'start' creates a detached process that
-        # won't be terminated when the parent exits. Force detach when the
-        # user requested --detach OR when running as a frozen exe.
-        if os.name == 'nt' and (args.detach or getattr(sys, "frozen", False)):
+    # Windows에서는 'start'로 실행하면 부모 프로세스가 종료되어도
+    # 자식 프로세스가 계속 실행되는 분리(detach) 프로세스가 생성됩니다.
+    # 분리는 사용자가 명시적으로 --detach를 지정한 경우에만 수행합니다.
+    # frozen(exe) 상태에서 자동으로 분리하면 부모 exe가 바로 종료되므로
+    # 기본 동작은 분리하지 않고 부모 프로세스를 유지하여 exe가 사용자가
+    # 닫을 때까지 계속 실행되도록 합니다.
+        if os.name == 'nt' and args.detach:
             with dashboard_lock:
                 if dashboard_state["started"]:
                     return
@@ -758,7 +784,7 @@ def main():
         pipeline_thread = threading.Thread(target=_worker, daemon=True)
         pipeline_thread.start()
 
-        # 토스트 창을 메인 스레드에서 실행 (blocking until closed)
+    # 토스트 창을 메인 스레드에서 실행 (창이 닫힐 때까지 블로킹)
         try:
             toast = ToastToast(_progress_state, pipeline_thread)
             toast.run()
@@ -832,6 +858,154 @@ def main():
     _maybe_launch_dashboard("summary", dashboard_output_dir, dashboard_base_dir, default_result_path)
     if not first_scope_event.is_set():
         first_scope_event.set()
+
+    # 추가 진단: 실행 환경 및 대시보드 프로세스 상태를 출력하여
+    # 즉시 종료되는 원인을 확인할 수 있게 합니다.
+    try:
+        is_frozen = getattr(sys, "frozen", False)
+    except Exception:
+        is_frozen = False
+    try:
+        proc = dashboard_state.get("proc") if isinstance(dashboard_state, dict) else None
+    except Exception:
+        proc = None
+    try:
+        dbg1 = f"[DEBUG] sys.frozen={is_frozen}"
+        dbg2 = f"[DEBUG] dashboard_state keys={list(dashboard_state.keys()) if isinstance(dashboard_state, dict) else type(dashboard_state)}"
+        print(dbg1)
+        print(dbg2)
+        # 파일에도 기록하여 더블클릭 실행처럼 콘솔이 바로 닫혀도 진단 가능하게 함
+        try:
+            log_dir = None
+            try:
+                # effective_output_dir는 이 스코프에서 존재하는 경우가 많음
+                if 'effective_output_dir' in locals() and effective_output_dir:
+                    log_dir = Path(effective_output_dir)
+            except Exception:
+                log_dir = None
+            if not log_dir:
+                log_dir = Path(tempfile.gettempdir())
+            log_path = log_dir / 'answer_scan_dashboard_debug.log'
+            with open(log_path, 'a', encoding='utf-8') as _lf:
+                _lf.write(dbg1 + '\n')
+                _lf.write(dbg2 + '\n')
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        if proc is None:
+            print("[DEBUG] dashboard proc: None (대시보드가 분리되었거나 실행 실패)")
+            try:
+                # 로그에도 남김
+                log_path = (Path(effective_output_dir) if ('effective_output_dir' in locals() and effective_output_dir) else Path(tempfile.gettempdir())) / 'answer_scan_dashboard_debug.log'
+                with open(log_path, 'a', encoding='utf-8') as _lf:
+                    _lf.write('[DEBUG] dashboard proc: None\n')
+            except Exception:
+                pass
+        else:
+            try:
+                pid = getattr(proc, 'pid', 'unknown')
+            except Exception:
+                pid = 'unknown'
+            try:
+                poll = proc.poll()
+            except Exception:
+                poll = 'err'
+            msg = f"[DEBUG] dashboard proc PID={pid} poll={poll}"
+            print(msg)
+            try:
+                log_path = (Path(effective_output_dir) if ('effective_output_dir' in locals() and effective_output_dir) else Path(tempfile.gettempdir())) / 'answer_scan_dashboard_debug.log'
+                with open(log_path, 'a', encoding='utf-8') as _lf:
+                    _lf.write(msg + '\n')
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 인터랙티브 콘솔이면 엔터를 눌러 결과를 확인하도록 대기
+    try:
+        if sys.stdin and sys.stdin.isatty():
+            print("디버그 출력을 확인하려면 엔터를 누르세요...")
+            try:
+                input()
+            except Exception:
+                time.sleep(1)
+    except Exception:
+        pass
+
+    # frozen 상태(exe)로 실행 중인 경우:
+    # 대시보드 서브프로세스가 실행되어 있으면 해당 프로세스가 종료될 때까지
+    # 부모 exe를 유지합니다. 분리(detach) 방식으로 실행되어 subprocess 핸들이
+    # 없을 경우에는 사용자가 직접 프로세스를 종료할 때까지 계속 실행합니다.
+    try:
+        if getattr(sys, "frozen", False):
+            proc = dashboard_state.get("proc")
+            # subprocess 핸들이 있으면 종료될 때까지 대기
+            if proc is not None:
+                try:
+                    # PID와 상태를 출력하여 빠르게 종료되는 원인을 파악할 수 있게 함
+                    try:
+                        pid_info = f"(PID={getattr(proc, 'pid', 'unknown')})"
+                    except Exception:
+                        pid_info = "(PID=unknown)"
+                    print(f"대시보드가 실행 중입니다. {pid_info} 대시보드를 닫을 때까지 프로그램을 종료하지 않습니다.")
+
+                    # 대시보드 프로세스가 종료될 때까지 블록 대기
+                    while proc.poll() is None:
+                        time.sleep(1)
+
+                    # 프로세스가 끝났다면 종료 코드와 남은 로그를 출력
+                    exit_code = proc.poll()
+                    print(f"대시보드 프로세스가 종료되었습니다. 종료 코드: {exit_code}")
+                    try:
+                        # 남은 stdout을 읽어 가능한 로그를 출력
+                        if getattr(proc, 'stdout', None):
+                            remaining = proc.stdout.read()
+                            if remaining:
+                                print("--- 대시보드 로그(종료 시점) ---")
+                                print(remaining)
+                                print("--- 로그 끝 ---")
+                    except Exception:
+                        pass
+
+                    # 콘솔 환경이면 사용자의 확인을 기다려 즉시 종료되는 현상을 방지
+                    try:
+                        if sys.stdin and sys.stdin.isatty():
+                            print("엔터를 눌러 프로그램을 종료하세요...")
+                            try:
+                                input()
+                            except Exception:
+                                time.sleep(1)
+                    except Exception:
+                        # 비인터랙티브 환경인 경우 잠깐 대기 후 종료
+                        time.sleep(2)
+                except KeyboardInterrupt:
+                    # 콘솔에서 테스트할 때 Ctrl+C로 종료 허용
+                    pass
+            else:
+                # subprocess 핸들이 없는 경우(분리 실행),
+                # 사용자가 직접 프로세스를 종료할 때까지 프로그램을 유지
+                try:
+                    print("프로그램을 계속 실행합니다. 종료하려면 프로세스를 직접 종료하세요.")
+                    # 인터랙티브 셸이라면 엔터로 종료할 수 있도록 안내
+                    if sys.stdin and sys.stdin.isatty():
+                        print("대기 중입니다. 엔터를 누르면 종료합니다.")
+                        try:
+                            input()
+                        except Exception:
+                            # 입력이 불가능하면 무한 대기
+                            while True:
+                                time.sleep(10)
+                    else:
+                        # 비인터랙티브(예: 더블클릭 실행)인 경우 안전하게 장시간 대기
+                        while True:
+                            time.sleep(10)
+                except KeyboardInterrupt:
+                    pass
+    except Exception:
+        # 모니터링 로직 실패 시에도 프로그램이 예기치 않게 종료되지 않도록 처리
+        pass
 
 if __name__ == "__main__":
     # Windows(PyInstaller) 멀티프로세싱 호환: 내부 포크 인자 처리
