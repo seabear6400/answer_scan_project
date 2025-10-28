@@ -929,39 +929,15 @@ def main():
     except Exception:
         proc = None
     try:
-        dbg1 = f"[DEBUG] sys.frozen={is_frozen}"
-        dbg2 = f"[DEBUG] dashboard_state keys={list(dashboard_state.keys()) if isinstance(dashboard_state, dict) else type(dashboard_state)}"
-        print(dbg1)
-        print(dbg2)
-        # 파일에도 기록하여 더블클릭 실행처럼 콘솔이 바로 닫혀도 진단 가능하게 함
-        try:
-            log_dir = None
-            try:
-                # effective_output_dir는 이 스코프에서 존재하는 경우가 많음
-                if 'effective_output_dir' in locals() and effective_output_dir:
-                    log_dir = Path(effective_output_dir)
-            except Exception:
-                log_dir = None
-            if not log_dir:
-                log_dir = Path(tempfile.gettempdir())
-            log_path = log_dir / 'answer_scan_dashboard_debug.log'
-            with open(log_path, 'a', encoding='utf-8') as _lf:
-                _lf.write(dbg1 + '\n')
-                _lf.write(dbg2 + '\n')
-        except Exception:
-            pass
+        # 기록은 로거에 위임: 기본 핸들러(콘솔 출력)는 로깅 레벨에 따라 출력 여부가 결정됩니다.
+        logging.debug("sys.frozen=%s", is_frozen)
+        logging.debug("dashboard_state keys=%s", (list(dashboard_state.keys()) if isinstance(dashboard_state, dict) else type(dashboard_state)))
     except Exception:
         pass
     try:
+        # 상태 정보도 로거에 기록합니다(기본 동작은 출력하지 않음).
         if proc is None:
-            print("[DEBUG] dashboard proc: None (대시보드가 분리되었거나 실행 실패)")
-            try:
-                # 로그에도 남김
-                log_path = (Path(effective_output_dir) if ('effective_output_dir' in locals() and effective_output_dir) else Path(tempfile.gettempdir())) / 'answer_scan_dashboard_debug.log'
-                with open(log_path, 'a', encoding='utf-8') as _lf:
-                    _lf.write('[DEBUG] dashboard proc: None\n')
-            except Exception:
-                pass
+            logging.debug("dashboard proc: None (대시보드가 분리되었거나 실행 실패)")
         else:
             try:
                 pid = getattr(proc, 'pid', 'unknown')
@@ -971,27 +947,13 @@ def main():
                 poll = proc.poll()
             except Exception:
                 poll = 'err'
-            msg = f"[DEBUG] dashboard proc PID={pid} poll={poll}"
-            print(msg)
-            try:
-                log_path = (Path(effective_output_dir) if ('effective_output_dir' in locals() and effective_output_dir) else Path(tempfile.gettempdir())) / 'answer_scan_dashboard_debug.log'
-                with open(log_path, 'a', encoding='utf-8') as _lf:
-                    _lf.write(msg + '\n')
-            except Exception:
-                pass
+            logging.debug("dashboard proc PID=%s poll=%s", pid, poll)
     except Exception:
         pass
 
     # 인터랙티브 콘솔이면 엔터를 눌러 결과를 확인하도록 대기
-    try:
-        if sys.stdin and sys.stdin.isatty():
-            print("디버그 출력을 확인하려면 엔터를 누르세요...")
-            try:
-                input()
-            except Exception:
-                time.sleep(1)
-    except Exception:
-        pass
+    # 디버그 출력을 위한 대기 동작은 제거했습니다. 필요한 경우 로깅 레벨을 조정하여
+    # debug 정보를 확인하세요.
 
     # frozen 상태(exe)로 실행 중인 경우:
     # 대시보드 서브프로세스가 실행되어 있으면 해당 프로세스가 종료될 때까지
