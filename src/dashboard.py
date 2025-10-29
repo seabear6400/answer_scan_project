@@ -6,6 +6,7 @@ import importlib
 from pathlib import Path
 from typing import Tuple, List, Dict, Optional
 import base64
+import argparse
 
 import streamlit as st
 import polars as pl
@@ -23,27 +24,17 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
-# ===== Optional metrics/components (존재하면 사용) =====
-
-def _optional_import(module_name: str, attr_name: Optional[str] = None):
-    try:
-        module = importlib.import_module(module_name)
-    except Exception:
-        return None
-    if attr_name:
-        return getattr(module, attr_name, None)
-    return module
-
-
 # Pillow resample 상수 호환
 try:
     RESAMPLE = Image.Resampling.LANCZOS
 except Exception:
     RESAMPLE = Image.LANCZOS
 
-# ====== 인자 파싱 (streamlit run ... -- --output_dir=...) ======
-import argparse
+
 def parse_streamlit_args():
+    """Streamlit 실행 시 `--` 이후의 사용자 인자를 파싱합니다.
+    (예: streamlit run app.py -- --output_dir=...)
+    """
     if '--' in sys.argv:
         idx = sys.argv.index('--')
         user_args = sys.argv[idx + 1:]
@@ -66,10 +57,17 @@ def parse_streamlit_args():
 
 
 def _request_rerun() -> None:
+    """Streamlit에서 페이지를 다시 실행하도록 요청합니다. 환경에 따라 적절한 API를 선택합니다."""
     if hasattr(st, "rerun") and callable(st.rerun):
-        st.rerun()
+        try:
+            st.rerun()
+        except Exception:
+            pass
     elif hasattr(st, "experimental_rerun") and callable(st.experimental_rerun):
-        st.experimental_rerun()
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
     else:
         stop_fn = getattr(st, "stop", None)
         if callable(stop_fn):
@@ -1914,84 +1912,22 @@ def delete_selected_images(target_paths: List[str], also_delete_input: bool = Fa
     return successes, failures
 
 
-@st.cache_data(show_spinner=False)
-def _encode_image_base64(img_path: str) -> str:
-    with open(img_path, "rb") as fh:
-        return base64.b64encode(fh.read()).decode("utf-8")
+# 이미지를 base64로 인코딩하거나 카드 스타일을 생성하는 헬퍼들은
+# 대시보드 UI의 특정 동적 기능을 위해 존재했습니다. 소규모 파이프라인용으로는
+# 이러한 커스텀 CSS/인코딩 도우미를 제거하여 의존성/복잡도를 낮춥니다.
 
-
-def _delete_card_css(button_key: str, img_base64: str, selected: bool, height: int, disabled: bool) -> str:
-    # 선택 상태에 따라 빨간 테두리와 강한 그림자 효과 적용
-    border_color = "#ef4444" if selected else "rgba(148,163,184,0.45)"
-    border_width = "4px" if selected else "2px"
-    glow = "0 0 0 6px rgba(239,68,68,0.35), 0 4px 12px rgba(239,68,68,0.25)" if selected else "0 2px 8px rgba(15,23,42,0.12)"
-    status_badge = "✓ 삭제 대상" if selected else "클릭하여 선택"
-    badge_bg = "rgba(239,68,68,0.95)" if selected else "rgba(15,23,42,0.65)"
-    overlay = "rgba(239,68,68,0.15)" if selected else "transparent"
-    
-    return f"""
-    <style>
-    div[data-testid="stButton"][data-key="{button_key}"] {{
-        width: 100%;
-        position: relative;
-    }}
-    div[data-testid="stButton"][data-key="{button_key}"] > button {{
-        width: 100%;
-        height: {height}px;
-        border-radius: 12px;
-        border: {border_width} solid {border_color};
-        background-image: url('data:image/webp;base64,{img_base64}');
-        background-size: cover;
-        background-position: center center;
-        padding: 0;
-        margin: 0;
-        box-shadow: {glow};
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        cursor: pointer;
-        position: relative;
-    }}
-    div[data-testid="stButton"][data-key="{button_key}"] > button::before {{
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        border-radius: 10px;
-        background: {overlay};
-        pointer-events: none;
-        transition: background 0.3s ease;
-    }}
-    div[data-testid="stButton"][data-key="{button_key}"] > button:hover {{
-        transform: translateY(-3px) scale(1.02);
-        border-color: #ef4444;
-        box-shadow: 0 0 0 6px rgba(239,68,68,0.25), 0 6px 16px rgba(239,68,68,0.2);
-    }}
-    div[data-testid="stButton"][data-key="{button_key}"] > button:active {{
-        transform: translateY(-1px) scale(0.98);
-    }}
-    div[data-testid="stButton"][data-key="{button_key}"] > button:disabled {{
-        cursor: not-allowed;
-        transform: none;
-        opacity: 0.92;
-    }}
-    div[data-testid="stButton"][data-key="{button_key}"] > button::after {{
-        content: '{status_badge}';
-        position: absolute;
-        bottom: 10px;
-        right: 12px;
-        font-size: 12px;
-        font-weight: 600;
-        color: #fff;
-        background: {badge_bg};
-        padding: 4px 12px;
-        border-radius: 999px;
-        letter-spacing: -0.1px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        z-index: 10;
-    }}
-    </style>
-    """
+# @st.cache_data(show_spinner=False)
+# def _encode_image_base64(img_path: str) -> str:
+#     with open(img_path, "rb") as fh:
+#         return base64.b64encode(fh.read()).decode("utf-8")
+#
+# def _delete_card_css(button_key: str, img_base64: str, selected: bool, height: int, disabled: bool) -> str:
+#     # (삭제) 카드 스타일 생성용 복잡한 CSS를 여기서 생성하던 코드입니다.
+#     # 소규모 UI에서는 기본 Streamlit 버튼/이미지 구성만으로 충분하다고 판단하여 제거했습니다.
+#     return ""
+# (삭제됨) 이전의 _delete_card_css에서 생성하던 복잡한 CSS 블록을 제거했습니다.
+# 소규모 대시보드에서는 Streamlit의 기본 마크업/스타일로 충분하므로
+# 사용자 정의 CSS를 대폭 줄였습니다.
 
 
 def render_rescan_image_card(img_path: str, caption: str, key_suffix: str, target_px: int, quality: int, card_height: int) -> None:
