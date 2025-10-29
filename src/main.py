@@ -14,28 +14,10 @@ import tempfile
 
 # OpenCV 로깅 레벨 설정 (경고 메시지 숨김)
 os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
-# timm 라이브러리 로그 숨기기
-logging.getLogger('timm').setLevel(logging.ERROR)
-
-# 가능한 한 일찍 백그라운드 스레드에서 tkinter를 예열하여
-# 폴더 선택 대화상자가 요청될 때 더 빠르게 열리도록 합니다.
-# 모듈 레벨에서는 가벼운 임포트만 유지하여 시작 시 차단을 방지합니다.
+# timm 사용 비활성화로 더 이상 timm 로그 조정 불필요 (삭제)
+# tkinter 예열 데몬 스레드는 제거했습니다. 필요 시 main()에서 동적으로 임포트합니다.
 _tk_warmed: bool = False
 _tk_mods: Optional[Tuple[object, object]] = None
-def _warm_tk():
-    global _tk_warmed, _tk_mods
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    # main()가 즉시 사용할 수 있도록 모듈 참조를 유지합니다.
-        _tk_mods = (tk, filedialog)
-        _tk_warmed = True
-    except Exception:
-        _tk_warmed = False
-
-# 모듈 import 시 즉시 예열을 시작합니다(데몬 스레드로 프로세스 종료를 방해하지 않습니다).
-_tk_thread = threading.Thread(target=_warm_tk, daemon=True)
-_tk_thread.start()
 
 
 def _format_duration(seconds: Optional[float]) -> Optional[str]:

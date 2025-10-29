@@ -9,7 +9,6 @@ import numpy as np
 from PIL import Image
 import io
 from PIL import UnidentifiedImageError
-import pathlib
 import imagehash
 import cv2
 import pandas as pd
@@ -24,7 +23,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.models import resnet18, ResNet18_Weights
 import concurrent.futures
-import hashlib
+# hashlib는 이 파일 내에서 사용하지 않으므로 제거
 
 # 경량화: 무거운 선택적 외부 의존성들을 제거/비활성화합니다.
 # 소규모(<=150) 대상에서는 다음 기능을 사용하지 않습니다: DINOv2(timm), FAISS, HNSW, LPIPS, PDQ, OCR, Sauvola, NetworkX
@@ -49,40 +48,12 @@ logger.setLevel(logging.CRITICAL)  # CRITICAL만 표시 (거의 없음)
 
 
 def diagnose_gpu():
-    """GPU 상태를 진단하고 문제점을 찾습니다."""
-    print("=" * 60)
-    print("🔍 GPU 진단 시작")
-    print("=" * 60)
-    
-    print(f"PyTorch 버전: {torch.__version__}")
-    print(f"CUDA 사용 가능: {torch.cuda.is_available()}")
-    
-    if torch.cuda.is_available():
-        print(f"CUDA 버전: {torch.version.cuda}")
-        print(f"GPU 개수: {torch.cuda.device_count()}")
-        
-        for i in range(torch.cuda.device_count()):
-            props = torch.cuda.get_device_properties(i)
-            print(f"GPU {i}: {props.name}")
-            print(f"  메모리: {props.total_memory / (1024**3):.1f}GB")
-            print(f"  Compute Capability: {props.major}.{props.minor}")
-            
-        try:
-            # 더 작은 테스트 텐서로 빠른 확인
-            test_tensor = torch.zeros(100, 100).cuda()
-            print("✅ GPU 텐서 생성 테스트 성공")
-            del test_tensor
-            torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"❌ GPU 텐서 생성 테스트 실패: {e}")
-    else:
-        print("❌ CUDA 사용 불가능")
-        print("가능한 원인:")
-        print("  - NVIDIA GPU 드라이버가 설치되지 않음")
-        print("  - CUDA Toolkit이 설치되지 않음")
-        print("  - PyTorch가 CPU 버전으로 설치됨")
-        
-    print("=" * 60)
+    """간단한 GPU 진단 유틸리티(출력 최소화).
+
+    원래는 디버깅용으로 상세 출력을 했으나 소규모 배포에서는 콘솔 출력을 최소화합니다.
+    이 함수는 `get_device_info()`와 동일한 정보를 조용히 반환합니다.
+    """
+    return get_device_info()
 
 
 @dataclass
@@ -364,8 +335,7 @@ def phash_of(path: str, roi_ratio: Tuple[float, float, float, float]) -> Optiona
 # 필요하면 이 주석을 제거하고 pdqhash 관련 코드를 복원하세요.
 
 
-def hamming_distance_bits(a_bits: np.ndarray, b_bits: np.ndarray) -> int:
-    return int(np.sum(a_bits ^ b_bits))
+# PDQ 관련 계산은 소규모 전용에서 사용하지 않으므로 관련 헬퍼를 제거했습니다.
 
 
 def ink_density(
@@ -717,13 +687,6 @@ def _handle_remove_readonly(func, path, exc_info):
     os.chmod(path, stat.S_IWRITE)
     func(path)
 
-def _recreate_clean_dir(path: str):
-    """폴더를 완전 초기화(삭제 후 재생성, 권한 문제 강제 해제)"""
-    if os.path.isdir(path):
-        shutil.rmtree(path, onerror=_handle_remove_readonly)
-    os.makedirs(path, exist_ok=True)
-
-
 def _copy_to_dir(src: str, dst_dir: str):
     """원본 파일(src)을 파일 이름은 그대로 유지한 채 대상 디렉터리(dst_dir)로 복사합니다. 대상 디렉터리가 없으면 생성합니다."""
     try:
@@ -884,11 +847,7 @@ def _pair_and_group(name_by_row: Dict[int, str], idxs: np.ndarray, sims: np.ndar
         if cfg.prefilter in ("phash", "both"):
             if abs(phashes.get(fi, imagehash.hex_to_hash("0"*16)) - phashes.get(fj, imagehash.hex_to_hash("0"*16))) > cfg.phash_thresh:
                 return False
-        if cfg.prefilter in ("pdq", "both") and _HAS_PDQ:
-            a = pdqs.get(fi, None); b = pdqs.get(fj, None)
-            if a is not None and b is not None:
-                if hamming_distance_bits(a, b) > cfg.pdq_thresh:
-                    return False
+        # PDQ 관련 필터는 소규모 구성에서 비활성화됨 (pdq 연산은 사용하지 않음)
         if abs(densities.get(fi, 0.0) - densities.get(fj, 0.0)) > cfg.density_diff_thresh:
             return False
         return True
@@ -1466,58 +1425,8 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
     io_per = 0.008
     notes = f'heuristic+{gpu_name if has_gpu else "CPU"}'
 
-    # 임베딩 처리량을 개선하기 위한 선택적 샘플링
-    try:
-        # 샘플 수 결정: GPU가 있으면 더 큰 샘플 사용
-        default_cap = min(128 if has_gpu else 32, N)
-        sample_n = int(min(max(4, sample_size), default_cap))
-        if sample_n >= 1 and N >= sample_n:
-            # 데이터셋 전체에서 균등하게 샘플 선택
-            step = max(1, N // sample_n)
-            sample_paths = [paths[i] for i in range(0, N, step)][:sample_n]
-            device = device_info['device']
-
-            # 샘플 이미지에 대해 모델 로드 + 임베딩 시간을 측정
-            import time as _time
-            t0 = _time.time()
-            try:
-                logger.info(f"시간 추정을 위한 샘플링: {sample_n}개 이미지 ({gpu_name if has_gpu else 'CPU'})")
-                sample_embs, _, model_load_s = compute_embeddings(
-                    sample_paths, device, min(16, sample_n), 0, 
-                    getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend,
-                    force_gpu=getattr(cfg, 'force_gpu', True)
-                )
-                # 모델을 한 번 로드(가능한 timm/resnet 오버헤드 포함)
-                _model = load_model(device, backend)
-                # DataLoader 준비 및 전방 전달 실행
-                ds = ImgDataset(sample_paths, getattr(cfg, 'roi_ratio', (0.15, 0.15, 0.85, 0.85)), backend)
-                dl = DataLoader(ds, batch_size=min(getattr(cfg, 'batch_size', 32), sample_n), shuffle=False, num_workers=0)
-                _model.eval()
-                with torch.no_grad():
-                    for x, _p in dl:
-                        x = x.to(device)
-                        _ = _model(x)
-                t_elapsed = _time.time() - t0
-                measured = t_elapsed / max(1, len(sample_paths))
-                if measured > 0:
-                    emb_per = measured
-                    notes = f'sampled {len(sample_paths)} imgs; device={device.type}'
-            except Exception as e:
-                # 폴백: 보수적으로 순수 I/O 로드 시간만 측정
-                notes = f'fallback_io_only due to {type(e).__name__}'
-                io_t0 = _time.time()
-                from PIL import Image
-                for pth in sample_paths:
-                    try:
-                        img = Image.open(pth)
-                        img.load()
-                    except Exception:
-                        pass
-                measured = _time.time() - io_t0
-                if measured > 0:
-                    emb_per = measured / max(1, len(sample_paths))
-    except Exception:
-        pass
+    # 소규모 대상에서는 샘플링을 통한 실제 측정 대신 히ュー리스틱 값을 사용합니다.
+    # (샘플링은 compute_embeddings를 호출하여 무거운 연산을 수행하므로 제거)
 
     meta_s = meta_per * N
     embed_s = emb_per * N
@@ -1526,43 +1435,7 @@ def estimate_pipeline_time(input_dir_or_paths, cfg: Optional[DetectorConfig] = N
 
     result = {"n_images": N, "meta_s": float(meta_s), "embed_s": float(embed_s), "ann_s": float(ann_s), "io_s": float(io_s), "total_s": float(total_s), "notes": notes}
 
-    # 학습된 성능 모델이 있으면 불러와서 전체 시간을 보정 예측 시도
-    try:
-        art_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "artifacts")
-        model_path = os.path.join(art_dir, "perf_model.pkl")
-        if os.path.exists(model_path):
-            try:
-                import joblib
-                mdl = joblib.load(model_path)
-                # 학습 스크립트와 일치하는 특성 행 구성
-                feat = {
-                    "n_images": N,
-                    "mean_size": 0.0,
-                    "mean_w": 0.0,
-                    "mean_h": 0.0,
-                    "batch_size": int(getattr(cfg, 'batch_size', 0)),
-                    "num_workers": int(getattr(cfg, 'num_workers', 0)),
-                    "gpu": int(torch.cuda.is_available()),
-                    "mem_total": 0,
-                    "cpu_count": int(os.cpu_count() or 0),
-                    "meta_s": float(meta_s),
-                    "embed_s": float(embed_s),
-                    "ann_s": float(ann_s),
-                    "io_s": float(io_s),
-                    "platform": platform.system(),
-                    "embed_backend": getattr(cfg, 'embed_backend', 'dinov2')
-                }
-                # 모델은 학습 시 컬럼 순서를 기대함; 단일 행 DataFrame 형태로 전달
-                import pandas as _pd
-                Xpred = _pd.DataFrame([feat])
-                ypred = mdl.predict(Xpred)
-                if len(ypred) > 0:
-                    result['total_s'] = float(ypred[0])
-                    result['notes'] = (result.get('notes','') + ' +ml') if result.get('notes') else 'ml'
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # 소규모 전용: 학습된 성능 모델 보정 로직 제거(복잡도 및 외부 의존성 제거)
 
     return result
 
