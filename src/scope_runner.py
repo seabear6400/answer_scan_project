@@ -15,6 +15,7 @@ IMAGE_EXTS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
 # 계열과 교시 코드를 추출할 때 사용할 간단한 패턴
 _SERIES_KEYWORDS: Dict[str, str] = {
+    # 기본 매핑: 키워드 -> 코드
     "인문": "1",
     "자연": "2",
 }
@@ -41,11 +42,26 @@ class ExamScope:
 
 
 def _extract_series_code(parts: Sequence[Path]) -> Optional[str]:
+    # 우선 순위:
+    # 1) 폴더 이름에 명시된 숫자(1 또는 2)가 있는 경우 그 숫자를 우선 사용
+    #    예: '인문 2', '2 인문', '자연(1)'
+    # 2) 숫자가 없으면 기존 키워드 매핑을 사용
+    digit_re = re.compile(r"\b([12])\b")
+    # keyword_near_digit: keyword가 있고 근처에 1/2가 있으면 그 숫자 반환
+    for part in parts:
+        name = part.name
+        # 1) 이름에서 명시적 숫자 찾기
+        m = digit_re.search(name)
+        if m:
+            return m.group(1)
+
+    # 2) 숫자가 명시되지 않은 경우 기존 키워드 매핑 사용
     for part in parts:
         name = part.name
         for keyword, code in _SERIES_KEYWORDS.items():
             if keyword in name:
                 return code
+
     return None
 
 

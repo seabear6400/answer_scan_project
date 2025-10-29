@@ -246,6 +246,7 @@ def _result_dir_has_rescan(path: Path) -> bool:
     if csv_path.exists():
         try:
             for chunk in pd.read_csv(csv_path, usecols=["상태"], chunksize=2000):
+                
                 if chunk["상태"].isin(targets).any():
                     return True
         except Exception:
@@ -460,13 +461,27 @@ def load_report(
                 df_out = df_out[ordered]
         return df_out
     if os.path.exists(report_csv):
-        if columns:
-            df_csv = pd.read_csv(report_csv, usecols=lambda c: c in set(columns))
-            ordered = [col for col in columns if col in df_csv.columns]
-            if ordered:
-                df_csv = df_csv[ordered]
-            return df_csv
-        return pd.read_csv(report_csv)
+        try:
+            if columns:
+                df_csv = pd.read_csv(report_csv, usecols=lambda c: c in set(columns))
+                ordered = [col for col in columns if col in df_csv.columns]
+                if ordered:
+                    df_csv = df_csv[ordered]
+                return df_csv
+            return pd.read_csv(report_csv)
+        except Exception as e:
+            # 빈 CSV 파일 등으로 인해 pandas가 실패하는 경우를 안전하게 처리합니다.
+            # 빈 파일이면 컬럼 정보가 없으므로 빈 DataFrame을 반환해 UI가 멈추지 않도록 합니다.
+            try:
+                # pandas EmptyDataError를 포함한 모든 읽기 실패는 빈 DataFrame으로 처리
+                from pandas.errors import EmptyDataError
+                if isinstance(e, EmptyDataError):
+                    return pd.DataFrame(columns=columns or [])
+            except Exception:
+                pass
+            # 그 외 예외는 디버그 로깅 후 빈 DataFrame 반환
+            logger.debug(f"report.csv 로드 실패 ({report_csv}): {e}")
+            return pd.DataFrame(columns=columns or [])
     raise FileNotFoundError("결과 리포트 파일을 찾을 수 없습니다.")
 
 @st.cache_data(show_spinner=False)
@@ -497,7 +512,11 @@ def list_all_images(root: str, cache_buster: float = 0) -> List[str]:
     cache_buster는 외부에서 캐시를 무효화할 때 사용합니다.
     """
     try:
-        summary_df = load_img_summary(IMG_SUMMARY, cache_buster=cache_buster)
+        # 주의: 전역 IMG_SUMMARY는 현재 선택된 OUTPUT_DIR을 가리키지만,
+        # 함수 호출자가 전달한 root를 사용해 이미지 요약 파일 경로를 계산하면
+        # 캐시 키가 root에 따라 분리되어 폴더 전환 시 더 안전합니다.
+        summary_csv = os.path.join(root, "images_summary.csv")
+        summary_df = load_img_summary(summary_csv, cache_buster=cache_buster)
         ordered_txt = os.path.join(root, "artifacts", "ordered_paths.txt")
         ordered_map: Dict[str, List[str]] = {}
         if os.path.isfile(ordered_txt):
@@ -574,14 +593,91 @@ def build_basename_map(root: str, cache_buster: float = 0) -> Dict[str, str]:
 
 SEARCH_CACHE: Dict[str, Optional[str]] = {}
 
+
+def clear_caches_and_state(session_keys: Optional[List[str]] = None) -> None:
+    """안전한 캐시 및 세션 상태 초기화 유틸리티
+
+    - 최신 Streamlit API(`st.cache_data.clear`)를 우선 사용하고, 실패하면
+      `st.experimental_memo.clear`로 폴백합니다.
+    - 개별 데코레이터 기반 캐시 함수(list_all_images 등)에 대해 `.clear()`가
+      가능하면 시도합니다.
+    - session_keys에 명시된 세션 키들(예: ['gallery_selected'])을 제거합니다.
+    모든 예외는 흘려보내어 대시보드가 중단되지 않도록 설계했습니다.
+    """
+    try:
+        # 최신 Streamlit 전역 캐시 우선 삭제
+        if hasattr(st, "cache_data") and callable(getattr(st.cache_data, "clear", None)):
+            try:
+                st.cache_data.clear()
+            except Exception:
+                # 내부 구현 차이로 실패할 수 있음; 폴백으로 계속 진행
+                pass
+    except Exception:
+        pass
+
+    try:
+        # 구버전 Streamlit 호환
+        if hasattr(st, "experimental_memo") and callable(getattr(st.experimental_memo, "clear", None)):
+            try:
+                st.experimental_memo.clear()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 개별 함수별 clear() 시도 (존재하면 안전하게 호출)
+    for _fn in (globals().get('load_img_summary'), globals().get('list_all_images'), globals().get('build_basename_map')):
+        try:
+            if _fn and hasattr(_fn, 'clear') and callable(getattr(_fn, 'clear')):
+                try:
+                    _fn.clear()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # SEARCH_CACHE 등 모듈 레벨 캐시 초기화
+    try:
+        SEARCH_CACHE.clear()
+    except Exception:
+        pass
+
+    # 세션 상태 키 제거(옵션)
+    if session_keys:
+        for k in session_keys:
+            try:
+                if k in st.session_state:
+                    del st.session_state[k]
+            except Exception:
+                pass
+
+    # 일반적인 UI 관련 키 제거(안전하게 시도)
+    for k in ("gallery_limit", "gallery_selected"):
+        try:
+            if k in st.session_state:
+                del st.session_state[k]
+        except Exception:
+            pass
+
 if dir_changed:
-    # 다른 결과 폴더로 전환 시 캐시와 선택 상태를 초기화해 전체 보기 탭이 즉시 반영되도록 보정
-    load_img_summary.clear()
-    list_all_images.clear()
-    build_basename_map.clear()
-    st.session_state.gallery_limit = 120
-    st.session_state.gallery_selected = []
-    SEARCH_CACHE.clear()
+    # 선택한 결과 폴더가 바뀐 경우, 안전한 유틸리티를 통해 캐시와 관련 세션 상태를 초기화합니다.
+    # 상세 무효화 로직은 `clear_caches_and_state`에 위임됩니다.
+    try:
+        clear_caches_and_state(session_keys=["gallery_selected", "gallery_limit"])
+    except Exception:
+        # 극단적 예외가 발생하면 최소한 기본 상태만 초기화
+        try:
+            st.session_state.gallery_limit = 120
+        except Exception:
+            pass
+        try:
+            st.session_state.gallery_selected = []
+        except Exception:
+            pass
+        try:
+            SEARCH_CACHE.clear()
+        except Exception:
+            pass
 
 BASENAME_MAP = build_basename_map(str(OUTPUT_DIR))
 
