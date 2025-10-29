@@ -16,27 +16,18 @@ import polars as pl
 
 import stat
 import time
-import threading
+# `threading` 모듈은 이 파일 내부에서 사용되지 않으므로 제거했습니다.
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.models import resnet18, ResNet18_Weights
 import concurrent.futures
-# hashlib는 이 파일 내에서 사용하지 않으므로 제거
 
-# 경량화: 무거운 선택적 외부 의존성들을 제거/비활성화합니다.
-# 소규모(<=150) 대상에서는 다음 기능을 사용하지 않습니다: DINOv2(timm), FAISS, HNSW, LPIPS, PDQ, OCR, Sauvola, NetworkX
-# 필요 시 다시 활성화하면 됩니다.
+# 경량화 플래그 (주의)
+# - 대부분의 선택적 외부 의존성 플래그는 실제 사용처가 없어 제거했습니다.
+# - DINOv2(timm) 관련 체크용 `_HAS_TIMM`만 유지합니다. 필요 시 전역 구성으로 분리하세요.
 _HAS_TIMM = False
-_HAS_FAISS = False
-_HAS_HNSW = False
-_HAS_LPIPS = False
-_HAS_PDQ = False
-_HAS_OCR = False
-_HAS_RAPIDFUZZ = False
-_HAS_SAUVOLA = False
-_HAS_NX = False
 
 from sklearn.neighbors import NearestNeighbors
 

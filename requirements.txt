@@ -1,71 +1,43 @@
+# 핵심/권장 의존성
+# (표준 라이브러리는 requirements에 포함할 필요가 없습니다.)
+
 # 핵심 라이브러리
 numpy
 opencv-python
-pillow
+Pillow
 torch
 torchvision
 scikit-learn
 pandas
 polars
 
-# GUI/대시보드
-streamlit
-tkinter  # 주의: 대부분 Python 표준 라이브러리이지만 일부 Linux 배포판에서는 별도 설치 필요
-
-# 이미지 해시/유사도
+# 이미지 처리 / 유틸
 imagehash
-
-# 그래프/네트워크 알고리즘 (매칭)
-networkx>=3.2
-
-# 진행률 표시
 tqdm
-
-# 시스템 정보/성능 모니터링
 psutil
-platform  # 표준 라이브러리
+scikit-image  # Sauvola 등 고급 이미지 처리 (권장)
 
-# 고급 딥러닝 모델 (옵션)
-timm  # DINOv2 등을 위한 Vision Transformer 모델
+# 대시보드 / GUI
+streamlit
+# tkinter은 표준 라이브러리로 보통 pip 설치 불필요 (OS에 따라 별도 패키지 필요할 수 있음)
 
-# 고급 기능 (옵션이지만 권장)
-lpips  # 이미지 유사도 측정
-scikit-image  # Sauvola threshold 등 고급 이미지 처리
-paddleocr  # OCR 텍스트 인식
-rapidfuzz  # 빠른 문자열 유사도
+# 그래프/매칭
+networkx
 
-# 해시 (옵션)
-pdqhash  # PDQ hash for image deduplication
+# 병렬 처리/유틸(선택)
+joblib
 
-# ANN 검색 백엔드 (옵션 - 성능 향상)
-faiss-cpu  # CPU 버전 (GPU 사용시 faiss-gpu로 변경)
-hnswlib  # 메모리 효율적인 ANN
+# 선택적/옵션 패키지 (비교적 무겁거나 환경 의존적이므로 주석 처리)
+# timm           # DINOv2 등 고급 ViT 모델이 필요하면 활성화
+# lpips          # 이미지 유사도 측정 (옵션)
+# paddleocr      # OCR (옵션, 설치시 추가 시스템 의존성 있음)
+# rapidfuzz      # 빠른 문자열 유사도
+# pdqhash        # PDQ 해시 (옵션)
+# faiss-cpu      # ANN (CPU) — 성능 향상용 (옵션)
+# hnswlib        # 메모리 효율적인 ANN (옵션)
+# streamlit-image-comparison  # 대시보드 확장 (옵션)
 
-# 대시보드 확장 (옵션 - UI 개선)
-streamlit-image-comparison
-
-# 파일 처리/병렬화
-joblib  # 병렬 처리
-concurrent.futures  # 표준 라이브러리
-threading  # 표준 라이브러리
-pathlib  # 표준 라이브러리
-hashlib  # 표준 라이브러리
-
-# 기타 유틸리티
-argparse  # 표준 라이브러리
-logging  # 표준 라이브러리
-os  # 표준 라이브러리
-sys  # 표준 라이브러리
-shutil  # 표준 라이브러리
-stat  # 표준 라이브러리
-time  # 표준 라이브러리
-re  # 표준 라이브러리
-glob  # 표준 라이브러리
-csv  # 표준 라이브러리
-subprocess  # 표준 라이브러리
-itertools  # 표준 라이브러리
-warnings  # 표준 라이브러리
-io  # 표준 라이브러리
-dataclasses  # 표준 라이브러리 (Python 3.7+)
-typing  # 표준 라이브러리
-collections  # 표준 라이브러리
+# 노트:
+# - 표준 라이브러리(예: pathlib, threading, argparse 등)는 requirements에 포함할 필요가 없습니다.
+# - GPU용 PyTorch는 플랫폼(윈도우/리눅스)과 CUDA 버전에 따라 설치 명령이 다릅니다.
+#   공식 안내를 참고하여 `torch`/`torchvision` 설치 명령을 조정하세요.

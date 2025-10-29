@@ -1291,9 +1291,13 @@ with path_tab:
     # 텍스트 입력의 표시값은 현재의 result_base_dir을 사용합니다.
     # 버튼으로 기본 경로를 적용/복원하면 st.session_state['result_base_dir']이 변경되고
     # _request_rerun()로 재실행될 때 이 입력의 값이 갱신되어 보이게 됩니다.
+    # Streamlit에서 위젯을 `value=`(기본값)로 생성하고 동시에 세션 상태(Session State) API로 값을 설정하면
+    # 경고가 발생할 수 있습니다. 이를 방지하려면 위젯을 만들기 전에 세션 키를 먼저 초기화하세요.
+    # 또한 `key=`를 사용하는 경우 `value=`를 함께 전달하지 않습니다.
+    if "result_base_input" not in st.session_state:
+        st.session_state["result_base_input"] = st.session_state.get("result_base_dir", str(BASE_OUTPUT_DIR))
     base_input = st.text_input(
         "검색 시작 경로",
-        value=st.session_state.get("result_base_dir", str(BASE_OUTPUT_DIR)),
         key="result_base_input",
     )
 
@@ -1332,7 +1336,30 @@ with path_tab:
         except Exception:
             pass
 
-    path_cols = st.columns(3)
+    # 사이드바 내 버튼을 좀 더 보기 좋게 확장합니다.
+    # - 두 버튼을 동일한 너비로 배치하고
+    # - CSS로 최소 너비와 패딩, 글자 크기를 늘려 시각적으로 정돈합니다.
+    btn_css = """
+    <style>
+    /* 사이드바 내부 버튼 스타일 적용 */
+    [data-testid="stSidebar"] .stButton>button {
+        min-width: 160px !important;
+        padding: 10px 22px !important;
+        font-size: 16px !important;
+        border-radius: 10px !important;
+    }
+    /* 약간의 간격을 주어 버튼이 붙어 보이지 않게 함 */
+    [data-testid="stSidebar"] .stButton {
+        margin-bottom: 6px !important;
+    }
+    </style>
+    """
+    try:
+        st.markdown(btn_css, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+    path_cols = st.columns([2, 2])
     with path_cols[0]:
         st.button("경로 적용", key="apply_base_dir", on_click=_apply_base_dir_cb)
     with path_cols[1]:

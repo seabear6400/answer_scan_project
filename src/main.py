@@ -14,10 +14,7 @@ import tempfile
 
 # OpenCV 로깅 레벨 설정 (경고 메시지 숨김)
 os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
-# timm 사용 비활성화로 더 이상 timm 로그 조정 불필요 (삭제)
-# tkinter 예열 데몬 스레드는 제거했습니다. 필요 시 main()에서 동적으로 임포트합니다.
-_tk_warmed: bool = False
-_tk_mods: Optional[Tuple[object, object]] = None
+
 
 
 def _format_duration(seconds: Optional[float]) -> Optional[str]:
@@ -188,13 +185,10 @@ def main():
     args = parse_args()
     # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다.
     try:
-        if _tk_warmed and _tk_mods:
-            tk, filedialog = _tk_mods
-        else:
-            import tkinter as tk
-            from tkinter import filedialog
+        import tkinter as tk
+        from tkinter import filedialog
 
-    # 대화상자를 위한 단기간의 루트를 생성하고 최상위로 표시되도록 합니다.
+        # 대화상자를 위한 단기간의 루트를 생성하고 최상위로 표시되도록 합니다.
         root = tk.Tk()
         root.attributes('-topmost', True)
         root.withdraw()
