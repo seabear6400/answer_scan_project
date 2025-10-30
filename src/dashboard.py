@@ -1400,83 +1400,274 @@ quality_options_common = ["빠름", "균형", "선명"]
 
 quality_options_common = ["빠름", "균형", "선명"]
 
-# 사이드바 재분류: 상위 탭 3개 (경로/작업, 보기설정, 기타)
-# - '보기설정' 내부에 다시 '재스캔 필요', '정상/공백 답안', '전체보기' 탭을 둡니다.
-path_tab, view_tab, misc_tab = st.sidebar.tabs(["경로/작업", "보기설정", "기타"])
+# 사이드바 탭 생성
+path_tab, theme_tab, settings_tab = st.sidebar.tabs(["분석 경로", "테마", "보기 설정"])
 
 with path_tab:
-    # ===== 경로 / 작업 =====
-    st.markdown("**분석 경로 / 작업**")
-    # 입력 필드 초기화: 세션 상태에 기존 값을 유지
+    st.markdown("**분석 경로 설정**")
+    # 텍스트 입력의 표시값은 현재의 result_base_dir을 사용합니다.
+    # 버튼으로 기본 경로를 적용/복원하면 st.session_state['result_base_dir']이 변경되고
+    # _request_rerun()로 재실행될 때 이 입력의 값이 갱신되어 보이게 됩니다.
+    # Streamlit에서 위젯을 `value=`(기본값)로 생성하고 동시에 세션 상태(Session State) API로 값을 설정하면
+    # 경고가 발생할 수 있습니다. 이를 방지하려면 위젯을 만들기 전에 세션 키를 먼저 초기화하세요.
+    # 또한 `key=`를 사용하는 경우 `value=`를 함께 전달하지 않습니다.
     if "result_base_input" not in st.session_state:
         st.session_state["result_base_input"] = st.session_state.get("result_base_dir", str(BASE_OUTPUT_DIR))
+    base_input = st.text_input(
+        "검색 시작 경로",
+        key="result_base_input",
+    )
 
-    # 검색 시작 경로 입력 (help에 상세 설명 포함)
-    st.text_input("검색 시작 경로", key="result_base_input",
-                  help="결과를 탐색할 최상위 폴더를 지정하세요. 상대/절대 경로 모두 사용 가능합니다.")
+    # 안전하게 세션 상태를 변경하기 위한 콜백 함수들
+    def _apply_base_dir_cb():
+        raw = st.session_state.get("result_base_input", "")
+        try:
+            new_base = Path(raw).expanduser()
+            normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
+            st.session_state["result_base_dir"] = str(normalized_base)
+            st.session_state.pop("selected_result_dir", None)
+            st.session_state["_cli_base_marker"] = str(normalized_base)
+        except Exception:
+            # 실패 시 기존 동작 유지
+            pass
+        # 콜백 내부에서는 st.rerun()이 no-op일 수 있으므로 여기서는 명시적 재실행을 호출하지 않습니다.
+        # 세션 상태를 변경하면 Streamlit이 콜백 종료 후 자동으로 스크립트를 재실행합니다.
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
 
-    # 적용 / 기본 버튼: 같은 행에 배치하여 공간 절약
-    a_col, b_col = st.columns([1, 1])
-    with a_col:
-        if st.button("적용", key="apply_base_dir"):
-            # 세션 상태 갱신 및 캐시 초기화
-            st.session_state["result_base_dir"] = st.session_state.get("result_base_input", str(BASE_OUTPUT_DIR))
-            try:
-                clear_caches_and_state()
-            except Exception:
-                pass
-            st.experimental_rerun()
-    with b_col:
-        if st.button("기본", key="reset_base_dir"):
-            st.session_state["result_base_dir"] = str(CLI_BASE_DIR if "CLI_BASE_DIR" in globals() else BASE_OUTPUT_DIR)
-            try:
-                clear_caches_and_state()
-            except Exception:
-                pass
-            st.experimental_rerun()
+    def _reset_base_dir_cb():
+        # CLI 기본값으로 복원: 마커과 result_base_dir만 갱신합니다.
+        try:
+            st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+            st.session_state.pop("selected_result_dir", None)
+            st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
+            # 텍스트 입력도 같은 값을 반영하도록 설정
+            st.session_state["result_base_input"] = str(CLI_BASE_DIR)
+        except Exception:
+            pass
+        # 콜백 내부에서 강제 rerun을 호출하지 않음: 세션 상태 변경으로 자동 재실행됩니다.
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
 
-    # 결과 폴더 선택 드롭다운: 없을 때 안내 메시지 출력
-    if result_options:
-        st.selectbox("분석 결과 폴더", options=result_options, key="selected_result_dir",
-                     format_func=_format_result_option, help="대시보드에서 열 결과 폴더를 선택하세요.")
-    else:
-        st.info("선택 가능한 결과 폴더가 없습니다. 경로를 확인하세요.")
-
-with view_tab:
-    # ===== 보기설정: 내부 탭으로 기능 분리 =====
-    st.markdown("**보기 설정**")
-    rescan_tab, ok_tab, gallery_tab = st.tabs(["재스캔 필요", "정상/공백 답안", "전체보기"])
-
-    with rescan_tab:
-        st.markdown("재스캔 탭에서 사용할 필터와 표시 옵션을 설정합니다.")
-        st.checkbox("재스캔 항목만 보기", key="show_only_rescan", help="재스캔 필요로 표시된 항목만 화면에 표시합니다.")
-        st.selectbox("재스캔 정렬", options=["유사도(내림차순)", "수정시각(최신순)", "그룹ID"], key="rescan_sort", help="재스캔 목록 정렬 방식")
-        st.selectbox("화질 프로필", options=quality_options_common, key="rescan_quality_profile", help="재스캔 탭에서 사용할 썸네일 품질을 선택합니다.")
-
-    with ok_tab:
-        st.markdown("정상(OK) 및 공백(Blank) 답안 보기 설정")
-        st.radio("보기 옵션", ["모두 보기", "정상만", "공백만"], key="ok_view_mode", horizontal=True,
-                 help="OK/Blank 항목을 빠르게 전환합니다.")
-        st.selectbox("정렬 기준", options=["그룹ID", "파일명", "유사도"], key="ok_sort", help="정렬 방식을 선택하세요.")
-        st.slider("그리드 열 개수", min_value=2, max_value=10, value=int(st.session_state.get("grid_cols", 5)), key="grid_cols", help="정상/공백 보기의 한 행 썸네일 개수")
-
-    with gallery_tab:
-        st.markdown("전체 이미지 갤러리 설정")
-        st.number_input("초기 로드 수", min_value=10, max_value=1000, value=st.session_state.get("gallery_limit", 120), key="gallery_limit", help="한 번에 불러올 갤러리 항목 수")
-        st.text_input("파일명·경로 검색", key="gallery_search", placeholder="예: 10002, scan, .png", help="파일명 또는 경로 일부로 필터링합니다.")
-        st.selectbox("갤러리 정렬", options=["파일명", "수정시각(최신)", "유사도"], key="gallery_sort", help="갤러리 정렬 기준")
-        st.checkbox("썸네일 지연 로드 사용", key="gallery_lazy", value=True, help="초기에는 축소 썸네일만 로드하고, 필요시 원본을 로드합니다.")
-
-with misc_tab:
-    # ===== 기타: 테마, 사이드바 폭 등 전역 설정 =====
-    st.markdown("**기타 설정**")
+    # 사이드바 내 버튼을 좀 더 보기 좋게 확장합니다.
+    # - 두 버튼을 동일한 너비로 배치하고
+    # - CSS로 최소 너비와 패딩, 글자 크기를 늘려 시각적으로 정돈합니다.
+    btn_css = """
+    <style>
+    /* 사이드바 내부 버튼 스타일 적용 */
+    [data-testid="stSidebar"] .stButton>button {
+        min-width: 160px !important;
+        padding: 10px 22px !important;
+        font-size: 16px !important;
+        border-radius: 10px !important;
+    }
+    /* 약간의 간격을 주어 버튼이 붙어 보이지 않게 함 */
+    [data-testid="stSidebar"] .stButton {
+        margin-bottom: 6px !important;
+    }
+    </style>
+    """
     try:
-        theme_keys = list(THEMES.keys())
+        st.markdown(btn_css, unsafe_allow_html=True)
     except Exception:
-        theme_keys = ["Light (기본)"]
-    st.selectbox("테마 선택", options=theme_keys, key="theme", help="앱 전역 테마를 선택합니다.")
-    st.slider("사이드바 폭 (px)", min_value=220, max_value=520, value=st.session_state.get("sidebar_width_px", 350), key="sidebar_width_px", help="사이드바 너비를 조절합니다.")
-    st.caption("삭제/재스캔과 같은 위험한 작업은 갤러리 내 워크플로에서 진행하세요. 항상 2단계 확인을 거칩니다.")
+        pass
+
+    path_cols = st.columns([2, 2])
+    with path_cols[0]:
+        st.button("경로 적용", key="apply_base_dir", on_click=_apply_base_dir_cb)
+    with path_cols[1]:
+        st.button("기본 경로 복원", key="reset_base_dir", on_click=_reset_base_dir_cb)
+    # (목록 새로고침 버튼 제거됨)
+
+    st.selectbox(
+        "분석 결과 폴더",
+        options=result_options,
+        format_func=_format_result_option,
+        key="selected_result_dir",
+    )
+
+with theme_tab:
+    st.markdown("**대시보드 테마**")
+    sidebar_width_default = int(st.session_state.get("sidebar_width_px", 350))
+    sidebar_slider_args = {
+        "label": "사이드바 폭",
+        "min_value": 260,
+        "max_value": 520,
+        "key": "sidebar_width_px",
+        "help": "사이드바 영역의 폭을 조정해 긴 라벨이나 컨트롤이 잘려 보이지 않도록 합니다."
+    }
+    st.slider(value=sidebar_width_default, **sidebar_slider_args)
+    theme_keys = list(THEMES.keys())
+    default_idx = theme_keys.index(st.session_state.get('theme', theme_keys[0])) if st.session_state.get('theme') in theme_keys else 0
+    st.radio('테마 선택', theme_keys, index=default_idx, key='theme', horizontal=True)
+    sel = st.session_state.get('theme', theme_keys[0])
+    pal = THEMES[sel]['palette']
+    swatch_html = '<div style="display:flex;gap:6px;margin-top:8px;align-items:center">'
+    for k in ['bg','card_bg','text','accent']:
+        if k in pal:
+            swatch_html += f"<div style=\"width:36px;height:24px;border-radius:6px;background:{pal[k]};border:1px solid rgba(0,0,0,0.06)\" title=\"{k}\"></div>"
+    swatch_html += '</div>'
+    st.markdown(swatch_html, unsafe_allow_html=True)
+    st.write(THEMES[sel].get('desc',''))
+
+with settings_tab:
+    # 재스캔 관련 설정
+    st.markdown("**재스캔 워크플로**")
+    group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
+    st.selectbox(
+        "그룹 선택",
+        ["전체"] + group_list,
+        key="group_filter",
+        help="재스캔 탭의 후보 목록을 특정 그룹으로 한정합니다.",
+        on_change=switch_main_tab,
+        args=("재스캔 필요",)
+    )
+    st.radio(
+        "보기 방식",
+        ["대형 비교(2열)", "그리드(다중 썸네일)"],
+        key="group_view_mode",
+        horizontal=True,
+        help="대형 비교는 앞·뒤면을 크게 보여주고, 그리드는 그룹 내 모든 이미지를 타일로 확인합니다.",
+        on_change=switch_main_tab,
+        args=("재스캔 필요",)
+    )
+    rescan_quality_default = st.session_state.get("rescan_quality_profile", "균형")
+    rescan_q_idx = quality_options_common.index(rescan_quality_default) if rescan_quality_default in quality_options_common else 1
+    st.radio(
+        "화질 프로파일",
+        quality_options_common,
+        index=rescan_q_idx,
+        key="rescan_quality_profile",
+        horizontal=True,
+        help="빠름(512px), 균형(1024px), 선명(1600px) 수준으로 썸네일 품질과 크기를 조정합니다.",
+        on_change=switch_main_tab,
+        args=("재스캔 필요",)
+    )
+
+    delete_mode = st.session_state.get("rescan_delete_mode", False)
+    delete_targets = st.session_state.get("rescan_delete_targets", [])
+    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
+
+    if not delete_mode:
+        delete_button_label = "🗑️ 삭제"
+    else:
+        if waiting_confirm:
+            delete_button_label = "🗑️ 삭제 확인 중"
+        elif delete_targets:
+            delete_button_label = f"🗑️ 삭제 ({len(delete_targets)}개)"
+        else:
+            delete_button_label = "🗑️ 삭제 실행"
+
+    if st.button(delete_button_label, key="rescan_delete_button"):
+        if not delete_mode:
+            st.session_state.rescan_delete_mode = True
+            st.session_state.rescan_delete_targets = []
+            st.session_state.rescan_show_confirm = False
+            st.session_state.rescan_delete_feedback = None
+        else:
+            if delete_targets:
+                st.session_state.rescan_show_confirm = True
+            else:
+                st.session_state.rescan_delete_feedback = ("warn", "삭제할 이미지를 먼저 선택하세요.")
+
+    if delete_mode and not waiting_confirm:
+        if st.button("취소", key="rescan_delete_cancel"):
+            st.session_state.rescan_delete_mode = False
+            st.session_state.rescan_delete_targets = []
+            st.session_state.rescan_delete_feedback = None
+            st.rerun()
+
+    st.markdown("---")
+    # 정상/공백 탭 컨트롤
+    st.markdown("**정상/공백 답안 보기**")
+    st.radio(
+        "보기 옵션",
+        ["모두 보기", "정상만", "공백만"],
+        key="ok_view_mode",
+        horizontal=True,
+        help="정상/공백 탭에서 표시할 답안 유형을 빠르게 전환합니다.",
+        on_change=switch_main_tab,
+        args=("정상/공백 답안",)
+    )
+    grid_default = int(st.session_state.get("grid_cols", 5))
+    grid_slider_args = {
+        "label": "그리드 열 개수",
+        "min_value": 2,
+        "max_value": 10,
+        "key": "grid_cols",
+        "help": "정상/공백 탭의 썸네일 한 줄 배치를 조정합니다."
+    }
+    st.slider(value=grid_default, **grid_slider_args)
+    ok_quality_default = st.session_state.get("ok_quality_profile", "균형")
+    ok_q_idx = quality_options_common.index(ok_quality_default) if ok_quality_default in quality_options_common else 1
+    st.radio(
+        "화질 프로파일",
+        quality_options_common,
+        index=ok_q_idx,
+        key="ok_quality_profile",
+        horizontal=True,
+        help="빠름(512px), 균형(1024px), 선명(1600px) 썸네일 품질을 선택합니다.",
+        on_change=switch_main_tab,
+        args=("정상/공백 답안",)
+    )
+
+    st.markdown("---")
+    # 전체 보기 컨트롤
+    st.markdown("**전체 보기 필터**")
+    st.text_input(
+        "파일명·경로 검색",
+        key="gallery_search",
+        placeholder="예: 10002, scan, .png",
+        on_change=switch_main_tab,
+        args=("전체 보기",)
+    )
+    ext_options = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
+    if "gallery_exts" in st.session_state:
+        st.multiselect("확장자", ext_options, key="gallery_exts")
+    else:
+        st.multiselect("확장자", ext_options, default=[], key="gallery_exts")
+    sort_options = ["파일명", "수정시각(최신순)", "수정시각(오래된순)"]
+    sort_idx = sort_options.index(st.session_state.gallery_sort) if st.session_state.gallery_sort in sort_options else 0
+    st.selectbox("정렬", sort_options, index=sort_idx, key="gallery_sort")
+    st.markdown("**표시 설정**")
+    quality_options = quality_options_common
+    current_quality = st.session_state.get("gallery_quality_profile")
+    q_idx = quality_options.index(current_quality) if current_quality in quality_options else 1
+    st.radio(
+        "화질 프로파일",
+        quality_options,
+        index=q_idx,
+        horizontal=True,
+        key="gallery_quality_profile",
+        help="빠름(512px), 균형(1024px), 선명(1600px)",
+        on_change=switch_main_tab,
+        args=("전체 보기",)
+    )
+    render_options = ["리샘플(권장)", "원본"]
+    r_idx = render_options.index(st.session_state.gallery_render_mode) if st.session_state.gallery_render_mode in render_options else 0
+    st.radio(
+        "렌더 방식",
+        render_options,
+        index=r_idx,
+        horizontal=True,
+        key="gallery_render_mode",
+        help="리샘플: LANCZOS 고화질 썸네일 / 원본: 이미지 원본 로드",
+        on_change=switch_main_tab,
+        args=("전체 보기",)
+    )
+    gallery_grid_default = int(st.session_state.get("gallery_grid_cols", 5))
+    gallery_slider_args = {
+        "label": "그리드 열 개수",
+        "min_value": 2,
+        "max_value": 10,
+        "key": "gallery_grid_cols",
+        "help": "전체 보기 탭에서 한 줄에 배치될 썸네일 개수"
+    }
+    st.slider(value=gallery_grid_default, **gallery_slider_args)
 
 _inject_theme_css(st.session_state.get('theme','Light (기본)'))
 
