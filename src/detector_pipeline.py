@@ -718,6 +718,84 @@ def _max_mtime(paths: List[str]) -> float:
         return 0.0
 
 
+def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None) -> Optional[str]:
+    """
+    주어진 base_dir(상위 디렉터리)에서 여러 결과 폴더를 수집하여
+    하나의 "총_결과_<timestamp>.zip" 파일로 묶어 반환합니다.
+
+    동작 규칙(간단한 휴리스틱):
+    - 하위 항목이 디렉터리이고 이름이 "*_결과"로 끝나면 결과 폴더로 취급합니다.
+    - 또는 하위 디렉터리 내부에 report.csv, report.parquet, images_summary.csv 중 하나라도
+      포함되어 있으면 결과 폴더로 취급합니다.
+    - 생성 위치는 target_dir(주어지면) 또는 base_dir/artifacts 입니다(없으면 생성).
+    - 실패 또는 후보가 없으면 None을 반환합니다.
+
+    이 함수는 실패에 관대하게 동작하며 개별 파일 추가 실패는 무시하고
+    가능한 파일들만 압축합니다. 주석은 한국어로 작성되어 있습니다.
+    """
+    try:
+        import zipfile
+        from pathlib import Path
+        import time as _time
+
+        base = Path(base_dir)
+        if not base.exists() or not base.is_dir():
+            return None
+
+        candidates: List[Path] = []
+        for p in base.iterdir():
+            if not p.is_dir():
+                continue
+            # 이름 패턴 또는 리포트 파일 존재 여부로 후보 판정
+            if p.name.endswith("_결과") or any((p / m).exists() for m in ("report.csv", "report.parquet", "images_summary.csv")):
+                candidates.append(p)
+
+        if not candidates:
+            return None
+
+        out_dir = Path(target_dir) if target_dir else (base / "artifacts")
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            out_dir = base
+
+        ts = int(_time.time())
+        zip_path = out_dir / f"총_결과_{ts}.zip"
+
+        with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for d in candidates:
+                for root, _dirs, files in os.walk(d):
+                    for fn in files:
+                        fp = os.path.join(root, fn)
+                        # ZIP 내부에는 각 결과 폴더를 최상위 폴더로 보이게 함
+                        arcname = os.path.join(d.name, os.path.relpath(fp, start=str(d)))
+                        try:
+                            zf.write(fp, arcname=arcname)
+                        except Exception:
+                            # 개별 파일 실패는 무시
+                            continue
+        # 생성 성공 표시를 artifacts/status.txt에도 남겨 사용자가 확인할 수 있게 함
+        try:
+            os.environ["ANSWER_SCAN_AGG_ZIP"] = str(zip_path)
+        except Exception:
+            pass
+        try:
+            status_f = out_dir / "총_결과_status.txt"
+            with open(status_f, "w", encoding="utf-8") as sf:
+                sf.write(f"zip_created: {zip_path}\n")
+                sf.write(f"candidates: {[str(p) for p in candidates]}\n")
+        except Exception:
+            pass
+
+        return str(zip_path)
+    except Exception as e:
+        try:
+            logger.warning(f"총 결과 ZIP 생성 실패: {e}")
+        except Exception:
+            pass
+        return None
+
+
 def _is_fresh(artifact_path: str, paths: List[str]) -> bool:
     if not os.path.exists(artifact_path):
         return False
@@ -1346,6 +1424,22 @@ def detect_pipeline(input_dir: str, output_dir: str,
     except Exception:
         logger.warning("Failed to append perf log")
 
+    # --- 선택적: 같은 수준의 다른 결과 폴더들을 모아 '총_결과' ZIP을 생성합니다.
+    # 생성 위치는 현재 output_dir/artifacts 를 우선으로 사용합니다.
+    try:
+        from pathlib import Path as _Path
+        base_for_agg = str(_Path(output_dir).resolve().parent)
+        target_artifacts = os.path.join(output_dir, "artifacts")
+        agg_zip = create_aggregate_result_zip(base_for_agg, target_dir=target_artifacts)
+        if agg_zip:
+            logger.info(f"총 결과 ZIP 생성됨: {agg_zip}")
+    except Exception:
+        # ZIP 생성 실패는 필수 단계가 아니므로 로그만 남기고 진행
+        try:
+            logger.debug("총 결과 ZIP 생성 시도 중 예외 발생")
+        except Exception:
+            pass
+
     return pair_rows, groups
 
 
@@ -1599,5 +1693,19 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
         backend_used=backend_used,
         auto_blank_threshold=auto_blank_threshold,
     )
+
+    # --- 선택적: 같은 수준의 다른 결과 폴더들을 모아 '총_결과' ZIP을 생성합니다.
+    try:
+        from pathlib import Path as _Path
+        base_for_agg = str(_Path(output_dir).resolve().parent)
+        target_artifacts = os.path.join(output_dir, "artifacts")
+        agg_zip = create_aggregate_result_zip(base_for_agg, target_dir=target_artifacts)
+        if agg_zip:
+            logger.info(f"총 결과 ZIP 생성됨 (files): {agg_zip}")
+    except Exception:
+        try:
+            logger.debug("총 결과 ZIP 생성 시도 중 예외 발생 (files)")
+        except Exception:
+            pass
 
     return pair_rows, groups

@@ -7,9 +7,12 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from .detector_pipeline import DetectorConfig, detect_pipeline
+    from .detector_pipeline import DetectorConfig, detect_pipeline, create_aggregate_result_zip
 except ImportError:  # 실행 컨텍스트에 따라 상대 임포트가 실패할 수 있음
-    from detector_pipeline import DetectorConfig, detect_pipeline
+    try:
+        from detector_pipeline import DetectorConfig, detect_pipeline, create_aggregate_result_zip
+    except Exception:
+        from detector_pipeline import DetectorConfig, detect_pipeline
 
 IMAGE_EXTS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
@@ -243,5 +246,30 @@ def run_scoped_pipeline(
                 pass
 
     results["result_paths"] = result_paths
+
+    # === 선택적: 모든 스코프 결과를 하나의 ZIP으로 묶어 저장합니다.
+    # - common_parent(공통 상위 디렉터리)를 기준으로 *_결과 폴더들을 찾아 하나의 ZIP 생성
+    # - 생성된 ZIP 경로는 results['agg_zip']에 기록됩니다.
+    try:
+        try:
+            _create_zip = create_aggregate_result_zip
+        except NameError:
+            # import 실패 시 무시
+            _create_zip = None
+        if _create_zip and result_paths:
+            common_parent = os.path.commonpath(result_paths)
+            target_artifacts = os.path.join(result_paths[0], "artifacts")
+            try:
+                agg = _create_zip(common_parent, target_dir=target_artifacts)
+                if agg:
+                    results['agg_zip'] = agg
+            except Exception:
+                # 실패 시 로깅만 수행하고 계속
+                try:
+                    print("총 결과 ZIP 생성 중 예외 발생")
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     return results
