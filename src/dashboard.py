@@ -277,7 +277,6 @@ RESULT_META = _build_result_meta(RESULT_DIRS)
 
 # ===== 페이지 설정 =====
 st.set_page_config(page_title="답안지 검수 대시보드", layout="wide")
-st.title("📋 답안지 스캔 검수 대시보드 (Handwriting-Optimized)")
 
 if "selected_result_dir" in st.session_state and st.session_state["selected_result_dir"] not in [str(p) for p in RESULT_DIRS]:
     st.session_state.pop("selected_result_dir", None)
@@ -975,12 +974,42 @@ except FileNotFoundError:
 
 img_df = load_img_summary(IMG_SUMMARY, cache_buster=_file_mtime(IMG_SUMMARY))
 
-# ===== KPI 카드 =====
+# ===== Header 및 KPI 카드 (개선된 레이아웃) =====
+# kpis는 compute_kpis에서 생성됨
 kpis = compute_kpis(df, img_df)
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("총 이미지", f"{kpis['총 이미지']:,}")
-c2.metric("그룹 수", f"{kpis['그룹 수']:,}")
-c3.metric("공백 수", f"{kpis['공백 수']:,}")
+
+# 헤더: 좌측 타이틀, 우측 통계 카드 3개 (2단 그리드)
+header_cols = st.columns([3, 1])
+
+with header_cols[0]:
+    # H1 스타일은 _inject_theme_css에서 설정
+    st.markdown(
+        f"""
+        <div class="dashboard-title">
+            <h1>📋 답안지 스캔 검수 대시보드</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with header_cols[1]:
+    stats_cols = st.columns(3)
+    stats = [
+        ("총 이미지", f"{kpis.get('총 이미지', 0):,}"),
+        ("그룹 수", f"{kpis.get('그룹 수', 0):,}"),
+        ("공백 수", f"{kpis.get('공백 수', 0):,}"),
+    ]
+    for col, (label, val) in zip(stats_cols, stats):
+        with col:
+            st.markdown(
+                f"""
+                <div class="stat-card">
+                    <div class="stat-number" aria-live="polite">{val}</div>
+                    <div class="stat-label">{label}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 # ===== 사이드바: 꼭 필요한 옵션만 노출 =====
@@ -1020,7 +1049,9 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     # mode에 따라 팔레트 선택
     theme = THEMES.get(mode, THEMES['Light (기본)'])
     pal = theme['palette']
-    sidebar_width = int(st.session_state.get('sidebar_width_px', 350))
+    # 사이드바 접힘 상태를 반영: collapsed일 경우 아이콘 전용 폭을 사용
+    collapsed = bool(st.session_state.get('sidebar_collapsed', False))
+    sidebar_width = 64 if collapsed else int(st.session_state.get('sidebar_width_px', 350))
 
     # 기본값 보장
     bg = pal.get('bg','#F7F9FB')
@@ -1276,12 +1307,43 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     [data-testid="stSidebar"] .stSelectbox [role="option"] {{
         padding-left: 18px !important;
     }}
+    
+    /* 옵션 텍스트가 왼쪽 컬러 바와 겹치지 않도록 패딩 보정 */
+    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
+        padding-left: 18px !important;
+    }}
+
+    /* ------------------------------------------------------------------
+       대시보드 상단 헤더 및 통계 카드 스타일
+       - H1: 28px, bold
+       - Stat number: 32px bold
+       - Stat label: 12-14px
+       - stat-card은 카드 배경/테마를 따릅니다.
+    ------------------------------------------------------------------ */
+    .dashboard-title h1 {{ font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: {text}; }}
+    .dashboard-title .title-sub {{ font-size: 13px; color: {secondary_text}; margin-top: 4px; }}
+    .stat-card {{ width: 120px; padding: 12px; border-radius: 8px; background: {card_bg}; border: 1px solid {card_border}; box-shadow: {shadow}; text-align: center; margin: 6px auto; }}
+    .stat-number {{ font-size: 32px; font-weight: 700; color: {text}; line-height: 1; }}
+    .stat-label {{ font-size: 13px; color: {secondary_text}; margin-top: 6px; }}
+
+    /* 탭 액티브 상태를 채운(primary) 스타일로 변경: 주요 액션(재스캔 등)을 강조 */
+    .custom-tab.active {{ background: {accent} !important; color: #ffffff !important; border-bottom-color: transparent !important; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }}
+    .custom-tab {{ transition: all 0.18s ease; }}
+
     </style>
     """
     try:
         st.markdown(css, unsafe_allow_html=True)
     except Exception:
         pass
+
+# 사이드바 접기/펼치기 토글 (상단)
+if "sidebar_collapsed" not in st.session_state:
+    st.session_state["sidebar_collapsed"] = False
+toggle_label = "▶" if st.session_state.get("sidebar_collapsed") else "◀"
+if st.sidebar.button(toggle_label, key="sidebar_toggle"):
+    st.session_state["sidebar_collapsed"] = not st.session_state.get("sidebar_collapsed")
+    _request_rerun()
 
 path_tab, theme_tab, rescan_tab, ok_tab, gallery_tab = st.sidebar.tabs(["분석 경로", "테마", "재스캔 필요", "정상/공백 답안", "전체 보기"])
 quality_options_common = ["빠름", "균형", "선명"]
@@ -1551,6 +1613,40 @@ with gallery_tab:
     st.slider(value=gallery_grid_default, **gallery_slider_args)
 
 _inject_theme_css(st.session_state.get('theme','Light (기본)'))
+
+# -------------------------
+# 사이드바 하단: 그룹 관리 (삭제/내보내기) - 위험한 액션은 체크박스+확정 단계 필수
+# -------------------------
+try:
+    with st.sidebar.expander("그룹 관리 (삭제 · 내보내기)", expanded=False):
+        st.caption("그룹 단위 관리: 삭제는 되돌릴 수 없습니다. '삭제 확인' 체크 후 '최종 삭제 실행'을 눌러주세요.")
+
+        # 삭제 확인 체크박스 (안전장치)
+        delete_confirm = st.checkbox("삭제 확인 (복구 불가)", key="group_delete_confirm", help="삭제 전에 이 체크박스를 켭니다.")
+
+        # 추가 옵션: 원본 입력 폴더에서도 삭제
+        also_del_input = st.checkbox("입력 폴더에서도 동일 파일명 삭제", value=False, key="group_delete_also_input", help="입력 폴더에 동일 파일명이 있으면 함께 삭제합니다.")
+
+        st.markdown("---")
+        st.write("선택한 이미지(또는 그룹)를 삭제 대상으로 표시한 뒤 최종 삭제를 실행하세요.")
+
+        if delete_confirm:
+            st.warning("삭제 확인됨 — 아래 '최종 삭제 실행'을 눌러 작업을 완료하세요.")
+
+        # 최종 삭제 버튼: 체크박스가 있어야 활성화
+        if st.button("최종 삭제 실행", key="group_delete_execute", disabled=not delete_confirm):
+            # 초기화 및 플로우 트리거: 기존 삭제 플로우(rescan_delete_*)를 재사용
+            st.session_state.rescan_delete_mode = True
+            if not st.session_state.get("rescan_delete_targets"):
+                st.session_state.rescan_delete_feedback = ("warn", "삭제할 이미지를 먼저 선택하세요.")
+            else:
+                st.session_state.rescan_show_confirm = True
+                # 전달된 옵션 반영
+                st.session_state["group_delete_also_input"] = also_del_input
+            _request_rerun()
+except Exception:
+    # 사이드바가 제한된 환경에서는 조용히 실패
+    pass
 
 group_filter = st.session_state.get("group_filter", "전체")
 grid_cols = int(st.session_state.get("grid_cols", 5))
@@ -2069,9 +2165,13 @@ tab_css = """
     background: rgba(11, 102, 255, 0.05);
 }
 .custom-tab.active {
-    color: #0B66FF;
-    border-bottom-color: #0B66FF;
-    font-weight: 600;
+    /* Primary-filled style for active tab: accent background with white text */
+    background: #0B66FF;
+    color: #ffffff;
+    border-bottom-color: transparent;
+    font-weight: 700;
+    border-radius: 8px;
+    box-shadow: 0 6px 18px rgba(2,8,40,0.08);
 }
 </style>
 """
@@ -2079,12 +2179,22 @@ st.markdown(tab_css, unsafe_allow_html=True)
 
 # 탭 버튼 UI
 cols = st.columns(len(tab_names))
+rescan_count = kpis.get('유사 후보 쌍', 0)
+ok_blank_count = kpis.get('공백 수', 0)
 for idx, tab_name in enumerate(tab_names):
+    # 탭 라벨에 실시간 카운트를 포함하여 상태와 숫자의 결합을 명확히 함
+    if tab_name == "재스캔 필요":
+        label = f"재스캔 필요 ({rescan_count}장)"
+    elif tab_name == "정상/공백 답안":
+        label = f"정상/공백 ({ok_blank_count}장)"
+    else:
+        label = tab_name
+
     with cols[idx]:
         is_active = st.session_state["main_tab"] == tab_name
         button_type = "primary" if is_active else "secondary"
         if st.button(
-            tab_name,
+            label,
             key=f"tab_btn_{idx}",
             use_container_width=True,
             type=button_type
@@ -2116,79 +2226,8 @@ cmp_pair = _render_global_compare()
 
 # === Tab: 재스캔 필요 ===
 if st.session_state["main_tab"] == "재스캔 필요":
-    delete_mode = st.session_state.get("rescan_delete_mode", False)
-    delete_targets = st.session_state.get("rescan_delete_targets", [])
-    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
-
-    feedback = st.session_state.get("rescan_delete_feedback")
-    if feedback:
-        level, message = feedback
-        if level == "success":
-            st.success(message)
-        elif level == "error":
-            st.error(message)
-        else:
-            st.warning(message)
-        st.session_state.rescan_delete_feedback = None
-
-    if delete_mode and not waiting_confirm:
-        if delete_targets:
-            st.info(f"삭제 대상 {len(delete_targets)}개 선택됨: {', '.join(os.path.basename(p) for p in delete_targets)}")
-        else:
-            st.info("삭제할 이미지를 선택하세요. 이미지 아래의 '🗑️ 선택' 버튼을 눌러 토글할 수 있습니다.")
-
-    if waiting_confirm:
-        st.warning("선택한 이미지를 삭제하시겠습니까?")
-        if delete_targets:
-            grid_cols_confirm = min(4, max(1, len(delete_targets)))
-            confirm_grid = st.columns(grid_cols_confirm)
-            for idx, pth in enumerate(delete_targets):
-                with confirm_grid[idx % grid_cols_confirm]:
-                    if pth and os.path.isfile(pth):
-                        # 최종 확인 단계에서는 썸네일 대신 고해상도 미리보기 사용
-                        confirm_preview = make_display_image(
-                            pth,
-                            size=max(rescan_large_px, 1400),
-                            fmt=disp_fmt,
-                            quality=rescan_disp_quality,
-                        )
-                        st.image(_safe_image_open(confirm_preview), caption=os.path.basename(pth), use_container_width=True)
-                    else:
-                        st.info(f"파일을 찾을 수 없음: {os.path.basename(pth) if pth else '알 수 없음'}")
-        # 옵션: 원본 입력 폴더에서도 같은 파일명을 삭제
-        also_del_input = st.checkbox("입력 폴더에서도 같은 이름의 파일 삭제", value=False, help="파이프라인 입력으로 사용된 원본 폴더(artifacts/ordered_paths.txt 기준)에서도 동일한 파일명을 찾아 함께 삭제합니다.")
-        confirm_cols = st.columns([1, 1, 6])
-        with confirm_cols[0]:
-            if st.button("네, 삭제합니다", key="rescan_delete_confirm_yes"):
-                successes, failures = delete_selected_images(delete_targets, also_delete_input=also_del_input)
-
-                # 성공한 경우 비교 선택 상태에서 제거합니다.
-                if successes and "gallery_selected" in st.session_state:
-                    st.session_state.gallery_selected = [p for p in st.session_state.gallery_selected if p not in successes]
-
-                if failures and successes:
-                    msg = "일부 파일만 삭제되었습니다: " + ", ".join(os.path.basename(p) for p, _ in failures)
-                    st.session_state.rescan_delete_feedback = ("error", msg)
-                elif failures and not successes:
-                    detail = "; ".join(f"{os.path.basename(p)}: {err}" for p, err in failures)
-                    st.session_state.rescan_delete_feedback = ("error", f"삭제 실패: {detail}")
-                elif successes:
-                    st.session_state.rescan_delete_feedback = ("success", f"{len(successes)}개 파일을 삭제했습니다.")
-                else:
-                    st.session_state.rescan_delete_feedback = ("warn", "삭제할 파일이 없습니다.")
-
-                st.session_state.rescan_delete_targets = []
-                st.session_state.rescan_delete_mode = False
-                st.session_state.rescan_show_confirm = False
-
-                _request_rerun()
-
-        with confirm_cols[1]:
-            if st.button("취소", key="rescan_delete_confirm_no"):
-                st.session_state.rescan_show_confirm = False
-                st.session_state.rescan_delete_mode = False
-                st.session_state.rescan_delete_targets = []
-                st.session_state.rescan_delete_feedback = None
+    # 그룹 관리(삭제)는 사이드바 하단의 '그룹 관리' 섹션에서 수행하세요.
+    st.info("그룹 수준의 삭제/내보내기 작업은 사이드바의 '그룹 관리'에서 안전하게 실행하세요.")
 
     try:
         import imagehash
