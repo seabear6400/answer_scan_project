@@ -13,265 +13,831 @@ import polars as pl
 from PIL import Image, ImageDraw
 import numpy as np
 import pandas as pd
-import cv2
-import time
-import logging
-import shutil
-import stat
+quality_options_common = ["빠름", "균형", "선명"]
 
-# 모듈 로거
-logger = logging.getLogger(__name__)
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
-
-# Pillow resample 상수 호환
+# -------------------------------------------------------------------------
+# 안전 폴백: 모듈의 다른 부분(또는 외부에서)에서 정의되는 전역 심볼들이
+# 파일 상단에서 아직 존재하지 않을 때 발생하는 NameError를 방지하기 위한
+# 최소한의 기본값을 이 위치에서 설정합니다. 실제 값이 이후에 정의되면
+# 덮어쓰지 않으므로 안전합니다.
+# 주석은 한국어로 작성했습니다.
+# -------------------------------------------------------------------------
 try:
-    RESAMPLE = Image.Resampling.LANCZOS
+    import cv2 as _cv2
 except Exception:
-    RESAMPLE = Image.LANCZOS
+    _cv2 = None
 
+if "cv2" not in globals():
+    # OpenCV가 없다면 None을 설정합니다. 대체 로직은 _safe_image_open에서 처리됩니다.
+    cv2 = _cv2
 
-def parse_streamlit_args():
-    """Streamlit 실행 시 `--` 이후의 사용자 인자를 파싱합니다.
-    (예: streamlit run app.py -- --output_dir=...)
-    """
-    if '--' in sys.argv:
-        idx = sys.argv.index('--')
-        user_args = sys.argv[idx + 1:]
-    else:
-        user_args = []
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument('--output_dir', default=None)
-    p.add_argument('--base_dir', default=None)
-    p.add_argument('--default_result', default=None)
-    try:
-        ns, _ = p.parse_known_args(user_args)
-    except SystemExit:
-        class X:
-            output_dir = None
-            base_dir = None
-            default_result = None
+if "logger" not in globals():
+    # 간단한 로거를 설정합니다(실제 로거가 이후 정의되면 덮어씌워집니다).
+    import logging
+    logger = logging.getLogger("dashboard")
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
 
-        ns = X()
-    return ns
+if "BASE_OUTPUT_DIR" not in globals():
+    BASE_OUTPUT_DIR = Path.cwd()
 
+if "CLI_BASE_DIR" not in globals():
+    CLI_BASE_DIR = BASE_OUTPUT_DIR
 
-def _request_rerun() -> None:
-    """Streamlit에서 페이지를 다시 실행하도록 요청합니다. 환경에 따라 적절한 API를 선택합니다."""
-    if hasattr(st, "rerun") and callable(st.rerun):
+if "CLI_OUTPUT_DIR" not in globals():
+    CLI_OUTPUT_DIR = BASE_OUTPUT_DIR
+
+if "RESULT_DIRS" not in globals():
+    RESULT_DIRS = []
+
+if "CLI_DEFAULT_RESULT" not in globals():
+    CLI_DEFAULT_RESULT = None
+
+if "SELECTION_ROOT" not in globals():
+    SELECTION_ROOT = None
+
+if "_normalize_base_dir" not in globals():
+    # 기본적인 정규화 함수: 인자로 받은 Path를 그대로 반환합니다.
+    def _normalize_base_dir(p: Path, selection_root=None) -> Path:
         try:
-            st.rerun()
+            return p.resolve()
         except Exception:
-            pass
-    elif hasattr(st, "experimental_rerun") and callable(st.experimental_rerun):
+            return p
+
+if "_build_result_meta" not in globals():
+    # 기본 메타 생성기: 빈 메타를 반환합니다.
+    def _build_result_meta(result_dirs):
+        return {}
+
+if "_has_result_files" not in globals():
+    # 결과 파일 검사 기본 구현: 항상 False를 반환하여 경고만 발생시키지 않도록 합니다.
+    def _has_result_files(output_dir: Path) -> bool:
+        try:
+            return any((output_dir / "report.csv").exists(), (output_dir / "report.parquet").exists())
+        except Exception:
+            return False
+
+if "RESAMPLE" not in globals():
+    # Pillow 리샘플링 디폴트
+    try:
+        RESAMPLE = Image.LANCZOS
+    except Exception:
+        RESAMPLE = Image.BICUBIC
+
+try:
+    import stat
+except Exception:
+    stat = None
+
+if "_request_rerun" not in globals():
+    # Streamlit 재실행을 시도하는 유틸: experimental_rerun -> rerun 순으로 시도
+    def _request_rerun():
         try:
             st.experimental_rerun()
         except Exception:
-            pass
-    else:
-        stop_fn = getattr(st, "stop", None)
-        if callable(stop_fn):
             try:
-                stop_fn()
+                st.rerun()
             except Exception:
+                # 재실행이 불가능하면 무시
                 pass
 
 
-def _normalize_base_dir(raw, selection_root: Optional[Path]) -> Path:
-    if raw is None:
-        if selection_root is not None:
-            return selection_root
-        return Path.cwd()
-    candidate = Path(raw)
+# ===== 테마 선택 =====
+THEMES = {
+    'Light (기본)': {
+        'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','sidebar_text':'#091223','secondary':'#475569','accent':'#1EA3A1','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
+    },
+    'Warm Sepia': {
+        'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','sidebar_text':'#2d2a26','secondary':'#6e5a4a','accent':'#1EA3A1','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
+    },
+    'Gentle Mint': {
+        'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','sidebar_text':'#082724','secondary':'#4b6b64','accent':'#1EA3A1','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
+    }
+}
+
+if 'theme' not in st.session_state:
+    st.session_state['theme'] = 'Light (기본)'
+
+
+def _inject_theme_css(mode: str = 'Light (기본)'):
+    # mode에 따라 팔레트 선택
+    theme = THEMES.get(mode, THEMES['Light (기본)'])
+    pal = theme['palette']
+    sidebar_width = int(st.session_state.get('sidebar_width_px', 350))
+
+    # 기본값 보장
+    bg = pal.get('bg','#F7F9FB')
+    sidebar_bg = pal.get('sidebar_bg', '#FFFFFF')
+    text = pal.get('text', '#0B1726')
+    sidebar_text = pal.get('sidebar_text', text)
+    secondary_text = pal.get('secondary', '#41515F')
+    # Use teal family as default accent (user requested #1EA3A1 series)
+    accent = pal.get('accent', '#1EA3A1')
+    card_bg = pal.get('card_bg', '#FFFFFF')
+    card_border = pal.get('card_border', '#e6e9ee')
+    shadow = pal.get('shadow', 'none')
+
+    css = f"""
+    <style>
+    .stApp {{ background-color: {bg} !important; color: {text} !important; }}
+    /* 사이드바에 포인트 계열(#1EA3A1) 계조를 적용합니다. 부드러운 그라데이션과 좌측 엣지 바를 추가해 시각적 구분을 줍니다. */
+    [data-testid="stSidebar"] {{ background: linear-gradient(180deg, rgba(30,163,161,0.04), {sidebar_bg}) !important; box-shadow: none !important; color: {sidebar_text} !important; border-left: 6px solid rgba(30,163,161,0.08) !important; }}
+    [data-testid="stSidebar"][aria-expanded="true"] {{ width: {sidebar_width}px !important; min-width: {sidebar_width}px !important; }}
+    [data-testid="stSidebar"][aria-expanded="false"] {{ width: 0 !important; min-width: 0 !important; }}
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stHeader, [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] .css-1d391kg {{ color: {sidebar_text} !important; opacity: 0.98 !important; }}
+    .stBlock, .stCard {{ background-color: {card_bg} !important; border: 1px solid {card_border}; border-radius: 10px; box-shadow: {shadow}; padding: 12px; }}
+    .stMetric {{ color: {text} !important; }}
+    /* KPI/Metric 내부 텍스트(라벨/서브텍스트)가 다크에서 안보이는 문제 해결: 강제 색상/불투명도 적용 */
+    .stMetric, .stMetric * {{ color: {text} !important; opacity: 0.98 !important; }}
+    .stMetric p, .stMetric span, .stMetric small {{ color: {secondary_text} !important; opacity: 0.95 !important; }}
+    input, textarea, select, button {{ color: {text} !important; background-color: transparent !important; border-radius: 8px; }}
+    .stApp p, .stApp span, label, .css-1v0mbdj p {{ color: {secondary_text} !important; }}
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {{ color: {sidebar_text} !important; }}
+    a, .stButton>button, .css-18e3th9 a, .css-18e3th9 button {{ color: {accent} !important; }}
+    .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
+    img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
+    /* 검색 입력 상자 강조: 사용자 요청으로 가독성 향상용 추가 스타일입니다. */
+    input[type="text"], .stTextInput>div>div>input {{
+        background-color: rgba(255,255,255,0.9) !important;
+        border: 1.5px solid {accent} !important;
+    box-shadow: 0 4px 10px rgba(30,163,161,0.08) !important;
+        padding: 10px 12px !important;
+        border-radius: 10px !important;
+        font-size: 14px !important;
+        color: {text} !important;
+    }}
+    /* 사이드바 내 입력과 플레이스홀더 대비 개선 */
+    /* 사이드바 내부 입력은 약간의 포인트 색조를 배경에 줘서 어사이드 영역임을 명확히 합니다. */
+    [data-testid="stSidebar"] input[type="text"] {{ 
+        background-color: rgba(30,163,161,0.03) !important; 
+        border: 1px solid rgba(30,163,161,0.12) !important;
+        color: {text} !important;
+        box-shadow: 0 2px 6px rgba(30,163,161,0.04) !important;
+    }}
+    input::placeholder, textarea::placeholder {{ color: rgba(0,0,0,0.38) !important; font-weight: 500 !important; }}
+    
+    /* HR(가로선) 스타일: 청록(Teal) 계열로 강조합니다. accent 색을 사용하되 필요시 더 진한 변형을 함께 사용합니다. */
+    hr, .stMarkdown hr, .stDivider hr {{
+        border: none !important;
+        height: 4px !important;
+        background: linear-gradient(90deg, rgba(30,163,161,0.08), {accent}, rgba(30,163,161,0.08)) !important;
+        border-radius: 6px !important;
+        margin: 18px 0 !important;
+        box-shadow: 0 4px 12px rgba(30,163,161,0.06) inset;
+    }}
+    /* 사이드바 select 박스 - 심플하고 깔끔한 스타일 */
+    [data-testid="stSidebar"] .stSelectbox>div>div {{
+        background-color: rgba(255,255,255,0.98) !important;
+    border: 1px solid rgba(30,163,161,0.3) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
+        transition: border-color 0.2s ease !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox>div>div:hover {{
+        border-color: {accent} !important;
+    box-shadow: 0 2px 8px rgba(30,163,161,0.12) !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox>div>div>div {{
+        color: {text} !important;
+        font-weight: 500 !important;
+        padding: 10px 12px !important;
+        font-size: 14px !important;
+    }}
+
+    /* 닫힌 상태 표시 박스 스타일은 기본으로 유지합니다. (사용자 요청: 하단은 회색 적용 안 함) */
+    
+    /* select 드롭다운 화살표 스타일링 */
+    [data-testid="stSidebar"] .stSelectbox svg {{
+        color: {accent} !important;
+        opacity: 0.7 !important;
+    }}
+    
+    /* 드롭다운 옵션 리스트 스타일링 */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
+        background-color: white !important;
+    border: 1px solid rgba(30,163,161,0.2) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
+        margin-top: 2px !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
+        color: {text} !important;
+        padding: 8px 12px !important;
+        margin: 2px 4px !important;
+        border-radius: 4px !important;
+        font-size: 14px !important;
+        transition: background-color 0.15s ease !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox [role="option"]:hover {{
+    background-color: rgba(30,163,161,0.05) !important;
+        color: {accent} !important;
+    }}
+    
+    [data-testid="stSidebar"] .stSelectbox [aria-selected="true"] {{
+        background-color: {accent} !important;
+        color: white !important;
+        font-weight: 500 !important;
+    }}
+
+    /* 재스캔 필요 옵션 강조 표현: BaseWeb(라이브러리) aria-label을 활용해 매칭합니다. */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"] {{
+        color: #d62839 !important;
+        font-weight: 600 !important;
+        background-color: rgba(214,40,57,0.08) !important;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"][aria-label^="[재스캔]"] {{
+        background-color: rgba(214,40,57,0.14) !important;
+        color: #d62839 !important;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"]::before {{
+        content: "⚠ ";
+        font-weight: 700;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"] {{
+        color: #d62839 !important;
+        font-weight: 600 !important;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"]::before {{
+        content: "⚠ ";
+        margin-right: 4px;
+    }}
+
+    /* 드롭다운 목록에서 '선택된 옵션'을 더 시각적으로 강조합니다. */
+    /* 선택된 옵션은 파란색 대신 회색 배경으로 고정하여 '선택 중'을 표시합니다. */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"] {{
+        /* 목록 내부에서 선택된 항목을 더 진한 회색으로 표시 */
+        background-color: rgba(0,0,0,0.12) !important; /* 약간 더 진한 회색 */
+        color: {sidebar_text} !important; /* 진한 텍스트 */
+        font-weight: 700 !important;
+        border-radius: 0 0 6px 6px !important;
+        position: relative !important;
+    }}
+
+    /* 다양한 구현에서 선택 상태를 나타내는 속성에 모두 대응하여 회색 강조를 강제합니다. */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
+        position: relative !important;
+        overflow: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+    }}
+
+    /* 선택 상태에 대한 공통 규칙(목록 내부에서만 적용) */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-current="true"] {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+    }}
+
+    /* 선택된 항목은 목록에서 상단에 고정(sticky)되도록 함: 이미지2 스타일과 유사하게 보이게 함 */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"] {{
+        position: -webkit-sticky !important;
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 10 !important;
+        margin-top: 0 !important;
+    }}
+
+    /* hover가 선택 스타일을 덮어쓰지 않도록 유지 */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"]:hover {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+    }}
+
+    /* ===== 포털(오버레이)로 렌더되는 BaseWeb(라이브러리)/Select의 드롭다운을 직접 타깃합니다. =====
+       Streamlit은 드롭다운을 sidebar 바깥(포털)으로 렌더할 수 있어 기존 사이드바 내부 선택자로 매칭되지 않을 수 있습니다.
+       아래 규칙은 포털 내부의 listbox/option에 대해 동일한 강조(회색 배경, 진한 텍스트, sticky)를 강제합니다. */
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"],
+    .baseweb-portal [role="listbox"] [role="option"][data-selected="true"],
+    body > [role="listbox"] [role="option"][aria-selected="true"] {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 9999 !important;
+    }}
+
+    /* 포털 내 선택된 옵션이 hover에 의해 덮어쓰이지 않도록 함 */
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"]:hover {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+    }}
+
+     /* ------------------------------------------------------------------
+         Streamlit이 생성하는 emotion 계열 클래스(예: st-emotion-cache-xxxxx, etx0m6x1 등)
+         을 직접 타깃팅하여 내부 텍스트 컨테이너에도 회색 배경과 패딩을 강제로 적용합니다.
+         - 사이드바 내부 렌더링과 포털(포털 = 오버레이)으로 렌더되는 드롭다운 모두를 포함합니다.
+         - 동적으로 생성되는 클래스명이 바뀔 수 있으므로 etx- 접두사의 클래스도 함께 커버합니다.
+         (이 블록은 설명용 주석이며 스타일 동작에는 영향이 없습니다.)
+     ------------------------------------------------------------------ */
+    /* 사이드바 내부 listbox */
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
+        background-color: rgba(0,0,0,0.12) !important;
+        display: block !important;
+        padding: 8px 12px !important;
+        margin: -8px -12px !important; /* 옵션 컨테이너 패딩과 겹치지 않게 보정 */
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        border-radius: 4px !important;
+    }}
+
+    /* 포털(오버레이)로 렌더된 listbox */
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1,
+    body > [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    body > [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
+        background-color: rgba(0,0,0,0.12) !important;
+        display: block !important;
+        padding: 8px 12px !important;
+        margin: -8px -12px !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        border-radius: 4px !important;
+    }}
+
+    /* 선택된 옵션에 체크 표시를 추가해 사용자가 어떤 항목이 선택됐는지 바로 알 수 있도록 함 */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::after {{
+        content: "✔";
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: {sidebar_text} !important; /* 회색 배경에 어울리는 진한 색상 */
+        font-weight: 700;
+    }}
+
+    /* 선택된 옵션 왼쪽에 컬러 바 추가하여 '현재 선택'을 시각적으로 강조 */
+    /* 왼쪽 컬러 바는 회색 톤으로 변경하여 전체가 회색 강조로 보이도록 함 */
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::before {{
+        content: "";
+        position: absolute;
+        left: 6px;
+        top: 8px;
+        bottom: 8px;
+        width: 4px;
+        background: rgba(0,0,0,0.25) !important; /* 진한 회색 바 */
+        border-radius: 2px;
+    }}
+
+    /* 옵션 텍스트가 왼쪽 컬러 바와 겹치지 않도록 패딩 보정 */
+    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
+        padding-left: 18px !important;
+    }}
+    </style>
+    """
+    # 추가 스타일: KPI 카드, 썸네일 카드, 주요 액션 버튼 등 디자이너 스타일
+    extra = f"""
+    <style>
+        /* 비교 패널을 상단에 고정(floating) */
+        .float-compare {{
+            position: sticky;
+            top: 78px; /* 상단 헤더 및 KPI 높이에 따라 조정 */
+            z-index: 9999;
+            background: rgba(255,255,255,0.92);
+            padding: 10px 12px;
+            border-radius: 10px;
+            box-shadow: 0 8px 20px rgba(2,8,12,0.06);
+            margin-bottom: 12px;
+        }}
+
+    /* KPI 카드 레이아웃 */
+    .kpi-row {{ display:flex; gap:18px; align-items:stretch; margin:18px 0 22px; }}
+    .kpi-card {{ flex:1; background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:12px; padding:16px; box-shadow:{shadow}; display:flex; flex-direction:column; gap:6px; justify-content:center; min-height:92px; }}
+    .kpi-card .kpi-label {{ color:{secondary_text}; font-size:13px; }}
+    .kpi-card .kpi-value {{ color:{text}; font-size:22px; font-weight:700; }}
+    .kpi-card .kpi-icon {{ font-size:20px; opacity:0.9; }}
+    /* KPI 델타 배지: 값이 비어있으면 시각적으로 가려지도록 처리 가능(세션에서 값이 없으면 빈 문자열) */
+    .kpi-card {{ position: relative; }}
+    .kpi-card .kpi-delta {{
+        position: absolute;
+        top: 10px;
+        right: 12px;
+        font-size:12px;
+        padding:4px 8px;
+        border-radius:999px;
+        background: rgba(34,197,94,0.12);
+        color: #16a34a;
+        font-weight:700;
+        box-shadow: 0 4px 12px rgba(2,8,12,0.06);
+        display: inline-block;
+    }}
+    .kpi-card .kpi-delta.down {{ background: rgba(239,68,68,0.12); color:#ef4444; }}
+
+    /* 큰 파란 실행 버튼 (사이드바/상단에서 사용) */
+    .primary-action-btn {{
+    /* darker teal variant for gradient stop */
+    background: linear-gradient(180deg, {accent}, #157271) !important;
+        color: #fff !important; border: none !important; padding: 12px 18px !important;
+        border-radius: 12px !important; font-size: 16px !important; font-weight: 700 !important;
+    box-shadow: 0 8px 28px rgba(30,163,161,0.14) !important; cursor: pointer;
+    }}
+
+    /* 그룹 섹션 카드 및 썸네일 그리드 */
+    .group-card {{ background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:14px; padding:14px; box-shadow:{shadow}; margin-bottom:18px; }}
+    .group-title {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; font-weight:700; color:{text}; }}
+    .thumb-grid {{ display:flex; gap:12px; flex-wrap:wrap; }}
+    .thumb-card {{ width:180px; border-radius:10px; overflow:hidden; background:linear-gradient(180deg, rgba(255,255,255,0.98), {card_bg}); border:1px solid rgba(15,23,42,0.04); box-shadow: 0 8px 20px rgba(2,8,12,0.06); padding:8px; position:relative; }}
+    .thumb-card img {{ display:block; width:100%; height:140px; object-fit:contain; background: #fff; }}
+    .thumb-caption {{ text-align:center; font-size:13px; color:{secondary_text}; margin-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .thumb-badge {{ position:absolute; top:8px; left:8px; background: rgba(255,255,255,0.95); color:{text}; padding:4px 8px; border-radius:999px; font-weight:600; font-size:12px; box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
+    .thumb-check {{ position:absolute; top:8px; right:8px; width:32px; height:32px; border-radius:8px; display:flex; align-items:center; justify-content:center; background: rgba(255,255,255,0.95); box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
+    .thumb-card.selected {{ box-shadow: 0 12px 36px rgba(30,163,161,0.12); border:1px solid rgba(30,163,161,0.12); }}
+
+    @media (max-width: 900px) {{ .thumb-card {{ width: calc(50% - 12px); }} .kpi-row {{ flex-direction:column; gap:10px; }} }}
+    @media (max-width: 600px) {{ .thumb-card {{ width: calc(100% - 12px); }} }}
+    </style>
+    """
     try:
-        candidate = candidate.expanduser().resolve()
+        st.markdown(css + extra, unsafe_allow_html=True)
     except Exception:
-        candidate = candidate.expanduser()
-    if selection_root is not None:
+        # CSS 주입 실패는 UI만 영향을 주므로 안전하게 무시
+        pass
+
+
+# 사이드바 탭 생성
+path_tab, settings_tab, theme_tab = st.sidebar.tabs(["분석 경로", "보기 설정", "테마"])
+
+with path_tab:
+    st.markdown("**분석 경로 설정**")
+    # 텍스트 입력의 표시값은 현재의 result_base_dir을 사용합니다.
+    # 버튼으로 기본 경로를 적용/복원하면 st.session_state['result_base_dir']이 변경되고
+    # _request_rerun()로 재실행될 때 이 입력의 값이 갱신되어 보이게 됩니다.
+    # Streamlit에서 위젯을 `value=`(기본값)로 생성하고 동시에 세션 상태(Session State) API로 값을 설정하면
+    # 경고가 발생할 수 있습니다. 이를 방지하려면 위젯을 만들기 전에 세션 키를 먼저 초기화하세요.
+    # 또한 `key=`를 사용하는 경우 `value=`를 함께 전달하지 않습니다.
+    if "result_base_input" not in st.session_state:
+        # BASE_OUTPUT_DIR가 아직 정의되지 않은 환경에서 바로 참조하면 NameError가 발생할 수 있으므로
+        # 안전하게 대체값을 사용하도록 처리합니다. 기본값으로 현재 작업 디렉터리를 사용합니다.
         try:
-            candidate.relative_to(selection_root)
-            return selection_root
+            default_base = str(BASE_OUTPUT_DIR)
+        except Exception:
+            default_base = str(Path.cwd())
+        st.session_state["result_base_input"] = st.session_state.get("result_base_dir", default_base)
+    base_input = st.text_input(
+        "검색 시작 경로",
+        key="result_base_input",
+    )
+
+    # 안전하게 세션 상태를 변경하기 위한 콜백 함수들
+    def _apply_base_dir_cb():
+        raw = st.session_state.get("result_base_input", "")
+        try:
+            new_base = Path(raw).expanduser()
+            normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
+            st.session_state["result_base_dir"] = str(normalized_base)
+            st.session_state.pop("selected_result_dir", None)
+            st.session_state["_cli_base_marker"] = str(normalized_base)
+        except Exception:
+            # 실패 시 기존 동작 유지
+            pass
+        # 콜백 내부에서는 st.rerun()이 no-op일 수 있으므로 여기서는 명시적 재실행을 호출하지 않습니다.
+        # 세션 상태를 변경하면 Streamlit이 콜백 종료 후 자동으로 스크립트를 재실행합니다.
+        try:
+            st.cache_data.clear()
         except Exception:
             pass
-    while candidate.name.endswith("_결과") and candidate.parent != candidate:
-        candidate = candidate.parent
-        if selection_root is not None:
+
+    def _reset_base_dir_cb():
+        # CLI 기본값으로 복원: 마커과 result_base_dir만 갱신합니다.
+        try:
+            st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+            st.session_state.pop("selected_result_dir", None)
+            st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
+            # 텍스트 입력도 같은 값을 반영하도록 설정
+            st.session_state["result_base_input"] = str(CLI_BASE_DIR)
+        except Exception:
+            pass
+        # 콜백 내부에서 강제 rerun을 호출하지 않음: 세션 상태 변경으로 자동 재실행됩니다.
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+    # 사이드바 내 버튼을 좀 더 보기 좋게 확장합니다.
+    # - 두 버튼을 동일한 너비로 배치하고
+    # - CSS로 최소 너비와 패딩, 글자 크기를 늘려 시각적으로 정돈합니다.
+    btn_css = """
+    <style>
+    /* 사이드바 내부 버튼 스타일 적용 */
+    [data-testid="stSidebar"] .stButton>button {
+        min-width: 160px !important;
+        padding: 10px 22px !important;
+        font-size: 16px !important;
+        border-radius: 10px !important;
+    }
+    /* 약간의 간격을 주어 버튼이 붙어 보이지 않게 함 */
+    [data-testid="stSidebar"] .stButton {
+        margin-bottom: 6px !important;
+    }
+    </style>
+    """
+    try:
+        st.markdown(btn_css, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+    path_cols = st.columns([2, 2])
+    with path_cols[0]:
+        st.button("경로 적용", key="apply_base_dir", on_click=_apply_base_dir_cb)
+    with path_cols[1]:
+        st.button("기본 경로 복원", key="reset_base_dir", on_click=_reset_base_dir_cb)
+    # (목록 새로고침 버튼 제거됨)
+
+    # ------------------------
+    # ZIP(폴더) 업로드 지원
+    # 사용자가 로컬 폴더를 ZIP으로 압축해 업로드하면 서버에 압축을 풀고
+    # 해당 경로를 분석 시작 경로로 즉시 적용할 수 있게 합니다.
+    # (브라우저의 폴더 업로드 한계로 ZIP 방식을 사용합니다.)
+    uploaded_zip = st.file_uploader(
+        "폴더 업로드(.zip) — 업로드 후 '이 폴더로 분석 시작' 클릭",
+        type=["zip"],
+        help="폴더를 ZIP으로 압축하여 업로드하면 서버에 풀어 분석할 수 있습니다.",
+        key="upload_zip",
+    )
+    if uploaded_zip is not None:
+        try:
+            # 로컬 임시 추출 경로를 만들고 ZIP을 풉니다.
+            import zipfile, time, shutil
+
+            extract_root = os.path.join(str(Path.cwd()), "artifacts", "uploaded_inputs")
+            os.makedirs(extract_root, exist_ok=True)
+
+            # 가능한 경우 업로드된 ZIP의 원본 파일명(stem)을 사용하여 추출 폴더를 만듭니다.
+            # 동일한 이름의 폴더가 이미 존재하면 타임스탬프를 붙여 충돌을 피합니다.
             try:
-                candidate.relative_to(selection_root)
-                return selection_root
+                orig_name = getattr(uploaded_zip, "name", None) or ""
+                stem = Path(orig_name).stem if orig_name else ""
             except Exception:
-                pass
-    return candidate
+                stem = ""
 
-ns = parse_streamlit_args()
-ENV_OUTPUT_DIR = os.environ.get("ANSWER_SCAN_OUTPUT_DIR")
-ENV_BASE_DIR = os.environ.get("ANSWER_SCAN_BASE_DIR")
-ENV_DEFAULT_RESULT = os.environ.get("ANSWER_SCAN_DEFAULT_RESULT")
-ENV_SELECTION_ROOT = os.environ.get("ANSWER_SCAN_SELECTION_ROOT")
+            if stem:
+                candidate = os.path.join(extract_root, stem)
+                if os.path.exists(candidate):
+                    ts = int(time.time())
+                    dest_dir = os.path.join(extract_root, f"{stem}_{ts}")
+                else:
+                    dest_dir = candidate
+            else:
+                ts = int(time.time())
+                dest_dir = os.path.join(extract_root, f"upload_{ts}")
 
-SELECTION_ROOT: Optional[Path] = None
-if ENV_SELECTION_ROOT:
+            # streamlit UploadedFile은 파일-라이크 객체이므로 바로 전달 가능합니다.
+            with zipfile.ZipFile(uploaded_zip, "r") as z:
+                z.extractall(dest_dir)
+
+            st.success(f"압축 해제 완료: {dest_dir}")
+            st.info("원하시면 이 폴더로 분석을 시작하세요.")
+
+            # 사용자가 업로드한 폴더를 '검색 시작 경로'로 적용하고 기존 콜백을 재사용
+            # 버튼 클릭 시 즉시 세션 상태를 변경하면 위젯이 이미 생성된 이후 경고가 발생할 수 있습니다.
+            # 따라서 버튼에 on_click 콜백을 연결하여 세션 상태 변경을 콜백 내부에서 수행하도록 합니다.
+            def _start_analysis_uploaded_cb(dest):
+                try:
+                    # 텍스트 입력 값과 세션 상태를 안전하게 갱신
+                    st.session_state["result_base_input"] = dest
+                    # 기존 경로 적용 로직 재사용
+                    try:
+                        _apply_base_dir_cb()
+                    except Exception:
+                        pass
+                except Exception:
+                    # 실패 시 무시
+                    pass
+                # 가능한 경우 재실행을 시도
+                try:
+                    st.experimental_rerun()
+                except Exception:
+                    try:
+                        st.rerun()
+                    except Exception:
+                        pass
+
+            st.button(
+                "이 폴더로 분석 시작",
+                key="start_analysis_uploaded",
+                on_click=_start_analysis_uploaded_cb,
+                args=(dest_dir,),
+            )
+        except Exception as e:
+            st.error(f"업로드 처리 실패: {e}")
+
+    # 사이드바에서 탭을 전환할 때 사용할 콜백 함수입니다.
+    # 여러 위젯에서 이 함수를 on_change로 참조하므로 파일 상단에서 미리 정의해 NameError를 방지합니다.
+    def switch_main_tab(tab_name: str):
+        """사이드바 필터 변경 시 해당 탭으로 이동"""
+        try:
+            st.session_state["main_tab"] = tab_name
+        except Exception:
+            # 세션 상태 접근이 실패하면 무시합니다.
+            pass
+
+    # result_options나 _format_result_option이 아직 정의되지 않았을 수 있어 안전하게 처리
+    # 전역 심볼을 직접 참조하지 않고 안전하게 조회합니다.
+    result_dirs_val = globals().get("RESULT_DIRS") or []
     try:
-        SELECTION_ROOT = Path(ENV_SELECTION_ROOT).expanduser().resolve()
+        result_options_local = [str(p) for p in result_dirs_val]
     except Exception:
-        SELECTION_ROOT = Path(ENV_SELECTION_ROOT).expanduser()
+        result_options_local = []
 
-output_arg = ns.output_dir or ENV_OUTPUT_DIR
-default_arg = ns.default_result or ENV_DEFAULT_RESULT
-base_arg = ns.base_dir or ENV_BASE_DIR
+    fmt = globals().get("_format_result_option", lambda x: x)
 
-CLI_OUTPUT_DIR = Path(output_arg).expanduser().resolve() if output_arg else Path.cwd()
-CLI_DEFAULT_RESULT = Path(default_arg).expanduser().resolve() if default_arg else None
-if base_arg:
-    base_candidate = Path(base_arg)
-elif SELECTION_ROOT is not None:
-    base_candidate = SELECTION_ROOT
-elif CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
-    base_candidate = CLI_DEFAULT_RESULT.parent
-else:
-    base_candidate = CLI_OUTPUT_DIR
+    st.selectbox(
+        "분석 결과 폴더",
+        options=result_options_local,
+        format_func=fmt,
+        key="selected_result_dir",
+    )
 
-CLI_BASE_DIR = _normalize_base_dir(base_candidate, SELECTION_ROOT)
+with theme_tab:
+    st.markdown("**대시보드 테마**")
+    sidebar_width_default = int(st.session_state.get("sidebar_width_px", 350))
+    sidebar_slider_args = {
+        "label": "사이드바 폭",
+        "min_value": 260,
+        "max_value": 520,
+        "key": "sidebar_width_px",
+        "help": "사이드바 영역의 폭을 조정해 긴 라벨이나 컨트롤이 잘려 보이지 않도록 합니다."
+    }
+    st.slider(value=sidebar_width_default, **sidebar_slider_args)
+    theme_keys = list(THEMES.keys())
+    default_idx = theme_keys.index(st.session_state.get('theme', theme_keys[0])) if st.session_state.get('theme') in theme_keys else 0
+    st.radio('테마 선택', theme_keys, index=default_idx, key='theme', horizontal=True)
+    sel = st.session_state.get('theme', theme_keys[0])
+    pal = THEMES[sel]['palette']
+    swatch_html = '<div style="display:flex;gap:6px;margin-top:8px;align-items:center">'
+    for k in ['bg','card_bg','text','accent']:
+        if k in pal:
+            swatch_html += f"<div style=\"width:36px;height:24px;border-radius:6px;background:{pal[k]};border:1px solid rgba(0,0,0,0.06)\" title=\"{k}\"></div>"
+    swatch_html += '</div>'
+    st.markdown(swatch_html, unsafe_allow_html=True)
+    st.write(THEMES[sel].get('desc',''))
 
-if "_cli_base_marker" not in st.session_state or st.session_state.get("_cli_base_marker") != str(CLI_BASE_DIR):
-    st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
-    st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
-elif "result_base_dir" not in st.session_state:
-    st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
+with settings_tab:
+    # 보기 설정을 3개의 큰 섹션(재스캔 / 정상·공백 / 전체 보기)으로 정리해 가독성을 높입니다.
+    st.markdown("**보기 설정(섹션별로 접어서 보기 가능)**")
 
-_base_session = Path(st.session_state["result_base_dir"]).expanduser()
-try:
-    _base_session = _base_session.resolve()
-except Exception:
-    pass
-BASE_OUTPUT_DIR = _normalize_base_dir(_base_session, SELECTION_ROOT)
-if st.session_state.get("result_base_dir") != str(BASE_OUTPUT_DIR):
-    st.session_state["result_base_dir"] = str(BASE_OUTPUT_DIR)
+    # 1) 재스캔 워크플로
+    with st.expander("재스캔 워크플로", expanded=True):
+        # df가 아직 정의되지 않았을 수 있으므로 안전하게 조회합니다.
+        df_val = globals().get("df")
+        if df_val is not None and hasattr(df_val, "columns"):
+            try:
+                group_list = sorted(list(df_val["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df_val.columns else []
+            except Exception:
+                group_list = []
+        else:
+            group_list = []
+        st.selectbox(
+            "그룹 선택",
+            ["전체"] + group_list,
+            key="group_filter",
+            help="재스캔 탭의 후보 목록을 특정 그룹으로 한정합니다.",
+            on_change=switch_main_tab,
+            args=("재스캔 필요",)
+        )
+        st.radio(
+            "보기 방식",
+            ["대형 비교(2열)", "그리드(다중 썸네일)"],
+            key="group_view_mode",
+            horizontal=True,
+            help="대형 비교는 앞·뒤면을 크게 보여주고, 그리드는 그룹 내 모든 이미지를 타일로 확인합니다.",
+            on_change=switch_main_tab,
+            args=("재스캔 필요",)
+        )
+        rescan_quality_default = st.session_state.get("rescan_quality_profile", "균형")
+        rescan_q_idx = quality_options_common.index(rescan_quality_default) if rescan_quality_default in quality_options_common else 1
+        st.radio(
+            "화질 프로파일",
+            quality_options_common,
+            index=rescan_q_idx,
+            key="rescan_quality_profile",
+            horizontal=True,
+            help="빠름(512px), 균형(1024px), 선명(1600px) 수준으로 썸네일 품질과 크기를 조정합니다.",
+            on_change=switch_main_tab,
+            args=("재스캔 필요",)
+        )
 
-if CLI_DEFAULT_RESULT and CLI_DEFAULT_RESULT.exists():
-    if not CLI_DEFAULT_RESULT.is_dir():
-        CLI_DEFAULT_RESULT = CLI_DEFAULT_RESULT.parent
-    try:
-        CLI_DEFAULT_RESULT.relative_to(BASE_OUTPUT_DIR)
-    except ValueError:
-        fallback_base = _normalize_base_dir(CLI_DEFAULT_RESULT.parent, SELECTION_ROOT)
-        BASE_OUTPUT_DIR = fallback_base
-        st.session_state["result_base_dir"] = str(BASE_OUTPUT_DIR)
-        CLI_BASE_DIR = BASE_OUTPUT_DIR
-        st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
+        # 삭제 모드 버튼 그룹
+        delete_mode = st.session_state.get("rescan_delete_mode", False)
+        delete_targets = st.session_state.get("rescan_delete_targets", [])
+        waiting_confirm = st.session_state.get("rescan_show_confirm", False)
 
+        if not delete_mode:
+            delete_button_label = "🗑️ 삭제"
+        else:
+            if waiting_confirm:
+                delete_button_label = "🗑️ 삭제 확인 중"
+            elif delete_targets:
+                delete_button_label = f"🗑️ 삭제 ({len(delete_targets)}개)"
+            else:
+                delete_button_label = "🗑️ 삭제 실행"
 
-def _has_result_files(path: Path) -> bool:
-    if not path.exists():
-        return False
-    for fname in ("report.parquet", "report.csv"):
-        if (path / fname).exists():
-            return True
-    return False
+        btn_cols = st.columns([1, 1, 1])
+        with btn_cols[0]:
+            if st.button(delete_button_label, key="rescan_delete_button"):
+                if not delete_mode:
+                    st.session_state.rescan_delete_mode = True
+                    st.session_state.rescan_delete_targets = []
+                    st.session_state.rescan_show_confirm = False
+                    st.session_state.rescan_delete_feedback = None
+                else:
+                    if delete_targets:
+                        st.session_state.rescan_show_confirm = True
+                    else:
+                        st.session_state.rescan_delete_feedback = ("warn", "삭제할 이미지를 먼저 선택하세요.")
+        with btn_cols[1]:
+            if delete_mode and not waiting_confirm:
+                if st.button("취소", key="rescan_delete_cancel"):
+                    st.session_state.rescan_delete_mode = False
+                    st.session_state.rescan_delete_targets = []
+                    st.session_state.rescan_delete_feedback = None
+                    st.rerun()
 
-
-def _looks_like_result_dir(path: Path) -> bool:
-    if not path.exists() or not path.is_dir():
-        return False
-    if _has_result_files(path):
-        return True
-    if path.name.endswith("_결과"):
-        marker_files = {"images_summary.csv", "report.json", "summary.csv"}
-        for fname in marker_files:
-            if (path / fname).exists():
-                return True
-        marker_dirs = {"artifacts"}
-        try:
-            for child in path.iterdir():
-                if child.name in marker_dirs:
-                    return True
-        except Exception:
-            pass
-    return False
-
-
-def _discover_result_dirs(base_dir: Path, max_depth: int = 6) -> List[Path]:
-    candidates: List[Path] = []
-    base_dir = base_dir.resolve()
-
-    if _looks_like_result_dir(base_dir):
-        candidates.append(base_dir)
-
-    skip_names = {"artifacts", "thumbnails", "disp_cache"}
-
-    for current_root, dirnames, filenames in os.walk(base_dir):
-        cur_path = Path(current_root)
-        try:
-            depth = len(cur_path.relative_to(base_dir).parts)
-        except ValueError:
-            continue
-
-        if depth > max_depth:
-            dirnames[:] = []
-            continue
-
-        if cur_path != base_dir and _looks_like_result_dir(cur_path):
-            candidates.append(cur_path)
-            dirnames[:] = []
-            continue
-
-        dirnames[:] = [d for d in dirnames if d not in skip_names]
-
-    unique_candidates = []
-    seen = set()
-    for cand in sorted(candidates):
-        if str(cand) not in seen:
-            unique_candidates.append(cand)
-            seen.add(str(cand))
-
-    return unique_candidates
-
-
-RESULT_DIRS = _discover_result_dirs(BASE_OUTPUT_DIR)
-
-
-def _result_dir_has_rescan(path: Path) -> bool:
-    targets = {"유사 후보", "중복/그룹"}
-    parquet = path / "report.parquet"
-    if parquet.exists():
-        try:
-            lf = pl.scan_parquet(str(parquet)).filter(pl.col("상태").is_in(list(targets))).limit(1)
-            if lf.collect(streaming=True).height > 0:
-                return True
-        except Exception:
-            pass
-    csv_path = path / "report.csv"
-    if csv_path.exists():
-        try:
-            for chunk in pd.read_csv(csv_path, usecols=["상태"], chunksize=2000):
-                
-                if chunk["상태"].isin(targets).any():
-                    return True
-        except Exception:
-            pass
-    # older pipelines used a 'grouped' subfolder; ignore filesystem scan for it
-    return False
-
-
-def _build_result_meta(paths: List[Path]) -> Dict[str, Dict[str, bool]]:
-    meta: Dict[str, Dict[str, bool]] = {}
-    for path in paths:
-        raw = str(path)
-        try:
-            resolved = str(path.resolve())
-        except Exception:
-            resolved = str(path)
-        has_report = _has_result_files(path)
-        needs_rescan = _result_dir_has_rescan(path) if has_report else False
-        entry = {
-            "has_report": has_report,
-            "needs_rescan": needs_rescan,
+    # 2) 정상 / 공백 보기
+    with st.expander("정상·공백 답안", expanded=True):
+        st.radio(
+            "보기 옵션",
+            ["모두 보기", "정상만", "공백만"],
+            key="ok_view_mode",
+            horizontal=True,
+            help="정상/공백 탭에서 표시할 답안 유형을 빠르게 전환합니다.",
+            on_change=switch_main_tab,
+            args=("정상/공백 답안",)
+        )
+        grid_default = int(st.session_state.get("grid_cols", 5))
+        grid_slider_args = {
+            "label": "그리드 열 개수",
+            "min_value": 2,
+            "max_value": 10,
+            "key": "grid_cols",
+            "help": "정상/공백 탭의 썸네일 한 줄 배치를 조정합니다."
         }
-        meta[raw] = entry
-        if resolved != raw:
-            meta[resolved] = entry
-    return meta
+        st.slider(value=grid_default, **grid_slider_args)
+        ok_quality_default = st.session_state.get("ok_quality_profile", "균형")
+        ok_q_idx = quality_options_common.index(ok_quality_default) if ok_quality_default in quality_options_common else 1
+        st.radio(
+            "화질 프로파일",
+            quality_options_common,
+            index=ok_q_idx,
+            key="ok_quality_profile",
+            horizontal=True,
+            help="빠름(512px), 균형(1024px), 선명(1600px) 썸네일 품질을 선택합니다.",
+            on_change=switch_main_tab,
+            args=("정상/공백 답안",)
+        )
 
+    # 3) 전체 보기
+    with st.expander("전체 보기", expanded=False):
+        st.text_input(
+            "파일명·경로 검색",
+            key="gallery_search",
+            placeholder="예: 10002, scan, .png",
+            on_change=switch_main_tab,
+            args=("전체 보기",)
+        )
+        ext_options = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
+        if "gallery_exts" in st.session_state:
+            st.multiselect("확장자", ext_options, key="gallery_exts")
+        else:
+            st.multiselect("확장자", ext_options, default=[], key="gallery_exts")
+
+        st.markdown("**표시 설정**")
+        quality_options = quality_options_common
+        current_quality = st.session_state.get("gallery_quality_profile")
+        q_idx = quality_options.index(current_quality) if current_quality in quality_options else 1
+        st.radio(
+            "화질 프로파일",
+            quality_options,
+            index=q_idx,
+            horizontal=True,
+            key="gallery_quality_profile",
+            help="빠름(512px), 균형(1024px), 선명(1600px)",
+            on_change=switch_main_tab,
+            args=("전체 보기",)
+        )
+        gallery_grid_default = int(st.session_state.get("gallery_grid_cols", 5))
+        gallery_slider_args = {
+            "label": "그리드 열 개수",
+            "min_value": 2,
+            "max_value": 10,
+            "key": "gallery_grid_cols",
+            "help": "전체 보기 탭에서 한 줄에 배치될 썸네일 개수"
+        }
+        st.slider(value=gallery_grid_default, **gallery_slider_args)
 
 RESULT_META = _build_result_meta(RESULT_DIRS)
 
@@ -308,13 +874,73 @@ def _format_result_option(path_str: str) -> str:
     return f"{prefix}{label}" if prefix else label
 
 if not result_options:
-    st.sidebar.warning("결과 폴더를 찾지 못했습니다. 좌측 입력에서 분석 루트를 지정한 뒤 다시 시도하세요.")
-    st.stop()
+    # 사용자가 좌측의 텍스트 입력에 경로를 입력했지만 '경로 적용' 버튼을 누르지 않았을 수 있습니다.
+    # 이 경우 입력값(result_base_input)을 우선 사용해 자동으로 결과 폴더를 검색해봅니다.
+    try:
+        candidate_base = st.session_state.get("result_base_dir") or st.session_state.get("result_base_input") or str(BASE_OUTPUT_DIR)
+        candidate_base = str(Path(candidate_base).expanduser())
+        found = []
+        # 검색 범위: candidate_base 자체가 결과 폴더일 수 있으므로 먼저 검사하고,
+        # 그렇지 않으면 candidate_base의 직하위 폴더들을 순회하여 결과 폴더를 찾습니다.
+        try:
+            # candidate_base 자체를 Path로 만들어 검사합니다.
+            # 사용자가 분석 루트로 직접 결과 폴더(예: .../uploaded_inputs/11001_결과_176181088)를 지정한 경우
+            # 이 폴더가 결과 폴더인지 먼저 확인하여 found에 추가합니다.
+            candidate_path = Path(candidate_base)
+            if candidate_path.is_dir() and re.match(r".*_결과(_\d+)?$", candidate_path.name):
+                if (
+                    (candidate_path / "report.parquet").exists()
+                    or (candidate_path / "report.csv").exists()
+                    or (candidate_path / "images_summary.csv").exists()
+                    or (candidate_path / "grouped").exists()
+                ):
+                    found.append(str(candidate_path.resolve()))
 
-if "selected_result_dir" not in st.session_state:
+            # 기존 동작: candidate_base의 직하위 폴더들을 검사
+            # 1) 폴더명이 '*_결과' 또는 '*_결과_숫자' 패턴인지 확인
+            # 2) 내부에 결과 마커(report.csv, report.parquet, images_summary.csv, grouped)가 있는지 확인
+            for name in os.listdir(candidate_base):
+                p = Path(candidate_base) / name
+                if not p.is_dir():
+                    continue
+                # [결과 폴더명 패턴 체크] *_결과 또는 *_결과_숫자
+                if re.match(r".*_결과(_\d+)?$", name):
+                    # [결과 파일 존재 체크] report.csv, report.parquet, images_summary.csv, grouped 중 하나라도 있으면 결과로 간주
+                    if (
+                        (p / "report.parquet").exists()
+                        or (p / "report.csv").exists()
+                        or (p / "images_summary.csv").exists()
+                        or (p / "grouped").exists()
+                    ):
+                        # candidate_base 자체가 이미 found에 추가된 경우 중복 방지
+                        resolved = str(p.resolve())
+                        if resolved not in found:
+                            found.append(resolved)
+        except Exception:
+            found = []
+
+        if found:
+            # 전역 RESULT_DIRS는 외부에서 설정될 수 있으므로 로컬 변수만 갱신하여 UI에 반영
+            result_options = sorted(found)
+            # 초기 선택 값을 설정
+            if "selected_result_dir" not in st.session_state:
+                st.session_state["selected_result_dir"] = result_options[0]
+        else:
+            st.sidebar.warning("결과 폴더를 찾지 못했습니다. 좌측 입력에서 분석 루트를 지정한 뒤 다시 시도하세요.")
+            st.stop()
+    except Exception:
+        st.sidebar.warning("결과 폴더를 찾지 못했습니다. 좌측 입력에서 분석 루트를 지정한 뒤 다시 시도하세요.")
+        st.stop()
+
+if "selected_result_dir" not in st.session_state and result_options:
     st.session_state["selected_result_dir"] = result_options[0]
 
-selected_dir_str = st.session_state.get("selected_result_dir", result_options[0])
+# 선택값이 없을 경우 result_options가 비어있을 수 있으므로 안전한 기본값을 사용합니다.
+# 기본값으로는 BASE_OUTPUT_DIR를 사용하여 이후 경로 연산이 실패하지 않도록 합니다.
+selected_dir_str = st.session_state.get(
+    "selected_result_dir",
+    result_options[0] if result_options else str(BASE_OUTPUT_DIR),
+)
 prev_selected_dir = st.session_state.get("_last_selected_dir")
 dir_changed = prev_selected_dir is not None and prev_selected_dir != selected_dir_str
 st.session_state["_last_selected_dir"] = selected_dir_str
@@ -349,7 +975,7 @@ st.markdown("""
 <style>
 .app-header { display:flex; align-items:center; justify-content:space-between; padding: 8px 0 18px 0; margin-bottom: 8px; }
 .app-title { font-size:20px; font-weight:800; color:#0B1726; display:flex; align-items:center; gap:12px; }
-.app-badge { background:linear-gradient(90deg,#f0f7ff,#eef7ff); color:#0B66FF; font-weight:700; padding:6px 12px; border-radius:999px; font-size:13px; box-shadow:0 2px 8px rgba(11,102,255,0.06); }
+.app-badge { background:linear-gradient(90deg,#eaf9f8,#f0fbfb); color:#1EA3A1; font-weight:700; padding:6px 12px; border-radius:999px; font-size:13px; box-shadow:0 2px 8px rgba(30,163,161,0.06); }
 .app-icons { display:flex; gap:10px; align-items:center; }
 .app-icon { width:36px; height:36px; border-radius:50%; background:#fff; display:inline-flex; align-items:center; justify-content:center; box-shadow:0 2px 8px rgba(2,8,12,0.06); font-size:16px; }
 </style>
@@ -1068,34 +1694,36 @@ except Exception:
         c3.metric("공백 수", f"{kpis['공백 수']:,}")
 
 
-# ===== 사이드바: 꼭 필요한 옵션만 노출 =====
-st.sidebar.header("주요 필터/설정")
-# 사이드바: 결과 파일/아티팩트 존재 여부 요약
-try:
-    missing = []
-    checks = [(REPORT_PARQUET, 'report.parquet'), (REPORT_CSV, 'report.csv'), (IMG_SUMMARY, 'images_summary.csv')]
-    for p, name in checks:
-        if not os.path.exists(p):
-            missing.append(name)
-    art_txt = os.path.join(OUTPUT_DIR, 'artifacts', 'ann_backend.txt')
-    if not os.path.exists(art_txt):
-        # 필수가 아닌 결과물/산출물이므로 경고는 하지 않음
-        pass
-    if missing:
-        st.sidebar.warning("결과 파일 누락: " + ", ".join(missing) + ". 먼저 파이프라인을 실행하세요.")
+# ===== 사이드바: 간결한 렌더러로 분리(가독성 개선) =====
+# 사이드바 관련 UI 블록을 작은 함수로 분리하여 본문은 호출만 하도록 했습니다.
 
-except Exception:
-    pass
+def _render_sidebar_checks():
+    """사이드바 상단의 결과 파일/아티팩트 존재 여부 요약 표시"""
+    try:
+        missing = []
+        checks = [(REPORT_PARQUET, 'report.parquet'), (REPORT_CSV, 'report.csv'), (IMG_SUMMARY, 'images_summary.csv')]
+        for p, name in checks:
+            if not os.path.exists(p):
+                missing.append(name)
+        art_txt = os.path.join(OUTPUT_DIR, 'artifacts', 'ann_backend.txt')
+        # 필수가 아닌 결과물은 경고하지 않음
+        if missing:
+            st.sidebar.warning("결과 파일 누락: " + ", ".join(missing) + ". 먼저 파이프라인을 실행하세요.")
+    except Exception:
+        # UI 보조 정보 실패는 무시
+        pass
+
+
 # ===== 테마 선택 =====
 THEMES = {
     'Light (기본)': {
-        'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','sidebar_text':'#091223','secondary':'#475569','accent':'#0B66FF','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
+        'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','sidebar_text':'#091223','secondary':'#475569','accent':'#1EA3A1','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
     },
     'Warm Sepia': {
-        'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','sidebar_text':'#2d2a26','secondary':'#6e5a4a','accent':'#b77936','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
+        'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','sidebar_text':'#2d2a26','secondary':'#6e5a4a','accent':'#1EA3A1','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
     },
     'Gentle Mint': {
-        'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','sidebar_text':'#082724','secondary':'#4b6b64','accent':'#39b89f','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
+        'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','sidebar_text':'#082724','secondary':'#4b6b64','accent':'#1EA3A1','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
     }
 }
 
@@ -1113,7 +1741,8 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     text = pal.get('text', '#0B1726')
     sidebar_text = pal.get('sidebar_text', text)
     secondary_text = pal.get('secondary', '#41515F')
-    accent = pal.get('accent', '#0B66FF')
+    # Use teal family as default accent (user requested #1EA3A1 series)
+    accent = pal.get('accent', '#1EA3A1')
     card_bg = pal.get('card_bg', '#FFFFFF')
     card_border = pal.get('card_border', '#e6e9ee')
     shadow = pal.get('shadow', 'none')
@@ -1121,7 +1750,8 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     css = f"""
     <style>
     .stApp {{ background-color: {bg} !important; color: {text} !important; }}
-    [data-testid="stSidebar"] {{ background-color: {sidebar_bg} !important; box-shadow: none !important; color: {sidebar_text} !important; }}
+    /* 사이드바에 포인트 계열(#1EA3A1) 계조를 적용합니다. 부드러운 그라데이션과 좌측 엣지 바를 추가해 시각적 구분을 줍니다. */
+    [data-testid="stSidebar"] {{ background: linear-gradient(180deg, rgba(30,163,161,0.04), {sidebar_bg}) !important; box-shadow: none !important; color: {sidebar_text} !important; border-left: 6px solid rgba(30,163,161,0.08) !important; }}
     [data-testid="stSidebar"][aria-expanded="true"] {{ width: {sidebar_width}px !important; min-width: {sidebar_width}px !important; }}
     [data-testid="stSidebar"][aria-expanded="false"] {{ width: 0 !important; min-width: 0 !important; }}
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stHeader, [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] .css-1d391kg {{ color: {sidebar_text} !important; opacity: 0.98 !important; }}
@@ -1140,23 +1770,35 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     input[type="text"], .stTextInput>div>div>input {{
         background-color: rgba(255,255,255,0.9) !important;
         border: 1.5px solid {accent} !important;
-        box-shadow: 0 4px 10px rgba(11,102,255,0.08) !important;
+    box-shadow: 0 4px 10px rgba(30,163,161,0.08) !important;
         padding: 10px 12px !important;
         border-radius: 10px !important;
         font-size: 14px !important;
         color: {text} !important;
     }}
     /* 사이드바 내 입력과 플레이스홀더 대비 개선 */
+    /* 사이드바 내부 입력은 약간의 포인트 색조를 배경에 줘서 어사이드 영역임을 명확히 합니다. */
     [data-testid="stSidebar"] input[type="text"] {{ 
-        background-color: rgba(255,255,255,0.95) !important; 
+        background-color: rgba(30,163,161,0.03) !important; 
+        border: 1px solid rgba(30,163,161,0.12) !important;
         color: {text} !important;
+        box-shadow: 0 2px 6px rgba(30,163,161,0.04) !important;
     }}
     input::placeholder, textarea::placeholder {{ color: rgba(0,0,0,0.38) !important; font-weight: 500 !important; }}
     
+    /* HR(가로선) 스타일: 청록(Teal) 계열로 강조합니다. accent 색을 사용하되 필요시 더 진한 변형을 함께 사용합니다. */
+    hr, .stMarkdown hr, .stDivider hr {{
+        border: none !important;
+        height: 4px !important;
+        background: linear-gradient(90deg, rgba(30,163,161,0.08), {accent}, rgba(30,163,161,0.08)) !important;
+        border-radius: 6px !important;
+        margin: 18px 0 !important;
+        box-shadow: 0 4px 12px rgba(30,163,161,0.06) inset;
+    }}
     /* 사이드바 select 박스 - 심플하고 깔끔한 스타일 */
     [data-testid="stSidebar"] .stSelectbox>div>div {{
         background-color: rgba(255,255,255,0.98) !important;
-        border: 1px solid rgba(11,102,255,0.3) !important;
+    border: 1px solid rgba(30,163,161,0.3) !important;
         border-radius: 8px !important;
         box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
         transition: border-color 0.2s ease !important;
@@ -1164,7 +1806,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     
     [data-testid="stSidebar"] .stSelectbox>div>div:hover {{
         border-color: {accent} !important;
-        box-shadow: 0 2px 8px rgba(11,102,255,0.12) !important;
+    box-shadow: 0 2px 8px rgba(30,163,161,0.12) !important;
     }}
     
     [data-testid="stSidebar"] .stSelectbox>div>div>div {{
@@ -1185,7 +1827,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     /* 드롭다운 옵션 리스트 스타일링 */
     [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
         background-color: white !important;
-        border: 1px solid rgba(11,102,255,0.2) !important;
+    border: 1px solid rgba(30,163,161,0.2) !important;
         border-radius: 8px !important;
         box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
         margin-top: 2px !important;
@@ -1201,7 +1843,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     }}
     
     [data-testid="stSidebar"] .stSelectbox [role="option"]:hover {{
-        background-color: rgba(11,102,255,0.05) !important;
+    background-color: rgba(30,163,161,0.05) !important;
         color: {accent} !important;
     }}
     
@@ -1404,10 +2046,11 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
 
     /* 큰 파란 실행 버튼 (사이드바/상단에서 사용) */
     .primary-action-btn {{
-        background: linear-gradient(180deg, {accent}, #075ac8) !important;
+    /* darker teal variant for gradient stop */
+    background: linear-gradient(180deg, {accent}, #157271) !important;
         color: #fff !important; border: none !important; padding: 12px 18px !important;
         border-radius: 12px !important; font-size: 16px !important; font-weight: 700 !important;
-        box-shadow: 0 8px 28px rgba(11,102,255,0.14) !important; cursor: pointer;
+    box-shadow: 0 8px 28px rgba(30,163,161,0.14) !important; cursor: pointer;
     }}
 
     /* 그룹 섹션 카드 및 썸네일 그리드 */
@@ -1419,7 +2062,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     .thumb-caption {{ text-align:center; font-size:13px; color:{secondary_text}; margin-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
     .thumb-badge {{ position:absolute; top:8px; left:8px; background: rgba(255,255,255,0.95); color:{text}; padding:4px 8px; border-radius:999px; font-weight:600; font-size:12px; box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
     .thumb-check {{ position:absolute; top:8px; right:8px; width:32px; height:32px; border-radius:8px; display:flex; align-items:center; justify-content:center; background: rgba(255,255,255,0.95); box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
-    .thumb-card.selected {{ box-shadow: 0 12px 36px rgba(11,102,255,0.12); border:1px solid rgba(11,102,255,0.12); }}
+    .thumb-card.selected {{ box-shadow: 0 12px 36px rgba(30,163,161,0.12); border:1px solid rgba(30,163,161,0.12); }}
 
     @media (max-width: 900px) {{ .thumb-card {{ width: calc(50% - 12px); }} .kpi-row {{ flex-direction:column; gap:10px; }} }}
     @media (max-width: 600px) {{ .thumb-card {{ width: calc(100% - 12px); }} }}
@@ -1430,279 +2073,6 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     except Exception:
         # CSS 주입 실패는 UI만 영향을 주므로 안전하게 무시
         pass
-
-quality_options_common = ["빠름", "균형", "선명"]
-
-quality_options_common = ["빠름", "균형", "선명"]
-
-# 사이드바 탭 생성
-path_tab, theme_tab, settings_tab = st.sidebar.tabs(["분석 경로", "테마", "보기 설정"])
-
-with path_tab:
-    st.markdown("**분석 경로 설정**")
-    # 텍스트 입력의 표시값은 현재의 result_base_dir을 사용합니다.
-    # 버튼으로 기본 경로를 적용/복원하면 st.session_state['result_base_dir']이 변경되고
-    # _request_rerun()로 재실행될 때 이 입력의 값이 갱신되어 보이게 됩니다.
-    # Streamlit에서 위젯을 `value=`(기본값)로 생성하고 동시에 세션 상태(Session State) API로 값을 설정하면
-    # 경고가 발생할 수 있습니다. 이를 방지하려면 위젯을 만들기 전에 세션 키를 먼저 초기화하세요.
-    # 또한 `key=`를 사용하는 경우 `value=`를 함께 전달하지 않습니다.
-    if "result_base_input" not in st.session_state:
-        st.session_state["result_base_input"] = st.session_state.get("result_base_dir", str(BASE_OUTPUT_DIR))
-    base_input = st.text_input(
-        "검색 시작 경로",
-        key="result_base_input",
-    )
-
-    # 안전하게 세션 상태를 변경하기 위한 콜백 함수들
-    def _apply_base_dir_cb():
-        raw = st.session_state.get("result_base_input", "")
-        try:
-            new_base = Path(raw).expanduser()
-            normalized_base = _normalize_base_dir(new_base, SELECTION_ROOT)
-            st.session_state["result_base_dir"] = str(normalized_base)
-            st.session_state.pop("selected_result_dir", None)
-            st.session_state["_cli_base_marker"] = str(normalized_base)
-        except Exception:
-            # 실패 시 기존 동작 유지
-            pass
-        # 콜백 내부에서는 st.rerun()이 no-op일 수 있으므로 여기서는 명시적 재실행을 호출하지 않습니다.
-        # 세션 상태를 변경하면 Streamlit이 콜백 종료 후 자동으로 스크립트를 재실행합니다.
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-
-    def _reset_base_dir_cb():
-        # CLI 기본값으로 복원: 마커과 result_base_dir만 갱신합니다.
-        try:
-            st.session_state["result_base_dir"] = str(CLI_BASE_DIR)
-            st.session_state.pop("selected_result_dir", None)
-            st.session_state["_cli_base_marker"] = str(CLI_BASE_DIR)
-            # 텍스트 입력도 같은 값을 반영하도록 설정
-            st.session_state["result_base_input"] = str(CLI_BASE_DIR)
-        except Exception:
-            pass
-        # 콜백 내부에서 강제 rerun을 호출하지 않음: 세션 상태 변경으로 자동 재실행됩니다.
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-
-    # 사이드바 내 버튼을 좀 더 보기 좋게 확장합니다.
-    # - 두 버튼을 동일한 너비로 배치하고
-    # - CSS로 최소 너비와 패딩, 글자 크기를 늘려 시각적으로 정돈합니다.
-    btn_css = """
-    <style>
-    /* 사이드바 내부 버튼 스타일 적용 */
-    [data-testid="stSidebar"] .stButton>button {
-        min-width: 160px !important;
-        padding: 10px 22px !important;
-        font-size: 16px !important;
-        border-radius: 10px !important;
-    }
-    /* 약간의 간격을 주어 버튼이 붙어 보이지 않게 함 */
-    [data-testid="stSidebar"] .stButton {
-        margin-bottom: 6px !important;
-    }
-    </style>
-    """
-    try:
-        st.markdown(btn_css, unsafe_allow_html=True)
-    except Exception:
-        pass
-
-    path_cols = st.columns([2, 2])
-    with path_cols[0]:
-        st.button("경로 적용", key="apply_base_dir", on_click=_apply_base_dir_cb)
-    with path_cols[1]:
-        st.button("기본 경로 복원", key="reset_base_dir", on_click=_reset_base_dir_cb)
-    # (목록 새로고침 버튼 제거됨)
-
-    st.selectbox(
-        "분석 결과 폴더",
-        options=result_options,
-        format_func=_format_result_option,
-        key="selected_result_dir",
-    )
-
-with theme_tab:
-    st.markdown("**대시보드 테마**")
-    sidebar_width_default = int(st.session_state.get("sidebar_width_px", 350))
-    sidebar_slider_args = {
-        "label": "사이드바 폭",
-        "min_value": 260,
-        "max_value": 520,
-        "key": "sidebar_width_px",
-        "help": "사이드바 영역의 폭을 조정해 긴 라벨이나 컨트롤이 잘려 보이지 않도록 합니다."
-    }
-    st.slider(value=sidebar_width_default, **sidebar_slider_args)
-    theme_keys = list(THEMES.keys())
-    default_idx = theme_keys.index(st.session_state.get('theme', theme_keys[0])) if st.session_state.get('theme') in theme_keys else 0
-    st.radio('테마 선택', theme_keys, index=default_idx, key='theme', horizontal=True)
-    sel = st.session_state.get('theme', theme_keys[0])
-    pal = THEMES[sel]['palette']
-    swatch_html = '<div style="display:flex;gap:6px;margin-top:8px;align-items:center">'
-    for k in ['bg','card_bg','text','accent']:
-        if k in pal:
-            swatch_html += f"<div style=\"width:36px;height:24px;border-radius:6px;background:{pal[k]};border:1px solid rgba(0,0,0,0.06)\" title=\"{k}\"></div>"
-    swatch_html += '</div>'
-    st.markdown(swatch_html, unsafe_allow_html=True)
-    st.write(THEMES[sel].get('desc',''))
-
-with settings_tab:
-    # 재스캔 관련 설정
-    st.markdown("**재스캔 워크플로**")
-    group_list = sorted(list(df["그룹ID"].replace('-', pd.NA).dropna().unique())) if "그룹ID" in df.columns else []
-    st.selectbox(
-        "그룹 선택",
-        ["전체"] + group_list,
-        key="group_filter",
-        help="재스캔 탭의 후보 목록을 특정 그룹으로 한정합니다.",
-        on_change=switch_main_tab,
-        args=("재스캔 필요",)
-    )
-    st.radio(
-        "보기 방식",
-        ["대형 비교(2열)", "그리드(다중 썸네일)"],
-        key="group_view_mode",
-        horizontal=True,
-        help="대형 비교는 앞·뒤면을 크게 보여주고, 그리드는 그룹 내 모든 이미지를 타일로 확인합니다.",
-        on_change=switch_main_tab,
-        args=("재스캔 필요",)
-    )
-    rescan_quality_default = st.session_state.get("rescan_quality_profile", "균형")
-    rescan_q_idx = quality_options_common.index(rescan_quality_default) if rescan_quality_default in quality_options_common else 1
-    st.radio(
-        "화질 프로파일",
-        quality_options_common,
-        index=rescan_q_idx,
-        key="rescan_quality_profile",
-        horizontal=True,
-        help="빠름(512px), 균형(1024px), 선명(1600px) 수준으로 썸네일 품질과 크기를 조정합니다.",
-        on_change=switch_main_tab,
-        args=("재스캔 필요",)
-    )
-
-    delete_mode = st.session_state.get("rescan_delete_mode", False)
-    delete_targets = st.session_state.get("rescan_delete_targets", [])
-    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
-
-    if not delete_mode:
-        delete_button_label = "🗑️ 삭제"
-    else:
-        if waiting_confirm:
-            delete_button_label = "🗑️ 삭제 확인 중"
-        elif delete_targets:
-            delete_button_label = f"🗑️ 삭제 ({len(delete_targets)}개)"
-        else:
-            delete_button_label = "🗑️ 삭제 실행"
-
-    if st.button(delete_button_label, key="rescan_delete_button"):
-        if not delete_mode:
-            st.session_state.rescan_delete_mode = True
-            st.session_state.rescan_delete_targets = []
-            st.session_state.rescan_show_confirm = False
-            st.session_state.rescan_delete_feedback = None
-        else:
-            if delete_targets:
-                st.session_state.rescan_show_confirm = True
-            else:
-                st.session_state.rescan_delete_feedback = ("warn", "삭제할 이미지를 먼저 선택하세요.")
-
-    if delete_mode and not waiting_confirm:
-        if st.button("취소", key="rescan_delete_cancel"):
-            st.session_state.rescan_delete_mode = False
-            st.session_state.rescan_delete_targets = []
-            st.session_state.rescan_delete_feedback = None
-            st.rerun()
-
-    st.markdown("---")
-    # 정상/공백 탭 컨트롤
-    st.markdown("**정상/공백 답안 보기**")
-    st.radio(
-        "보기 옵션",
-        ["모두 보기", "정상만", "공백만"],
-        key="ok_view_mode",
-        horizontal=True,
-        help="정상/공백 탭에서 표시할 답안 유형을 빠르게 전환합니다.",
-        on_change=switch_main_tab,
-        args=("정상/공백 답안",)
-    )
-    grid_default = int(st.session_state.get("grid_cols", 5))
-    grid_slider_args = {
-        "label": "그리드 열 개수",
-        "min_value": 2,
-        "max_value": 10,
-        "key": "grid_cols",
-        "help": "정상/공백 탭의 썸네일 한 줄 배치를 조정합니다."
-    }
-    st.slider(value=grid_default, **grid_slider_args)
-    ok_quality_default = st.session_state.get("ok_quality_profile", "균형")
-    ok_q_idx = quality_options_common.index(ok_quality_default) if ok_quality_default in quality_options_common else 1
-    st.radio(
-        "화질 프로파일",
-        quality_options_common,
-        index=ok_q_idx,
-        key="ok_quality_profile",
-        horizontal=True,
-        help="빠름(512px), 균형(1024px), 선명(1600px) 썸네일 품질을 선택합니다.",
-        on_change=switch_main_tab,
-        args=("정상/공백 답안",)
-    )
-
-    st.markdown("---")
-    # 전체 보기 컨트롤
-    st.markdown("**전체 보기 필터**")
-    st.text_input(
-        "파일명·경로 검색",
-        key="gallery_search",
-        placeholder="예: 10002, scan, .png",
-        on_change=switch_main_tab,
-        args=("전체 보기",)
-    )
-    ext_options = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
-    if "gallery_exts" in st.session_state:
-        st.multiselect("확장자", ext_options, key="gallery_exts")
-    else:
-        st.multiselect("확장자", ext_options, default=[], key="gallery_exts")
-    sort_options = ["파일명", "수정시각(최신순)", "수정시각(오래된순)"]
-    sort_idx = sort_options.index(st.session_state.gallery_sort) if st.session_state.gallery_sort in sort_options else 0
-    st.selectbox("정렬", sort_options, index=sort_idx, key="gallery_sort")
-    st.markdown("**표시 설정**")
-    quality_options = quality_options_common
-    current_quality = st.session_state.get("gallery_quality_profile")
-    q_idx = quality_options.index(current_quality) if current_quality in quality_options else 1
-    st.radio(
-        "화질 프로파일",
-        quality_options,
-        index=q_idx,
-        horizontal=True,
-        key="gallery_quality_profile",
-        help="빠름(512px), 균형(1024px), 선명(1600px)",
-        on_change=switch_main_tab,
-        args=("전체 보기",)
-    )
-    render_options = ["리샘플(권장)", "원본"]
-    r_idx = render_options.index(st.session_state.gallery_render_mode) if st.session_state.gallery_render_mode in render_options else 0
-    st.radio(
-        "렌더 방식",
-        render_options,
-        index=r_idx,
-        horizontal=True,
-        key="gallery_render_mode",
-        help="리샘플: LANCZOS 고화질 썸네일 / 원본: 이미지 원본 로드",
-        on_change=switch_main_tab,
-        args=("전체 보기",)
-    )
-    gallery_grid_default = int(st.session_state.get("gallery_grid_cols", 5))
-    gallery_slider_args = {
-        "label": "그리드 열 개수",
-        "min_value": 2,
-        "max_value": 10,
-        "key": "gallery_grid_cols",
-        "help": "전체 보기 탭에서 한 줄에 배치될 썸네일 개수"
-    }
-    st.slider(value=gallery_grid_default, **gallery_slider_args)
 
 _inject_theme_css(st.session_state.get('theme','Light (기본)'))
 
@@ -2200,12 +2570,12 @@ tab_css = """
     margin-bottom: -2px;
 }
 .custom-tab:hover {
-    color: #0B66FF;
-    background: rgba(11, 102, 255, 0.05);
+    color: #1EA3A1;
+    background: rgba(30, 163, 161, 0.05);
 }
 .custom-tab.active {
-    color: #0B66FF;
-    border-bottom-color: #0B66FF;
+    color: #1EA3A1;
+    border-bottom-color: #1EA3A1;
     font-weight: 600;
 }
 </style>
@@ -2826,10 +3196,11 @@ elif st.session_state["main_tab"] == "전체 보기":
     show_paths = all_imgs[:st.session_state.gallery_limit]
     st.caption(f"1–{len(show_paths)} / {total_items}")
 
-    # ========== 이미지 그리드 섹션 ==========
+    # ========== 이미지 그리드 섹션: 기본 그리드 동작으로 단순화 ==========
+    # 레이아웃 선택 박스를 제거하고 기본 그리드만 표시합니다.
     cols = st.columns(grid_cols_local)
     for idx, path in enumerate(show_paths):
-        # 표시에 사용할 이미지(리샘플 or 원본)
+        # 표시에 사용할 이미지(리샘플 또는 원본)
         if render_mode == "원본":
             disp = path
         else:
@@ -2848,7 +3219,7 @@ elif st.session_state["main_tab"] == "전체 보기":
                     args=(path,),
                 )
             except Exception:
-                # 일부 streamlit 버전에서는 st.image가 on_click을 지원하지 않을 수 있으므로
+                # 일부 Streamlit 버전에서는 st.image가 on_click을 지원하지 않을 수 있으므로
                 # 실패하면 폴백으로 클릭 없는 이미지를 표시합니다.
                 st.image(_safe_image_open(disp), caption=img_name, use_container_width=True)
 

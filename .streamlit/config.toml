@@ -1,0 +1,8 @@
+[theme]
+base = "light"
+primaryColor = "#1ea3a1"
+# 추가 색상: 첨부하신 스크린샷 값을 반영합니다.
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#31333F"
+font = "sans serif"
