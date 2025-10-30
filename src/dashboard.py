@@ -920,8 +920,30 @@ def make_display_image(src_path: str, size: int, fmt: str = "WEBP", quality: int
             else:  # WEBP
                 img.save(dst, "WEBP", quality=quality, method=6)
     except Exception as e:
+        # 실패 시 원본 경로를 그대로 반환하는 대신, 사용자에게 일관된
+        # 표시 결과를 제공하기 위해 플레이스홀더 이미지를 생성하여
+        # 캐시(dst)에 저장하고 그 경로를 반환합니다.
         logger.debug(f"make_display_image 실패: {src_path} -> {dst}: {e}")
-        return src_path
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            w, h = (min(1024, size), int(min(1024, size) * 0.75))
+            ph = Image.new("RGB", (w, h), (240, 240, 240))
+            draw = ImageDraw.Draw(ph)
+            basename = os.path.basename(src_path) if src_path else "unknown"
+            # 한국어 주석: 플레이스홀더 텍스트를 중앙에 표시
+            txt = f"이미지 없음\n{basename}"
+            try:
+                # 텍스트 위치를 중앙으로 계산
+                tw, th = draw.textsize(txt)
+                draw.text(((w - tw) / 2, (h - th) / 2), txt, fill=(100, 100, 100))
+            except Exception:
+                # 일부 환경에서 textsize가 작동하지 않을 수 있으므로 단순히 왼쪽 상단에 표시
+                draw.text((8, 8), txt, fill=(100, 100, 100))
+            ph.save(dst, "PNG")
+            return dst
+        except Exception:
+            # 플레이스홀더 생성도 실패하면 안전하게 원본 src_path로 폴백
+            return src_path
     return dst
 
 # ===== KPI 계산 =====
@@ -1189,7 +1211,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         font-weight: 500 !important;
     }}
 
-    /* 재스캔 필요 옵션 강조 표현: BaseWeb aria-label을 활용해 매칭합니다. */
+    /* 재스캔 필요 옵션 강조 표현: BaseWeb(라이브러리) aria-label을 활용해 매칭합니다. */
     [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"] {{
         color: #d62839 !important;
         font-weight: 600 !important;
@@ -1259,7 +1281,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         color: {sidebar_text} !important;
     }}
 
-    /* ===== 포털(overlay)로 렌더되는 BaseWeb/Select의 드롭다운을 직접 타깃합니다. =====
+    /* ===== 포털(오버레이)로 렌더되는 BaseWeb(라이브러리)/Select의 드롭다운을 직접 타깃합니다. =====
        Streamlit은 드롭다운을 sidebar 바깥(포털)으로 렌더할 수 있어 기존 사이드바 내부 선택자로 매칭되지 않을 수 있습니다.
        아래 규칙은 포털 내부의 listbox/option에 대해 동일한 강조(회색 배경, 진한 텍스트, sticky)를 강제합니다. */
     .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"],
@@ -1279,12 +1301,13 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         color: {sidebar_text} !important;
     }}
 
-    /* ------------------------------------------------------------------
-       Streamlit이 생성하는 emotion 클래스(예: st-emotion-cache-xxxxx etx0m6x1)
-       를 직접 타깃해 내부 텍스트 컨테이너에도 회색 배경/패딩을 강제합니다.
-       - 사이드바 내부 렌더링과 포털(overlay) 렌더링을 모두 커버합니다.
-       - 특정 동적 클래스명이 바뀔 수 있으므로, etx-prefixed 클래스도 함께 지정합니다.
-    ------------------------------------------------------------------ */
+     /* ------------------------------------------------------------------
+         Streamlit이 생성하는 emotion 계열 클래스(예: st-emotion-cache-xxxxx, etx0m6x1 등)
+         을 직접 타깃팅하여 내부 텍스트 컨테이너에도 회색 배경과 패딩을 강제로 적용합니다.
+         - 사이드바 내부 렌더링과 포털(포털 = 오버레이)으로 렌더되는 드롭다운 모두를 포함합니다.
+         - 동적으로 생성되는 클래스명이 바뀔 수 있으므로 etx- 접두사의 클래스도 함께 커버합니다.
+         (이 블록은 설명용 주석이며 스타일 동작에는 영향이 없습니다.)
+     ------------------------------------------------------------------ */
     /* 사이드바 내부 listbox */
     [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
     [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
@@ -1297,7 +1320,7 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
         border-radius: 4px !important;
     }}
 
-    /* 포털(overlay)로 렌더된 listbox */
+    /* 포털(오버레이)로 렌더된 listbox */
     .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
     .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1,
     body > [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
@@ -1344,6 +1367,18 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
     # 추가 스타일: KPI 카드, 썸네일 카드, 주요 액션 버튼 등 디자이너 스타일
     extra = f"""
     <style>
+        /* 비교 패널을 상단에 고정(floating) */
+        .float-compare {{
+            position: sticky;
+            top: 78px; /* 상단 헤더 및 KPI 높이에 따라 조정 */
+            z-index: 9999;
+            background: rgba(255,255,255,0.92);
+            padding: 10px 12px;
+            border-radius: 10px;
+            box-shadow: 0 8px 20px rgba(2,8,12,0.06);
+            margin-bottom: 12px;
+        }}
+
     /* KPI 카드 레이아웃 */
     .kpi-row {{ display:flex; gap:18px; align-items:stretch; margin:18px 0 22px; }}
     .kpi-card {{ flex:1; background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:12px; padding:16px; box-shadow:{shadow}; display:flex; flex-direction:column; gap:6px; justify-content:center; min-height:92px; }}
@@ -2380,6 +2415,8 @@ if st.session_state["main_tab"] == "재스캔 필요":
     # 통합된 gallery_selected(경로 리스트) 사용
     sel_exist_top = [p for p in st.session_state.get("gallery_selected", []) if p and os.path.isfile(p)]
     if sel_exist_top:
+        # 비교 패널을 상단에 고정하기 위해 float-compare 래퍼에 넣습니다.
+        st.markdown('<div class="float-compare">', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("### 🔍 즉시 비교 (재스캔 탭)")
         
@@ -2556,6 +2593,8 @@ if st.session_state["main_tab"] == "재스캔 필요":
                     with c2t:
                         st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
 
+        # 비교 패널 래퍼 종료
+        st.markdown('</div>', unsafe_allow_html=True)
     # 파이프라인이 grouped/ok/blank_answers 폴더를 생성하지 않으므로
     # 파일시스템의 grouped 디렉터리 전용 로직을 제거했습니다.
     # 대신 리포트(df)와 images_summary(img_df)를 기반으로 후보를 렌더링합니다.
@@ -2639,11 +2678,16 @@ if st.session_state["main_tab"] == "재스캔 필요":
                     return
 
                 selected = path in st.session_state.get("gallery_selected", [])
-                button_label = "✔ 비교 취소" if selected else "↔ 비교 선택"
-                button_key = f"cmp_rescan_{view_mode}_{key_stub}"
-                if st.button(button_label, key=button_key):
-                    toggle_compare(path)
-                    st.rerun()
+                # 표시용 배지: 선택된 경우 A/B 순서를 캡션에 추가하여
+                # 상단의 즉시 비교 패널과 문구가 섞이지 않도록 구분합니다.
+                sel_list = st.session_state.get("gallery_selected", [])
+                badge = ""
+                try:
+                    if path in sel_list:
+                        pos = sel_list.index(path) + 1
+                        badge = f" (선택 {'A' if pos == 1 else 'B' if pos == 2 else pos})"
+                except Exception:
+                    badge = ""
 
                 disp = make_display_image(
                     path,
@@ -2653,9 +2697,19 @@ if st.session_state["main_tab"] == "재스캔 필요":
                 )
                 st.image(
                     _safe_image_open(disp),
-                    caption=label,
+                    caption=label + badge,
                     use_container_width=True,
                 )
+
+                # 액션: 기존의 '비교 선택' 텍스트 대신 단순한 '선택' 버튼으로 라벨을 바꿔
+                # 상단의 비교 패널과 혼동되지 않도록 합니다.
+                button_label = "선택됨" if selected else "선택"
+                button_key = f"cmp_rescan_{view_mode}_{key_stub}"
+                st.markdown('<div class="thumb-action">', unsafe_allow_html=True)
+                if st.button(button_label, key=button_key, use_container_width=True, type=("primary" if selected else "secondary")):
+                    toggle_compare(path)
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
             if view_mode == "대형 비교(2열)":
                 for pair_idx, bundle in enumerate(grouped_items):
