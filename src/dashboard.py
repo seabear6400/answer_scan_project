@@ -17,6 +17,20 @@ import numpy as np
 import pandas as pd
 quality_options_common = ["빠름", "균형", "선명"]
 
+# Streamlit 페이지 설정: 레이아웃을 와이드로 고정합니다.
+# - 이미 페이지 설정이 되어 있거나 이 호출 시점이 맞지 않으면 예외가 발생할 수 있으므로
+#   try/except로 안전하게 감쌉니다.
+try:
+    st.set_page_config(layout="wide")
+except Exception:
+    # 설정 불가 시 단순히 무시합니다(이미 설정되었거나 호출 시점이 맞지 않을 수 있음).
+    try:
+        l = globals().get('logger')
+        if l and hasattr(l, 'debug'):
+            l.debug("st.set_page_config(layout='wide') 호출 실패 또는 이미 설정됨")
+    except Exception:
+        pass
+
 # -------------------------------------------------------------------------
 # 안전 폴백: 모듈의 다른 부분(또는 외부에서)에서 정의되는 전역 심볼들이
 # 파일 상단에서 아직 존재하지 않을 때 발생하는 NameError를 방지하기 위한
@@ -1100,7 +1114,14 @@ if OUTPUT_DIR.exists():
     os.makedirs(os.path.join(str(OUTPUT_DIR), "artifacts"), exist_ok=True)
     os.makedirs(THUMB_DIR, exist_ok=True)
     if not _has_result_files(OUTPUT_DIR):
-        st.warning("선택한 폴더에 report.csv / report.parquet 파일이 없습니다. 결과를 생성한 뒤 다시 확인하세요.")
+        # UI에서 사용자에게 경고 배너를 띄우지 않도록 변경했습니다.
+        # - 결과 파일이 없는 상황은 로그로만 남기고 대시보드 흐름을 막지 않습니다.
+        # - 필요하면 후에 st.info/st.warning으로 다시 노출하도록 쉽게 되돌릴 수 있습니다.
+        try:
+            logger.info(f"결과 파일이 없습니다: {OUTPUT_DIR}")
+        except Exception:
+            # 로거 호출 실패 시에도 UI가 중단되지 않도록 무시
+            pass
 else:
     st.warning("선택한 폴더가 존재하지 않습니다. 올바른 경로를 입력하세요.")
 # 상단 타이틀(페이지 헤더) 삽입: 페이지 최상단에 보이도록 이동
