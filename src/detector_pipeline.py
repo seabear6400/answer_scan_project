@@ -3,7 +3,9 @@ import shutil
 import itertools
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+import zipfile
 
 import numpy as np
 from PIL import Image
@@ -708,6 +710,135 @@ def _safe_recreate_dir(path: str, retries: int = 3, delay: float = 0.5):
     # 마지막 시도 실패
     warnings.warn(f"Could not recreate directory {path} after {retries} attempts: {last_exc}")
     return False
+
+
+def _write_zip_status(status_dir: Path, status_name: str, zip_path: Path, candidates: Sequence[Path]) -> None:
+    """ZIP 생성 이력을 남겨 운영자가 확인할 수 있도록 상태 파일을 기록합니다."""
+    try:
+        status_dir.mkdir(parents=True, exist_ok=True)
+        status_path = status_dir / f"{status_name}_status.txt"
+        lines = [
+            f"zip_created: {zip_path}",
+            f"candidates: {[str(p) for p in candidates]}",
+        ]
+        status_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        logger.warning("ZIP 상태 파일 기록 실패")
+
+
+def _zippable_files(root: Path) -> Iterable[Path]:
+    """ZIP에 포함할 파일 목록을 생성합니다."""
+    for path in root.rglob("*"):
+        if path.is_file():
+            yield path
+
+
+def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = None) -> Optional[str]:
+    """단일 결과 폴더 전체를 ZIP 아카이브로 만들고 artifacts 폴더에 저장합니다."""
+    try:
+        target = Path(result_dir).resolve()
+    except Exception:
+        target = Path(result_dir)
+    if not target.exists() or not target.is_dir():
+        return None
+
+    artifacts_dir = target / "artifacts"
+    try:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    base_name = zip_basename or target.name
+
+    # 이미 같은 베이스 이름으로 생성된 ZIP이 artifacts에 있으면 재생성하지 않습니다.
+    # 여러 번 압축이 생성되어 파일이 누적되는 문제를 방지하기 위한 안전장치입니다.
+    try:
+        existing = sorted(artifacts_dir.glob(f"{base_name}_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if existing:
+            # 가장 최신 ZIP을 재사용합니다.
+            return str(existing[0])
+    except Exception:
+        # glob/stat에 실패하면 무시하고 새로 생성 시도
+        pass
+
+    timestamp = int(time.time())
+    zip_path = artifacts_dir / f"{base_name}_{timestamp}.zip"
+
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for file_path in _zippable_files(target):
+                if file_path.resolve() == zip_path.resolve():
+                    continue
+                try:
+                    arcname = file_path.relative_to(target)
+                except ValueError:
+                    arcname = file_path.name
+                zf.write(file_path, arcname)
+    except Exception:
+        logger.warning("결과 ZIP 생성 실패", exc_info=True)
+        if zip_path.exists():
+            try:
+                zip_path.unlink()
+            except Exception:
+                pass
+        return None
+
+    _write_zip_status(artifacts_dir, base_name, zip_path, [target])
+    return str(zip_path)
+
+
+def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None) -> Optional[str]:
+    """여러 결과 폴더를 하나의 ZIP으로 묶어 대시보드 업로드를 단순화합니다."""
+    base_path = Path(base_dir).resolve()
+    if not base_path.exists() or not base_path.is_dir():
+        return None
+
+    result_dirs = [
+        p for p in base_path.iterdir()
+        if p.is_dir() and p.name.endswith("_결과")
+    ]
+    if not result_dirs:
+        return None
+
+    if target_dir:
+        zip_parent = Path(target_dir)
+    else:
+        zip_parent = base_path
+    try:
+        zip_parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    # 이미 동일한 목적지에 생성된 '총_결과' ZIP이 있으면 재생성하지 않습니다.
+    try:
+        existing_total = sorted(zip_parent.glob("총_결과_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if existing_total:
+            return str(existing_total[0])
+    except Exception:
+        pass
+
+    timestamp = int(time.time())
+    zip_path = zip_parent / f"총_결과_{timestamp}.zip"
+
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for result_dir in result_dirs:
+                for file_path in _zippable_files(result_dir):
+                    if file_path.resolve() == zip_path.resolve():
+                        continue
+                    arcname = Path(result_dir.name) / file_path.relative_to(result_dir)
+                    zf.write(file_path, arcname)
+    except Exception:
+        logger.warning("총 결과 ZIP 생성 실패", exc_info=True)
+        if zip_path.exists():
+            try:
+                zip_path.unlink()
+            except Exception:
+                pass
+        return None
+
+    _write_zip_status(zip_parent, "총_결과", zip_path, result_dirs)
+    return str(zip_path)
 
 
 # ---------------------- 아티팩트 / 병렬 헬퍼 ----------------------

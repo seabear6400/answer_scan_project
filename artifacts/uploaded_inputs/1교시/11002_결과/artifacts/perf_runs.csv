@@ -1,2 +1,0 @@
-timestamp,platform,n_images,mean_size,mean_w,mean_h,batch_size,num_workers,use_ocr,use_lpips,embed_backend,gpu,gpu_count,gpu_memory_gb,gpu_name,mem_total,cpu_count,meta_s,model_load_s,embed_forward_s,embed_s,ann_s,io_s,total_s
-1762238152,Windows,30,1609928.7333333334,1757.6,2480.6666666666665,30,0,0,0,resnet18,0,0,0,,16973877248,12,3.4018,0.1571,2.1366,2.2937,0.0015,0.0838,5.7832

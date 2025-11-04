@@ -271,16 +271,41 @@ def main():
 
     multi_scope_mode = len(pre_scopes) > 0
     sel_path = Path(sel).resolve()
-    if multi_scope_mode:
-        effective_output_dir = str(sel_path)
-    else:
+    def _compute_effective_output_dir(sel_path: Path, args, multi_scope_mode: bool) -> str:
+        """안전하게 결과 폴더 경로를 결정합니다.
+
+        규칙 요약:
+        - multi_scope_mode인 경우 선택한 폴더를 결과 베이스로 사용합니다.
+        - --output_dir가 지정되면 그 값을 우선 사용합니다.
+        - 사용자가 이미 `_결과` 폴더를 선택한 경우 그대로 사용합니다.
+        - 사용자가 `_결과` 내부(하위) 항목을 선택한 경우 상위 `_결과`를 재사용하여
+          중첩된 `_결과` 폴더 생성을 방지합니다.
+        - 그 외에는 선택 폴더와 같은 레벨에 `{selname}_결과` 이름의 형제 폴더를 사용합니다.
+        """
+        if multi_scope_mode:
+            return str(sel_path)
         if args.output_dir:
-            effective_output_dir = str(Path(args.output_dir).expanduser().resolve())
-        else:
-            if sel_path.name.endswith("_결과"):
-                effective_output_dir = str(sel_path)
-            else:
-                effective_output_dir = str(sel_path.with_name(f"{sel_path.name}_결과"))
+            return str(Path(args.output_dir).expanduser().resolve())
+        # 이미 결과 폴더를 선택한 경우 그대로 사용
+        if sel_path.name.endswith("_결과"):
+            return str(sel_path)
+        # 선택 폴더가 결과 폴더 내부에 있는 경우 상위 *_결과 폴더를 재사용
+        try:
+            parent = sel_path.parent
+            if parent.name.endswith("_결과"):
+                return str(parent)
+        except Exception:
+            pass
+        # 기본: 같은 레벨에 새 *_결과 폴더 생성 (단, sel_path와 동일 경로가 되지 않도록 보호)
+        try:
+            candidate = sel_path.with_name(f"{sel_path.name}_결과")
+            if candidate == sel_path:
+                return str(sel_path)
+            return str(candidate)
+        except Exception:
+            return str(sel_path)
+
+    effective_output_dir = _compute_effective_output_dir(sel_path, args, multi_scope_mode)
 
     if not multi_scope_mode:
         def _handle_remove_readonly(func, path, exc_info):
