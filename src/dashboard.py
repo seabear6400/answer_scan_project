@@ -76,7 +76,13 @@ if "_has_result_files" not in globals():
     # 결과 파일 검사 기본 구현: 항상 False를 반환하여 경고만 발생시키지 않도록 합니다.
     def _has_result_files(output_dir: Path) -> bool:
         try:
-            return any((output_dir / "report.csv").exists(), (output_dir / "report.parquet").exists())
+            # any()에 인자를 잘못 넘기던 버그 수정
+            checks = [
+                (output_dir / "report.csv").exists(),
+                (output_dir / "report.parquet").exists(),
+                (output_dir / "images_summary.csv").exists(),
+            ]
+            return any(checks)
         except Exception:
             return False
 
@@ -469,6 +475,52 @@ def _inject_theme_css(mode: str = 'Light (기본)'):
 
 
 # 사이드바 탭 생성
+# 초기 실행 시 사이드바를 숨기고 메인의 ZIP 업로드 위젯을 강조하는 UX 개선.
+# - 세션 상태에 `hide_sidebar_on_start`를 두어 첫 로드에서만 사이드바를 숨깁니다.
+# - 사이드바 숨김은 CSS로 처리하며, 메인 영역에 '사이드바 보기' 버튼을 두어 되돌릴 수 있습니다.
+if "hide_sidebar_on_start" not in st.session_state:
+    # 기본값: 첫 실행 시 사이드바 숨김
+    st.session_state["hide_sidebar_on_start"] = True
+
+if st.session_state.get("hide_sidebar_on_start", False) and "selected_result_dir" not in st.session_state:
+    # 간단하고 안전한 CSS: 사이드바를 숨기고 메인 컨테이너를 넓혀 업로드 위젯이 강조되도록 함
+    hide_css = """
+    <style>
+    /* 사이드바 숨김 */
+    [data-testid="stSidebar"] { display: none !important; }
+    /* 메인 컨테이너 확장 — Streamlit 버전/테마에 따라 클래스가 다를 수 있으므로 범용 적용 시도 */
+    .block-container { max-width: 100% !important; padding-left: 28px !important; padding-right: 28px !important; }
+    /* 업로드 박스를 더 크게 보이게 하기 위한 보조 스타일 */
+    .stFileUploader, input[type=file] { transform: scale(1.02); }
+    /* 중앙 정렬: ZIP 업로드 박스가 중앙에 위치하도록 보정 */
+    .css-1v3fvcr, .css-1lcbmhc { display:flex; justify-content:center; }
+    </style>
+    """
+    try:
+        st.markdown(hide_css, unsafe_allow_html=True)
+    except Exception:
+        # 안전하게 무시: CSS 삽입 실패는 기능상 치명적이지 않음
+        pass
+
+    # 초기 히어로 안내(전체 화면 업로더 강조)
+    # - 사이드바를 숨긴 상태에서 중앙에 큰 안내 문구를 표시합니다.
+    # - 실제 파일 업로더 위젯은 아래 메인 영역에 있는 `upload_zip_main` 위젯을 사용합니다.
+    try:
+        st.markdown(
+            """
+            <div style="height:68vh; display:flex; flex-direction:column; justify-content:center; align-items:center; gap:14px;">
+                <div style="background:linear-gradient(90deg,#eef9f8,#f7fdfc); padding:28px 36px; border-radius:16px; box-shadow:0 6px 24px rgba(10,20,24,0.06); text-align:center;">
+                    <h1 style="margin:0;font-size:34px;color:#0B1726;">전체 화면에다가 ZIP 폴더를 넣어주세요</h1>
+                    <div style="margin-top:8px;color:#475569;font-size:16px;">폴더를 ZIP으로 압축해 이 영역에 드래그하거나 클릭하여 업로드하세요. 업로드 후 자동으로 압축을 풀어 분석 경로로 적용할 수 있습니다.</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        # 실패해도 진행에 영향 없음
+        pass
+
 path_tab, settings_tab, theme_tab = st.sidebar.tabs(["분석 경로", "보기 설정", "테마"])
 
 with path_tab:
@@ -600,38 +652,66 @@ with path_tab:
                 z.extractall(dest_dir)
 
             st.success(f"압축 해제 완료: {dest_dir}")
-            st.info("원하시면 이 폴더로 분석을 시작하세요.")
+            st.info("업로드된 폴더를 자동으로 분석 시작 경로로 적용합니다...")
 
-            # 사용자가 업로드한 폴더를 '검색 시작 경로'로 적용하고 기존 콜백을 재사용
-            # 버튼 클릭 시 즉시 세션 상태를 변경하면 위젯이 이미 생성된 이후 경고가 발생할 수 있습니다.
-            # 따라서 버튼에 on_click 콜백을 연결하여 세션 상태 변경을 콜백 내부에서 수행하도록 합니다.
-            def _start_analysis_uploaded_cb(dest):
-                try:
-                    # 텍스트 입력 값과 세션 상태를 안전하게 갱신
-                    st.session_state["result_base_input"] = dest
-                    # 기존 경로 적용 로직 재사용
+            # UI가 즉시 업로드된 폴더를 선택하도록 임시로 RESULT_DIRS와 RESULT_META를 갱신합니다.
+            # (기존 로직은 결과 마커 파일(report.csv 등)을 필요로 하므로 업로드 직후에는 목록에 나타나지 않습니다.)
+            try:
+                dest_resolved = str(Path(dest_dir).resolve())
+            except Exception:
+                dest_resolved = str(dest_dir)
+            try:
+                # 전역 변수 수정: 이미 존재하지 않으면 앞에 삽입
+                if dest_resolved not in [str(p) for p in RESULT_DIRS]:
                     try:
-                        _apply_base_dir_cb()
+                        RESULT_DIRS.insert(0, Path(dest_resolved))
+                    except Exception:
+                        # 실패 시 재할당 형태로 보정
+                        temp = [Path(dest_resolved)] + list(RESULT_DIRS)
+                        RESULT_DIRS = temp
+                # RESULT_META 재생성(간단히 빌드기 호출)
+                try:
+                    RESULT_META = _build_result_meta(RESULT_DIRS)
+                except Exception:
+                    pass
+                # 선택값을 업로드된 폴더로 설정
+                st.session_state["selected_result_dir"] = dest_resolved
+            except Exception:
+                pass
+
+            # 자동 적용: 업로드 직후 곧바로 분석 시작 경로로 설정하고 재실행합니다.
+            try:
+                st.session_state["result_base_input"] = str(dest_dir)
+                try:
+                    _apply_base_dir_cb()
+                except Exception as _e:
+                    # 사용자에게 적용 실패 원인을 노출하여 디버깅이 가능하도록 함
+                    try:
+                        import traceback as _tb
+                        st.error(f"경로 적용 실패: {_e}")
+                        st.text(_tb.format_exc())
                     except Exception:
                         pass
-                except Exception:
-                    # 실패 시 무시
-                    pass
-                # 가능한 경우 재실행을 시도
                 try:
                     st.experimental_rerun()
-                except Exception:
+                except Exception as _e:
                     try:
+                        st.warning(f"자동 재실행(experimental_rerun) 실패: {_e}; 시도: st.rerun()")
                         st.rerun()
-                    except Exception:
-                        pass
-
-            st.button(
-                "이 폴더로 분석 시작",
-                key="start_analysis_uploaded",
-                on_click=_start_analysis_uploaded_cb,
-                args=(dest_dir,),
-            )
+                    except Exception as _e2:
+                        try:
+                            import traceback as _tb2
+                            st.error(f"재실행 실패: {_e2}")
+                            st.text(_tb2.format_exc())
+                        except Exception:
+                            pass
+            except Exception as _outer_e:
+                try:
+                    import traceback as _tb3
+                    st.error(f"업로드 자동 적용 과정에서 예외 발생: {_outer_e}")
+                    st.text(_tb3.format_exc())
+                except Exception:
+                    pass
         except Exception as e:
             st.error(f"업로드 처리 실패: {e}")
 
@@ -987,6 +1067,284 @@ st.markdown("""
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+ # --- 메인 전용: 폴더 업로드 (ZIP) - 사이드바 밖의 넓은 영역에 표시
+try:
+    import zipfile as _zipfile
+    import tempfile as _tempfile
+    import shutil as _shutil
+    import time as _time
+except Exception:
+    _zipfile = None
+    _tempfile = None
+    _shutil = None
+    _time = None
+
+st.markdown("""
+<div style="margin:8px 0 18px 0;padding:16px;border-radius:12px;background:#fff;border:1px solid rgba(15,23,42,0.04);">
+  <h3 style="margin:0 0 6px 0">폴더 업로드 (ZIP)</h3>
+  <div style="color:#475569;margin-bottom:8px;">폴더를 ZIP으로 압축해 업로드하면 서버에서 안전하게 압축을 풀어 분석 폴더로 적용할 수 있습니다. (Limit 200MB per file · ZIP)</div>
+</div>
+""", unsafe_allow_html=True)
+
+uploaded_zip_main = st.file_uploader(
+    "폴더 업로드(.zip) — 업로드 후 '이 폴더로 분석 시작' 클릭",
+    type=["zip"],
+    help="폴더를 ZIP으로 압축하여 업로드하면 서버에 풀어 분석할 수 있습니다.",
+    key="upload_zip_main",
+)
+if uploaded_zip_main is not None:
+    try:
+        # 안전 제한값 (정책에 맞게 조정)
+        MAX_EXTRACT_BYTES = 200 * 1024 * 1024  # 200 MB
+        MAX_FILE_COUNT = 5000
+
+        extract_root = Path.cwd() / "artifacts" / "uploaded_inputs"
+        extract_root.mkdir(parents=True, exist_ok=True)
+
+        try:
+            orig_name = getattr(uploaded_zip_main, "name", "") or ""
+            stem = Path(orig_name).stem if orig_name else f"upload_{int(_time.time())}"
+        except Exception:
+            stem = f"upload_{int(_time.time())}"
+
+        dest_dir = extract_root / stem
+        if dest_dir.exists():
+            dest_dir = extract_root / f"{stem}_{int(_time.time())}"
+
+        tmp_dir = None
+        # 안전 추출: Zip Slip 방지 및 용량/파일수 검사
+        with _zipfile.ZipFile(uploaded_zip_main) as z:
+            infos = z.infolist()
+            if len(infos) > MAX_FILE_COUNT:
+                st.error(f"압축 내 파일 수({len(infos)})가 허용 한계({MAX_FILE_COUNT})를 초과합니다.")
+                raise ValueError("too many files in zip")
+            total_uncompressed = 0
+            # 사전 검사
+            for zi in infos:
+                name = zi.filename
+                if os.path.isabs(name) or ".." in Path(name).parts:
+                    raise ValueError("압축에 안전하지 않은 경로가 포함되어 있습니다.")
+                total_uncompressed += zi.file_size or 0
+                if total_uncompressed > MAX_EXTRACT_BYTES:
+                    raise ValueError("압축 해제될 총 용량이 제한을 초과합니다.")
+
+            # 임시 디렉터리에 먼저 추출
+            tmp_dir = Path(_tempfile.mkdtemp(prefix="upload_unzip_"))
+            for zi in infos:
+                target_path = tmp_dir.joinpath(zi.filename)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if zi.is_dir():
+                    continue
+                with z.open(zi) as src_fh, open(target_path, "wb") as dst_fh:
+                    _shutil.copyfileobj(src_fh, dst_fh)
+
+        # 추출 성공 시 목적지로 이동
+        _shutil.move(str(tmp_dir), str(dest_dir))
+        tmp_dir = None
+
+        st.success(f"압축 해제 완료: {dest_dir}")
+        st.info("원하시면 이 폴더로 분석을 시작하세요.")
+
+        def _start_analysis_uploaded_cb(dest):
+            try:
+                st.session_state["result_base_input"] = str(dest)
+                try:
+                    _apply_base_dir_cb()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                st.experimental_rerun()
+            except Exception:
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+
+        # 자동 적용: 업로드 직후 즉시 분석 시작 경로로 적용
+        try:
+            st.session_state["result_base_input"] = str(dest_dir)
+            try:
+                _apply_base_dir_cb()
+            except Exception as _e:
+                try:
+                    import traceback as _tb
+                    st.error(f"경로 적용 실패: {_e}")
+                    st.text(_tb.format_exc())
+                except Exception:
+                    pass
+            try:
+                st.experimental_rerun()
+            except Exception as _e:
+                try:
+                    st.warning(f"자동 재실행(experimental_rerun) 실패: {_e}; 시도: st.rerun()")
+                    st.rerun()
+                except Exception as _e2:
+                    try:
+                        import traceback as _tb2
+                        st.error(f"재실행 실패: {_e2}")
+                        st.text(_tb2.format_exc())
+                    except Exception:
+                        pass
+        except Exception as _outer_e:
+            try:
+                import traceback as _tb3
+                st.error(f"업로드 자동 적용 과정에서 예외 발생: {_outer_e}")
+                st.text(_tb3.format_exc())
+            except Exception:
+                pass
+
+        # 메인 업로더에서도 UI 선택값으로 반영하도록 RESULT_DIRS에 추가
+        try:
+            dest_resolved = str(Path(dest_dir).resolve())
+        except Exception:
+            dest_resolved = str(dest_dir)
+        try:
+            if dest_resolved not in [str(p) for p in RESULT_DIRS]:
+                try:
+                    RESULT_DIRS.insert(0, Path(dest_resolved))
+                except Exception:
+                    RESULT_DIRS = [Path(dest_resolved)] + list(RESULT_DIRS)
+            try:
+                RESULT_META = _build_result_meta(RESULT_DIRS)
+            except Exception:
+                pass
+            st.session_state["selected_result_dir"] = dest_resolved
+            # 업로드 직후 백그라운드로 파이프라인을 실행하여 자동 분석을 시도합니다.
+            try:
+                import threading as _threading
+                import json as _json
+
+                def _run_pipeline_bg(root_path: str, output_base: str):
+                    try:
+                        try:
+                            from .scope_runner import run_scoped_pipeline
+                        except Exception:
+                            from scope_runner import run_scoped_pipeline
+
+                        res = run_scoped_pipeline(str(root_path), str(output_base), config=None, recursive=False)
+                        out_dir = Path(output_base) / "artifacts"
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        out_file = out_dir / "pipeline_result.json"
+                        try:
+                            with out_file.open("w", encoding="utf-8") as fh:
+                                _json.dump(res, fh, ensure_ascii=False, indent=2)
+                        except Exception:
+                            pass
+
+                        # 전역 RESULT_DIRS에 결과 경로 추가
+                        try:
+                            for p in res.get("result_paths", []) or []:
+                                if p and p not in [str(x) for x in RESULT_DIRS]:
+                                    RESULT_DIRS.insert(0, Path(p))
+                        except Exception:
+                            pass
+
+                    except Exception as _e:
+                        try:
+                            errf = Path(output_base) / "artifacts" / "pipeline_error.txt"
+                            with errf.open("w", encoding="utf-8") as ef:
+                                ef.write(str(_e))
+                        except Exception:
+                            pass
+
+                _t = _threading.Thread(target=_run_pipeline_bg, args=(dest_dir, dest_dir), daemon=True)
+                _t.start()
+                st.info("분석을 백그라운드에서 시작했습니다. 완료 시 artifacts에 결과가 기록됩니다. 새로고침하여 결과를 확인하세요.")
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            if tmp_dir and tmp_dir.exists():
+                _shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        st.error(f"업로드 처리 실패: {e}")
+
+# --- 서버에 있는 결과 ZIP 자동 스캔 (메인 영역) ---
+try:
+    artifacts_root = Path.cwd() / "artifacts"
+    search_root = artifacts_root if artifacts_root.exists() else Path.cwd()
+    # 안전을 위해 검색 깊이/개수 제한
+    zip_candidates = list(search_root.rglob("*.zip"))
+    # 상태 파일을 참고하여 최신 ZIP을 우선 정렬합니다.
+    def _zip_sort_key(path: Path) -> float:
+        try:
+            status = path.parent / f"{path.stem}_zip_status.txt"
+            if status.exists():
+                return status.stat().st_mtime
+            return path.stat().st_mtime
+        except Exception:
+            return 0.0
+
+    MAX_ZIP_LISTINGS = 200
+    found = sorted(zip_candidates, key=_zip_sort_key, reverse=True)[:MAX_ZIP_LISTINGS]
+    if found:
+        with st.expander("서버에 있는 결과 ZIP 목록 (클릭하면 압축 해제 후 분석 폴더로 적용)", expanded=False):
+            for i, zpath in enumerate(found):
+                try:
+                    zstat = zpath.stat()
+                    mtime = zstat.st_mtime
+                    size = zstat.st_size
+                except Exception:
+                    mtime = 0
+                    size = 0
+                cols = st.columns([4, 1, 1])
+                with cols[0]:
+                    st.write(f"**{zpath.name}**")
+                    st.caption(f"{zpath.parent} • {round(size/1024/1024,2)} MB • {_time.ctime(mtime)}")
+                def _open_zip_cb(p=zpath):
+                    try:
+                        import zipfile as _zipfile2, tempfile as _tempfile2, shutil as _shutil2
+                        extract_root = Path.cwd() / "artifacts" / "uploaded_inputs"
+                        extract_root.mkdir(parents=True, exist_ok=True)
+                        stem = p.stem
+                        dest_dir = extract_root / stem
+                        if dest_dir.exists():
+                            dest_dir = extract_root / f"{stem}_{int(_time.time())}"
+                        tmp_dir = Path(_tempfile2.mkdtemp(prefix="scan_unzip_"))
+                        with _zipfile2.ZipFile(str(p), "r") as z2:
+                            infos2 = z2.infolist()
+                            for zi in infos2:
+                                name = zi.filename
+                                if os.path.isabs(name) or ".." in Path(name).parts:
+                                    raise ValueError("압축에 안전하지 않은 경로가 포함되어 있습니다.")
+                                target_path = tmp_dir.joinpath(zi.filename)
+                                target_path.parent.mkdir(parents=True, exist_ok=True)
+                                if zi.is_dir():
+                                    continue
+                                with z2.open(zi) as src_fh, open(target_path, "wb") as dst_fh:
+                                    _shutil2.copyfileobj(src_fh, dst_fh)
+                        _shutil2.move(str(tmp_dir), str(dest_dir))
+                        # 적용 콜백
+                        st.session_state["result_base_input"] = str(dest_dir)
+                        try:
+                            _apply_base_dir_cb()
+                        except Exception:
+                            pass
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            try:
+                                st.rerun()
+                            except Exception:
+                                pass
+                    except Exception as _e:
+                        st.error(f"ZIP 열기 실패: {_e}")
+                with cols[1]:
+                    st.button("열기", key=f"open_zip_{i}", on_click=_open_zip_cb)
+                with cols[2]:
+                    # 다운로드/삭제 등 추가 기능 여지
+                            st.button("경로보기", key=f"show_zippath_{i}", on_click=lambda p=zpath: st.info(str(p)))
+    else:
+        st.info("서버에 생성된 결과 ZIP 파일이 없습니다.")
+except Exception:
+    # 스캔 실패 시 전체 흐름을 방해하지 않음
+    pass
 
 # --- 메인 탭 상태 관리 ---
 if "main_tab" not in st.session_state:

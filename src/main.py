@@ -9,7 +9,7 @@ import threading
 import time
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 import tempfile
 
 # OpenCV 로깅 레벨 설정 (경고 메시지 숨김)
@@ -140,6 +140,41 @@ def _result_dir_has_payload(path: Path) -> bool:
     except Exception:
         pass
     return False
+
+
+def _ensure_result_zips(result_paths: Optional[List[str]]) -> List[str]:
+    """주어진 결과 폴더 목록에 대해 ZIP 생성 시도를 수행하고, 성공한 ZIP 경로 목록을 반환합니다."""
+    if not result_paths:
+        return []
+    try:
+        # Pillow 등 다른 모듈과 유사하게 상대/절대 임포트 모두 대응합니다.
+        try:
+            from .detector_pipeline import create_result_zip_for_dir  # type: ignore
+        except Exception:
+            from detector_pipeline import create_result_zip_for_dir  # type: ignore
+    except Exception:
+        return []
+
+    created: List[str] = []
+    for raw in result_paths:
+        if not raw:
+            continue
+        try:
+            target = Path(raw).resolve()
+        except Exception:
+            target = Path(raw)
+        if not target.exists() or not target.is_dir():
+            continue
+        try:
+            zip_path = create_result_zip_for_dir(str(target))
+            if zip_path:
+                try:
+                    created.append(str(Path(zip_path).resolve()))
+                except Exception:
+                    created.append(str(zip_path))
+        except Exception:
+            continue
+    return created
 
 
 def parse_args():
@@ -819,6 +854,14 @@ def main():
         pipeline_thread = threading.Thread(target=_worker, daemon=True)
         pipeline_thread.start()
 
+        # 즉시 대시보드를 띄워 진행상황을 실시간으로 확인할 수 있게 합니다.
+        try:
+            # 가능한 한 안전한 기본값을 넘깁니다. 실제 결과는 나중에 갱신될 수 있습니다.
+            _maybe_launch_dashboard("start", effective_output_dir, str(sel_path), effective_output_dir)
+        except Exception:
+            # 실패해도 진행은 계속됩니다.
+            pass
+
     # 토스트 창을 메인 스레드에서 실행 (창이 닫힐 때까지 블로킹)
         try:
             toast = ToastToast(_progress_state, pipeline_thread)
@@ -834,6 +877,36 @@ def main():
         analysis_duration = time.time() - analysis_start
         if "error" in _run_summary:
             raise _run_summary["error"]
+        # 파이프라인이 끝난 직후, 확인용으로 결과 ZIP(개별/aggregate)을 생성 시도합니다.
+        try:
+            summary_after = _run_summary.get("summary")
+            if summary_after:
+                rp = summary_after.get("result_paths") or []
+                try:
+                    from detector_pipeline import create_aggregate_result_zip, create_result_zip_for_dir
+                except Exception:
+                    try:
+                        from .detector_pipeline import create_aggregate_result_zip, create_result_zip_for_dir
+                    except Exception:
+                        create_aggregate_result_zip = None
+                        create_result_zip_for_dir = None
+                # per-result zip
+                if create_result_zip_for_dir and rp:
+                    for p in rp:
+                        try:
+                            create_result_zip_for_dir(str(p))
+                        except Exception:
+                            pass
+                # aggregate zip across result_paths' common parent
+                if create_aggregate_result_zip and rp:
+                    try:
+                        common_parent = os.path.commonpath(rp)
+                        target_artifacts = os.path.join(rp[0], "artifacts")
+                        create_aggregate_result_zip(common_parent, target_dir=target_artifacts)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     except Exception:
         # tkinter가 없거나 실패 시 기존 동기 호출로 폴백 (콘솔 출력 모드)
         summary = run_scoped_pipeline(
@@ -849,8 +922,14 @@ def main():
         print("\n✅ 분석 완료!")
 
     summary = _run_summary.get("summary")
+    summary_zip_paths: List[str] = []
     if summary:
         _print_run_summary(summary, analysis_duration)
+        # scope_runner에서 이미 ZIP 경로를 넘겨주었다면 이를 수집합니다.
+        try:
+            summary_zip_paths = [str(Path(p).resolve()) for p in summary.get("result_zips", []) if p]
+        except Exception:
+            summary_zip_paths = [p for p in summary.get("result_zips", []) if p]
     elif analysis_duration is not None:
         _print_run_summary(None, analysis_duration)
 
@@ -876,6 +955,10 @@ def main():
                 dashboard_base_dir = _resolve_top_level_base(str(sel_path))
         if not raw_paths and summary.get("mode") != "scoped" and default_result_path:
             dashboard_output_dir = default_result_path
+        # 요약에 포함된 결과 폴더에 대해 ZIP 생성이 누락되었다면 보강합니다.
+        ensured = _ensure_result_zips(raw_paths)
+        if ensured:
+            summary_zip_paths.extend([p for p in ensured if p])
     if not default_result_path and os.path.isdir(effective_output_dir):
         default_result_path = effective_output_dir
         dashboard_output_dir = effective_output_dir
@@ -889,6 +972,15 @@ def main():
         first_scope_info["output_dir"] = dashboard_output_dir
         first_scope_info["default_result"] = default_result_path
         first_scope_info["base_dir"] = dashboard_base_dir
+
+    # 대시보드/외부 도구가 가장 최근 ZIP 경로를 참조할 수 있도록 환경 변수에 기록합니다.
+    if summary_zip_paths:
+        # 최신 생성 ZIP을 우선으로 정렬 (수정 시간 기준)
+        try:
+            summary_zip_paths = sorted(set(summary_zip_paths), key=lambda p: Path(p).stat().st_mtime, reverse=True)
+        except Exception:
+            summary_zip_paths = list(dict.fromkeys(summary_zip_paths))
+        os.environ["ANSWER_SCAN_RESULT_ZIPS"] = os.pathsep.join(summary_zip_paths)
 
     _maybe_launch_dashboard("summary", dashboard_output_dir, dashboard_base_dir, default_result_path)
     if not first_scope_event.is_set():

@@ -7,12 +7,29 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from .detector_pipeline import DetectorConfig, detect_pipeline, create_aggregate_result_zip
+    from .detector_pipeline import (
+        DetectorConfig,
+        detect_pipeline,
+        create_aggregate_result_zip,
+        create_result_zip_for_dir,
+    )
 except ImportError:  # 실행 컨텍스트에 따라 상대 임포트가 실패할 수 있음
     try:
-        from detector_pipeline import DetectorConfig, detect_pipeline, create_aggregate_result_zip
+        from detector_pipeline import (
+            DetectorConfig,
+            detect_pipeline,
+            create_aggregate_result_zip,
+            create_result_zip_for_dir,
+        )
     except Exception:
-        from detector_pipeline import DetectorConfig, detect_pipeline
+        from detector_pipeline import DetectorConfig, detect_pipeline  # type: ignore
+        create_aggregate_result_zip = None  # type: ignore
+        create_result_zip_for_dir = None  # type: ignore
+
+if 'create_aggregate_result_zip' not in globals():  # 방어적 기본값
+    create_aggregate_result_zip = None  # type: ignore
+if 'create_result_zip_for_dir' not in globals():
+    create_result_zip_for_dir = None  # type: ignore
 
 IMAGE_EXTS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
@@ -200,6 +217,7 @@ def run_scoped_pipeline(
         "output_base": str(output_base),
         "result_paths": [],
     }
+    result_zip_paths: List[str] = []
 
     if single_mode:
         detect_pipeline(
@@ -210,7 +228,18 @@ def run_scoped_pipeline(
             progress_callback=progress_callback,
         )
         results["runs"] = 1
-        results["result_paths"] = [str(Path(output_base).resolve())]
+        single_result = str(Path(output_base).resolve())
+        results["result_paths"] = [single_result]
+        # ✅ 단일 폴더 분석에서도 결과 ZIP 생성 시도를 수행합니다.
+        if create_result_zip_for_dir is not None:
+            try:
+                zip_path = create_result_zip_for_dir(single_result)
+                if zip_path:
+                    result_zip_paths.append(str(Path(zip_path).resolve()))
+            except Exception:
+                pass
+        if result_zip_paths:
+            results["result_zips"] = result_zip_paths
         return results
 
     total = len(scopes)
@@ -239,6 +268,14 @@ def run_scoped_pipeline(
         except Exception:
             resolved_destination = str(destination)
         result_paths.append(resolved_destination)
+        # ✅ 각 스코프 처리 직후 해당 결과 폴더를 ZIP으로 묶어 artifacts에 보관합니다.
+        if create_result_zip_for_dir is not None:
+            try:
+                zip_path = create_result_zip_for_dir(resolved_destination)
+                if zip_path:
+                    result_zip_paths.append(str(Path(zip_path).resolve()))
+            except Exception:
+                pass
         if scope_complete_callback is not None:
             try:
                 scope_complete_callback(scope, idx, total, resolved_destination)
@@ -271,5 +308,8 @@ def run_scoped_pipeline(
                     pass
     except Exception:
         pass
+
+    if result_zip_paths:
+        results["result_zips"] = result_zip_paths
 
     return results
