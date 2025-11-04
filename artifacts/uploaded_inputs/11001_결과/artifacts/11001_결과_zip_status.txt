@@ -1,1 +1,0 @@
-zip_created: artifacts\uploaded_inputs\11001_결과\artifacts\11001_결과.zip

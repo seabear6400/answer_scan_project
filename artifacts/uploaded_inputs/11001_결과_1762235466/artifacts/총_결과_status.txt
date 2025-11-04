@@ -1,0 +1,2 @@
+zip_created: C:\answer - 복사본\인문계\1교시\11001_결과\artifacts\총_결과_1762234567.zip
+candidates: ['C:\\answer - 복사본\\인문계\\1교시\\11001_결과']

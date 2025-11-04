@@ -1,2 +1,0 @@
-zip_created: C:\answer_scan_project\tmp_agg_test\AAA_결과\artifacts\총_결과_1761812507.zip
-candidates: ['C:\\answer_scan_project\\tmp_agg_test\\AAA_결과', 'C:\\answer_scan_project\\tmp_agg_test\\BBB_결과']

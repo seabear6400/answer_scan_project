@@ -1,139 +1,3 @@
-"""
-간단한 결과 ZIP 생성기
-
-이 파일은 원래의 복잡한 파이프라인 구현을 제거하고, 지정한 결과 폴더를
-같은 위치(폴더 내부)에 ZIP 파일로 압축하는 아주 작은 유틸리티만 제공합니다.
-
-사용법:
-    python -m src.detector_pipeline "C:\path\to\11001_결과"
-
-동작:
-- 대상 폴더의 내용 전체를 압축하여 대상 폴더 내부에 <폴더명>.zip 파일을 생성합니다.
-- 동일한 위치에 타임스탬프가 붙은 "총_결과_<timestamp>.zip" 파일도 생성합니다.
-- 압축 생성 결과를 기록한 status 파일을 대상 폴더에 생성합니다.
-
-설계 원칙:
-- 불필요한 외부 의존성, 모델 로딩, ANN, OCR 등 모든 기능 제거.
-- 파일 시스템 권한 오류를 최소화하도록 간단히 구현.
-
-경고:
-- 이 파일은 원본 파이프라인의 기능을 대체하지 않습니다. 단지 ZIP 생성만 수행합니다.
-"""
-from __future__ import annotations
-
-import os
-import sys
-import shutil
-import zipfile
-from datetime import datetime
-from typing import Optional
-
-# 환경변수로 artifacts 기록을 건너뛰도록 제어합니다.
-# 세션에서 끄려면 PowerShell: $env:ANS_SKIP_ARTIFACTS = '1'
-SKIP_ARTIFACTS = bool(os.environ.get("ANS_SKIP_ARTIFACTS", "").strip())
-
-
-def make_zip_in_place(target_dir: str) -> dict:
-    """대상 디렉터리(target_dir)의 내용을 같은 위치에 ZIP으로 만든다.
-
-    반환값: 상태 딕셔너리
-    {
-        'base_zip': '<절대경로>',
-        'total_zip': '<절대경로>',
-        'status_files': [list of status file paths]
-    }
-    """
-    target_dir = os.path.abspath(target_dir)
-    if not os.path.isdir(target_dir):
-        raise FileNotFoundError(f"대상 디렉터리가 없습니다: {target_dir}")
-
-    base_name = os.path.basename(target_dir.rstrip(os.sep))
-
-    # 1) 기본 zip: <target_dir>/<base_name>.zip
-    base_zip_path = os.path.join(target_dir, f"{base_name}.zip")
-
-    # shutil.make_archive의 base_name은 확장자를 제외한 전체 경로
-    archive_base = os.path.join(target_dir, base_name)
-    # 만약 기존 파일이 있으면 덮어쓰기
-    if os.path.exists(base_zip_path):
-        try:
-            os.remove(base_zip_path)
-        except Exception:
-            # 무시하고 계속 시도
-            pass
-
-    # root_dir=target_dir으로 하면 폴더 내부 항목들이 루트에 들어감
-    shutil.make_archive(archive_base, 'zip', root_dir=target_dir)
-
-    # 2) 총_결과_<timestamp>.zip 생성 (동일 위치)
-    ts = int(datetime.utcnow().timestamp())
-    total_zip_name = f"총_결과_{ts}.zip"
-    total_zip_path = os.path.join(target_dir, total_zip_name)
-
-    # 총_결과는 base와 동일한 내용으로 생성
-    if os.path.exists(total_zip_path):
-        try:
-            os.remove(total_zip_path)
-        except Exception:
-            pass
-
-    # 간단하게 zipfile 모듈로 복사(중복 생성 방지)
-    # 이미 만들어진 <base_name>.zip을 읽어 총_결과로 복사
-    with open(base_zip_path, 'rb') as srcf, open(total_zip_path, 'wb') as dstf:
-        shutil.copyfileobj(srcf, dstf)
-
-    # 3) 상태 파일 작성 (target_dir/zip_status.txt 및 total_status)
-    status1 = os.path.join(target_dir, f"{base_name}_zip_status.txt")
-    status2 = os.path.join(target_dir, f"총_결과_status.txt")
-
-    with open(status1, 'w', encoding='utf-8') as f:
-        f.write(f"zip_created: {base_zip_path}\n")
-
-    with open(status2, 'w', encoding='utf-8') as f:
-        f.write(f"zip_created: {total_zip_path}\n")
-        f.write(f"candidates: ['{target_dir}']\n")
-
-    return {
-        'base_zip': base_zip_path,
-        'total_zip': total_zip_path,
-        'status_files': [status1, status2]
-    }
-
-
-def list_zip_contents(zip_path: str) -> list:
-    """ZIP 내부 목록을 반환한다."""
-    if not os.path.isfile(zip_path):
-        raise FileNotFoundError(zip_path)
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        return z.namelist()
-
-
-def _main_cli(argv: Optional[list] = None) -> int:
-    """간단한 CLI: 대상 폴더(필수) -> 압축 생성 및 상태 출력"""
-    argv = argv if argv is not None else sys.argv[1:]
-    if len(argv) < 1:
-        print("사용법: python -m src.detector_pipeline <target_dir>")
-        return 2
-
-    target_dir = argv[0]
-    try:
-        result = make_zip_in_place(target_dir)
-    except Exception as e:
-        print(f"압축 중 오류 발생: {e}")
-        return 1
-
-    print("ZIP 생성 완료:")
-    print(" - base:", result['base_zip'])
-    print(" - total:", result['total_zip'])
-    print("상태 파일:")
-    for p in result['status_files']:
-        print(" -", p)
-
-    return 0
-
-
-if __name__ == '__main__':
-    raise SystemExit(_main_cli())
 import os
 import shutil
 import itertools
@@ -405,10 +269,6 @@ def _collect_run_features(input_paths: List[str], cfg: DetectorConfig, times: Di
 
 
 def _append_perf_csv(output_dir: str, row: Dict):
-    # artifacts 기록이 비활성화되어 있으면 아무것도 하지 않음
-    if SKIP_ARTIFACTS:
-        return
-
     art = os.path.join(output_dir, "artifacts")
     os.makedirs(art, exist_ok=True)
     csvf = os.path.join(art, "perf_runs.csv")
@@ -936,147 +796,6 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None)
         return None
 
 
-def create_result_zip_for_dir(result_dir: str, exclude_patterns: Optional[List[str]] = None) -> Optional[str]:
-    """
-    단일 결과 폴더(result_dir)를 하나의 ZIP 파일로 묶어
-    result_dir/artifacts/<result_name>.zip 위치에 생성합니다.
-
-    제외 패턴(exclude_patterns)은 파일 경로에 포함될 경우 해당 파일을 생략합니다.
-    실패 시 None을 반환합니다.
-    """
-    import zipfile
-    from pathlib import Path
-
-    rd = Path(result_dir)
-    if not rd.exists() or not rd.is_dir():
-        try:
-            logger.debug(f"create_result_zip_for_dir: result_dir does not exist or is not dir: {result_dir}")
-        except Exception:
-            pass
-        return None
-
-    # artifacts 디렉터리는 기존과 호환되게 만들되, SKIP_ARTIFACTS면 사용을 최소화
-    artifacts_dir = rd / "artifacts"
-    try:
-        if not SKIP_ARTIFACTS:
-            artifacts_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        artifacts_dir = rd
-
-    name = rd.name
-    # ZIP 파일은 결과 폴더의 상위에 생성하도록 변경 (요구사항)
-    try:
-        zip_dir = rd.parent if rd.parent.exists() else artifacts_dir
-    except Exception:
-        zip_dir = artifacts_dir
-
-    zip_path = zip_dir / f"{name}.zip"
-
-    ex_patterns = exclude_patterns or []
-
-    # 기록: 시도 로그는 artifacts에 남기되 SKIP_ARTIFACTS면 생략
-    try:
-        if not SKIP_ARTIFACTS:
-            attempt_f = artifacts_dir / f"{name}_zip_attempt.txt"
-            with open(attempt_f, "a", encoding="utf-8") as af:
-                af.write(f"attempt:{int(time.time())}\n")
-    except Exception:
-        pass
-
-    try:
-        # 기존 ZIP을 덮어쓰기 위해 삭제 시도
-        try:
-            if zip_path.exists():
-                zip_path.unlink()
-        except Exception:
-            pass
-
-        with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for root, _dirs, files in os.walk(str(rd)):
-                for fn in files:
-                    fp = os.path.join(root, fn)
-                    # skip the zip file itself if it's inside the tree
-                    try:
-                        if os.path.abspath(fp) == os.path.abspath(str(zip_path)):
-                            continue
-                    except Exception:
-                        pass
-                    # exclude by pattern
-                    skip = False
-                    for pat in ex_patterns:
-                        if pat and pat in fp:
-                            skip = True
-                            break
-                    if skip:
-                        continue
-
-                    try:
-                        arcname = os.path.join(name, os.path.relpath(fp, start=str(rd)))
-                        zf.write(fp, arcname=arcname)
-                    except Exception:
-                        continue
-
-        # 기록: 상태 파일과 환경변수는 SKIP_ARTIFACTS가 False일 때만 작성
-        try:
-            if not SKIP_ARTIFACTS:
-                os.environ["ANSWER_SCAN_RESULT_ZIP"] = str(zip_path)
-                status_f = artifacts_dir / f"{name}_zip_status.txt"
-                with open(status_f, "w", encoding="utf-8") as sf:
-                    sf.write(f"zip_created: {zip_path}\n")
-        except Exception:
-            pass
-
-        try:
-            logger.info(f"결과 폴더 ZIP 생성 성공: {zip_path}")
-        except Exception:
-            pass
-
-        return str(zip_path)
-    except Exception as e:
-        try:
-            if not SKIP_ARTIFACTS:
-                # 실패 원인을 상태 파일로 남깁니다.
-                err_f = artifacts_dir / f"{name}_zip_error.txt"
-                with open(err_f, "w", encoding="utf-8") as ef:
-                    ef.write(f"time:{int(time.time())}\n")
-                    ef.write(str(e) + "\n")
-        except Exception:
-            pass
-        try:
-            logger.warning(f"결과 폴더 ZIP 생성 실패 ({result_dir}): {e}")
-        except Exception:
-            pass
-        return None
-
-    # 안전망: 아래 폴백은 대부분의 환경에서 사용되지 않으며, artifacts 기록은 SKIP_ARTIFACTS를 따릅니다.
-    try:
-        if not zip_path.exists():
-            try:
-                fallback_base = str((artifacts_dir if not SKIP_ARTIFACTS else rd) / f"{name}_fallback")
-                shutil.make_archive(fallback_base, 'zip', root_dir=str(rd))
-                fallback_zip = Path(fallback_base + '.zip')
-                if fallback_zip.exists():
-                    try:
-                        fallback_zip.replace(zip_path)
-                    except Exception:
-                        try:
-                            shutil.move(str(fallback_zip), str(zip_path))
-                        except Exception:
-                            pass
-                if zip_path.exists() and not SKIP_ARTIFACTS:
-                    with open(artifacts_dir / f"{name}_zip_status.txt", 'w', encoding='utf-8') as sf:
-                        sf.write(f"zip_created_fallback: {zip_path}\n")
-            except Exception as fb_e:
-                try:
-                    if not SKIP_ARTIFACTS:
-                        with open(artifacts_dir / f"{name}_zip_error.txt", 'a', encoding='utf-8') as ef:
-                            ef.write(f"fallback_error:{str(fb_e)}\n")
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-
 def _is_fresh(artifact_path: str, paths: List[str]) -> bool:
     if not os.path.exists(artifact_path):
         return False
@@ -1297,8 +1016,7 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
                            pair_rows: List[List], groups: Dict[str, List[str]],
                            input_dir: Optional[str] = None, path_map: Optional[Dict[str, str]] = None,
                            embs: Optional[np.ndarray] = None, backend_used: Optional[str] = None,
-                           auto_blank_threshold: Optional[float] = None,
-                           progress_callback: Optional[callable] = None):
+                           auto_blank_threshold: Optional[float] = None):
     """
     공통 리포트 저장 및 파일 복사 로직.
     input_dir이 주어지면 detect_pipeline 스타일 동작(빈칸 기본 복사),
@@ -1351,22 +1069,11 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
         logger.warning("images_summary 저장 실패")
 
     # grouped 복사
-    # 진행률을 위해 전체 작업량을 대략 계산합니다.
-    total_ops = max(1, len(files) + (sum(len(m) for m in groups.values()) if groups else 0))
-    completed = 0
-
     for gid, members in groups.items():
         gdir = os.path.join(output_dir, "grouped", gid)
         for m in members:
             src = path_map[m] if path_map is not None else os.path.join(input_dir or "", m)
             _copy_to_dir(src, gdir)
-            completed += 1
-            if progress_callback is not None:
-                try:
-                    pct = 0.90 + 0.08 * (completed / float(total_ops))
-                    progress_callback(stage="save", pct=float(min(pct, 0.98)), msg=f"파일 정리 중 {completed}/{total_ops}")
-                except Exception:
-                    pass
 
     okdir = os.path.join(output_dir, "ok")
     bdir = os.path.join(output_dir, "blank_answers")
@@ -1374,19 +1081,18 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
     os.makedirs(bdir, exist_ok=True)
 
     grouped_set = set(itertools.chain.from_iterable(groups.values())) if groups else set()
-    # 디버그: 빈칸 판단 로그는 SKIP_ARTIFACTS에 따라 건너뜁니다
+    # 디버그: 빈칸 판단 로그를 artifacts에 남김
     try:
-        if not SKIP_ARTIFACTS:
-            dbg_dir = os.path.join(output_dir, "artifacts")
-            os.makedirs(dbg_dir, exist_ok=True)
-            dbg_csv = os.path.join(dbg_dir, "blank_debug.csv")
-            with open(dbg_csv, "w", encoding="utf-8") as fdbg:
-                fdbg.write("파일,밀도,임계값,빈칸여부\n")
-                for f in files:
-                    dens = densities.get(f, 0.0)
-                    th = blank_thresholds.get(f, cfg.blank_density_thresh)
-                    flag = bool(blank_flags.get(f, dens < th))
-                    fdbg.write(f"{f},{dens:.6f},{th:.6f},{int(flag)}\n")
+        dbg_dir = os.path.join(output_dir, "artifacts")
+        os.makedirs(dbg_dir, exist_ok=True)
+        dbg_csv = os.path.join(dbg_dir, "blank_debug.csv")
+        with open(dbg_csv, "w", encoding="utf-8") as fdbg:
+            fdbg.write("파일,밀도,임계값,빈칸여부\n")
+            for f in files:
+                dens = densities.get(f, 0.0)
+                th = blank_thresholds.get(f, cfg.blank_density_thresh)
+                flag = bool(blank_flags.get(f, dens < th))
+                fdbg.write(f"{f},{dens:.6f},{th:.6f},{int(flag)}\n")
     except Exception:
         pass
 
@@ -1405,13 +1111,6 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
                     _copy_to_dir(src, bdir)
             elif f not in grouped_set:
                 _copy_to_dir(src, okdir)
-        completed += 1
-        if progress_callback is not None:
-            try:
-                pct = 0.90 + 0.08 * (completed / float(total_ops))
-                progress_callback(stage="save", pct=float(min(pct, 0.98)), msg=f"파일 정리 중 {completed}/{total_ops}")
-            except Exception:
-                pass
         else:
             # detect_pipeline_files 동작: blank는 '*2'로 끝나는 것만 bdir로 복사, '1'은 ok
             if is_blank:
@@ -1424,30 +1123,20 @@ def _save_reports_and_copy(output_dir: str, files: List[str], densities: Dict[st
             elif f not in grouped_set:
                 _copy_to_dir(src, okdir)
 
-    # 아티팩트 저장 (사용자가 비활성화하면 건너뜁니다)
+    # 아티팩트 저장
     try:
-        if not SKIP_ARTIFACTS:
-            art_dir = os.path.join(output_dir, "artifacts")
-            os.makedirs(art_dir, exist_ok=True)
-            if embs is not None:
-                np.save(os.path.join(art_dir, "embeddings.npy"), embs)
-            if backend_used is not None:
-                with open(os.path.join(art_dir, "ann_backend.txt"), "w", encoding="utf-8") as fw:
-                    fw.write(backend_used)
-            with open(os.path.join(art_dir, "blank_threshold.txt"), "w", encoding="utf-8") as fw:
-                fw.write(f"base_threshold={cfg.blank_density_thresh}\n")
-                if auto_blank_threshold is not None:
-                    fw.write(f"auto_threshold={auto_blank_threshold}\n")
-                    fw.write(f"auto_suffix={cfg.blank_auto_suffix}\n")
+        if embs is not None:
+            np.save(os.path.join(output_dir, "artifacts", "embeddings.npy"), embs)
+        if backend_used is not None:
+            with open(os.path.join(output_dir, "artifacts", "ann_backend.txt"), "w", encoding="utf-8") as fw:
+                fw.write(backend_used)
+        with open(os.path.join(output_dir, "artifacts", "blank_threshold.txt"), "w", encoding="utf-8") as fw:
+            fw.write(f"base_threshold={cfg.blank_density_thresh}\n")
+            if auto_blank_threshold is not None:
+                fw.write(f"auto_threshold={auto_blank_threshold}\n")
+                fw.write(f"auto_suffix={cfg.blank_auto_suffix}\n")
     except Exception:
         pass
-
-    # 아티팩트 저장 직후 작은 진행 알림
-    if progress_callback is not None:
-        try:
-            progress_callback(stage="save", pct=0.985, msg="저장 완료, 아카이브 대기 중")
-        except Exception:
-            pass
 
 
 # -------------------------- 메인 파이프라인 ------------------------------
@@ -1708,7 +1397,6 @@ def detect_pipeline(input_dir: str, output_dir: str,
         embs=embs,
         backend_used=backend_used,
         auto_blank_threshold=auto_blank_threshold,
-        progress_callback=_cb,
     )
     t_io1 = time.time()
     _cb("save", 0.98, f"저장 완료 ({round(t_io1 - t_io0, 2)}s)")
@@ -1736,55 +1424,15 @@ def detect_pipeline(input_dir: str, output_dir: str,
     except Exception:
         logger.warning("Failed to append perf log")
 
-    _cb("finalizing", 0.99, "최종 정리 - 아카이브 생성 중")
+    # --- 선택적: 같은 수준의 다른 결과 폴더들을 모아 '총_결과' ZIP을 생성합니다.
+    # 생성 위치는 현재 output_dir/artifacts 를 우선으로 사용합니다.
     try:
-        import concurrent.futures as _cf
-        import time as _time
-
-        def _zip_tasks():
-            try:
-                from pathlib import Path as _Path
-                base_for_agg = str(_Path(output_dir).resolve().parent)
-                target_artifacts = os.path.join(output_dir, "artifacts")
-                aggf = create_aggregate_result_zip(base_for_agg, target_dir=target_artifacts)
-                myzf = create_result_zip_for_dir(output_dir)
-                return aggf, myzf
-            except Exception:
-                return None, None
-
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_zip_tasks)
-            start_t = time.time()
-            while not fut.done():
-                elapsed = time.time() - start_t
-                try:
-                    _cb("finalizing", 0.99 + min(elapsed / 30.0 * 0.01, 0.009), "아카이브 생성 중...")
-                except Exception:
-                    pass
-                _time.sleep(0.5)
-            agg_zip, res_zip = fut.result()
-            if agg_zip:
-                logger.info(f"총 결과 ZIP 생성됨: {agg_zip}")
-            if res_zip:
-                logger.info(f"결과 폴더 ZIP 생성됨: {res_zip}")
-    except Exception:
-        try:
-            logger.debug("아카이브 생성 중 예외 발생")
-        except Exception:
-            pass
-
-    _cb("finalizing", 1.0, "완료")
-
-    # 각 결과 폴더 자체의 ZIP도 생성해 두면 사용자가 바로 업로드하여 대시보드에서 볼 수 있습니다.
-    try:
-        res_zip = create_result_zip_for_dir(output_dir)
-        if res_zip:
-            logger.info(f"결과 폴더 ZIP 생성됨: {res_zip}")
-    except Exception:
-        try:
-            logger.debug("결과 폴더 ZIP 생성 시도 중 예외 발생")
-        except Exception:
-            pass
+        from pathlib import Path as _Path
+        base_for_agg = str(_Path(output_dir).resolve().parent)
+        target_artifacts = os.path.join(output_dir, "artifacts")
+        agg_zip = create_aggregate_result_zip(base_for_agg, target_dir=target_artifacts)
+        if agg_zip:
+            logger.info(f"총 결과 ZIP 생성됨: {agg_zip}")
     except Exception:
         # ZIP 생성 실패는 필수 단계가 아니므로 로그만 남기고 진행
         try:
@@ -2044,45 +1692,20 @@ def detect_pipeline_files(file_paths: List[str], output_dir: str,
         embs=embs,
         backend_used=backend_used,
         auto_blank_threshold=auto_blank_threshold,
-        progress_callback=_cb,
     )
-    _cb("finalizing", 0.99, "최종 정리 - 아카이브 생성 중")
+
+    # --- 선택적: 같은 수준의 다른 결과 폴더들을 모아 '총_결과' ZIP을 생성합니다.
     try:
-        import concurrent.futures as _cf
-        import time as _time
-
-        def _zip_tasks():
-            try:
-                from pathlib import Path as _Path
-                base_for_agg = str(_Path(output_dir).resolve().parent)
-                target_artifacts = os.path.join(output_dir, "artifacts")
-                aggf = create_aggregate_result_zip(base_for_agg, target_dir=target_artifacts)
-                myzf = create_result_zip_for_dir(output_dir)
-                return aggf, myzf
-            except Exception:
-                return None, None
-
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_zip_tasks)
-            start_t = time.time()
-            while not fut.done():
-                elapsed = time.time() - start_t
-                try:
-                    _cb("finalizing", 0.99 + min(elapsed / 30.0 * 0.01, 0.009), "아카이브 생성 중...")
-                except Exception:
-                    pass
-                _time.sleep(0.5)
-            agg_zip, res_zip = fut.result()
-            if agg_zip:
-                logger.info(f"총 결과 ZIP 생성됨 (files): {agg_zip}")
-            if res_zip:
-                logger.info(f"결과 폴더 ZIP 생성됨 (files): {res_zip}")
+        from pathlib import Path as _Path
+        base_for_agg = str(_Path(output_dir).resolve().parent)
+        target_artifacts = os.path.join(output_dir, "artifacts")
+        agg_zip = create_aggregate_result_zip(base_for_agg, target_dir=target_artifacts)
+        if agg_zip:
+            logger.info(f"총 결과 ZIP 생성됨 (files): {agg_zip}")
     except Exception:
         try:
-            logger.debug("아카이브 생성 중 예외 발생 (files)")
+            logger.debug("총 결과 ZIP 생성 시도 중 예외 발생 (files)")
         except Exception:
             pass
-
-    _cb("finalizing", 1.0, "완료")
 
     return pair_rows, groups
