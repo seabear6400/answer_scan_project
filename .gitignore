@@ -41,8 +41,3 @@ Thumbs.db
 
 # Project specific
 *.log
- 
-# Ignore zip artifacts (keep local copies, don't commit large zips)
-# Ignore any zip under artifacts and specifically uploaded_inputs
-artifacts/**/*.zip
-artifacts/uploaded_inputs/**/*.zip

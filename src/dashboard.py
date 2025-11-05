@@ -31,6 +31,8 @@ except Exception:
     except Exception:
         pass
 
+# (자동 리스캔 호출은 파일 상단이 아닌, UI 렌더링 직전에 수행하도록
+# 파일 하단의 적절한 위치에 배치되어 있습니다.)
 # -------------------------------------------------------------------------
 # 안전 폴백: 모듈의 다른 부분(또는 외부에서)에서 정의되는 전역 심볼들이
 # 파일 상단에서 아직 존재하지 않을 때 발생하는 NameError를 방지하기 위한
@@ -92,112 +94,187 @@ if "_normalize_base_dir" not in globals():
                 return Path.cwd()
 
 if "_build_result_meta" not in globals():
-    # 결과 메타 생성기
-    # - 입력으로는 (1) RESULT_DIRS처럼 미리 수집된 경로 리스트 또는
-    #   (2) 단일 베이스 경로(Path/str) 또는 빈 값을 받을 수 있습니다.
-    # - 반환값은 {str(path): {"has_report":bool, "needs_rescan":bool}} 형태입니다.
-    def _build_result_meta(result_dirs):
+    # 결과 메타 생성기 (디버그 출력 포함)
+    # 설명(한국어):
+    # - 전달된 경로(result_dirs)가 있으면 우선 검사하고, 없으면 세션/환경/모듈 기본값 및
+    #   artifacts/uploaded_inputs 등을 후보로 삼아 1레벨 하위 디렉터리를 검사합니다.
+    # - Streamlit 사이드바에 검사한 후보와 발견된 결과 메타를 디버그용으로 출력합니다.
+    def _build_result_meta(result_dirs=None) -> Dict[str, Dict[str, bool]]:
         out: Dict[str, Dict[str, bool]] = {}
 
         def _add_dir(d: Path):
             try:
-                d = Path(d).resolve()
+                target = Path(d).expanduser().resolve()
             except Exception:
                 return
-            if not d.exists() or not d.is_dir():
+            if not target.exists() or not target.is_dir():
                 return
-            key = str(d)
-            has = _has_result_files(d)
-            out[key] = {"has_report": has, "needs_rescan": False}
+            key = str(target)
+            if key in out:
+                return
+            has = _has_result_files(target)
+            out[key] = {"has_report": bool(has), "needs_rescan": not bool(has)}
 
-        # 1) 만약 호출자가 리스트를 전달했다면 해당 항목들을 우선 처리
+        # 1) 호출자가 명시적으로 리스트/튜플을 준 경우 우선 처리
         if isinstance(result_dirs, (list, tuple)) and result_dirs:
-            for r in result_dirs:
+            for item in result_dirs:
+                if not item:
+                    continue
                 try:
-                    _add_dir(Path(r))
+                    _add_dir(Path(item))
                 except Exception:
                     continue
 
-        # 2) 비어있거나 리스트가 아닐 경우, 가능한 베이스 경로들을 추론해 재귀 스캔
+        # 2) 후보가 비어있다면 여러 후보 경로를 수집해 검사
         if not out:
-            # 우선순위: 세션에 설정된 result_base_dir, artifacts/uploaded_inputs, BASE_OUTPUT_DIR
-            candidates = []
+            candidates: List[Path] = []
             try:
-                if isinstance(st.session_state.get("result_base_dir"), str):
-                    candidates.append(Path(st.session_state.get("result_base_dir")))
+                rs = getattr(st, "session_state", {})
+                v1 = rs.get("result_base_dir") or rs.get("result_base_input") or rs.get("selected_result_dir")
+                if v1:
+                    candidates.append(Path(v1))
             except Exception:
                 pass
-            # artifacts/uploaded_inputs 경로
+
             try:
+                # 환경변수로 전달되는 경우가 있을 수 있으므로 체크
+                env = os.environ
+                for k in ("ANSWER_SCAN_BASE_DIR", "ANSWER_SCAN_OUTPUT_DIR", "ANSWER_SCAN_DEFAULT_RESULT"):
+                    if env.get(k):
+                        candidates.append(Path(env.get(k)))
+            except Exception:
+                pass
+
+            for name in ("BASE_OUTPUT_DIR", "CLI_BASE_DIR", "CLI_OUTPUT_DIR"):
+                try:
+                    val = globals().get(name)
+                    if val:
+                        candidates.append(Path(val))
+                except Exception:
+                    pass
+
+            try:
+                candidates.append(Path.cwd())
                 candidates.append(Path.cwd() / "artifacts" / "uploaded_inputs")
             except Exception:
                 pass
+
+            for cand in candidates:
+                try:
+                    candp = cand.expanduser().resolve()
+                except Exception:
+                    continue
+                if not candp.exists():
+                    continue
+                # 후보 자체가 결과일 수 있음
+                _add_dir(candp)
+                # 1레벨 하위 디렉터리 검사
+                try:
+                    for child in candp.iterdir():
+                        if child.is_dir():
+                            _add_dir(child)
+                            # 일부 사용자는 '총_결과'처럼 상위 ZIP에 묶여있는 경우가 있습니다.
+                            # 이런 경우 결과 폴더들이 한 단계 더 들어간(=2레벨) 곳에 존재하므로
+                            # 성능 부담이 적은 범위에서 2레벨 깊이도 검사합니다.
+                            try:
+                                for grand in child.iterdir():
+                                    if grand.is_dir():
+                                        _add_dir(grand)
+                            except Exception:
+                                # grand-iteration 실패 시 무시(접근 권한 등 이유)
+                                pass
+                except Exception:
+                    pass
+
+        # 정렬: has_report 우선, 수정시각 역순
+        try:
+            def _sort_key(k):
+                v = out.get(k, {})
+                has = v.get("has_report", False)
+                try:
+                    m = Path(k).stat().st_mtime
+                except Exception:
+                    m = 0
+                return (0 if has else 1, -m)
+            ordered = sorted(list(out.keys()), key=_sort_key)
+        except Exception:
+            ordered = list(out.keys())
+
+        try:
+            globals()["RESULT_DIRS"] = [Path(p) for p in ordered]
+        except Exception:
             try:
-                candidates.append(Path(BASE_OUTPUT_DIR))
+                globals()["RESULT_DIRS"] = [Path(p) for p in ordered if p]
             except Exception:
                 pass
 
-            seen_dirs = set()
-            for base in candidates:
-                try:
-                    base = _normalize_base_dir(base)
-                    if not base.exists() or not base.is_dir():
-                        continue
-                except Exception:
-                    continue
-
-                # 베이스 자체가 결과 폴더인지 확인
-                if _has_result_files(base):
-                    seen_dirs.add(str(base.resolve()))
-
-                # 재귀적으로 검색: 성능 고려해 디렉터리 깊이 제한을 둡니다.
-                try:
-                    for p in base.rglob("*"):
-                        if not p.is_dir():
-                            continue
-                        # 성능: 너무 깊거나 임시 디렉터리는 건너뜀
-                        if any(part in (".venv", "__pycache__", "localpycs", "disp_cache") for part in p.parts):
-                            continue
-                        try:
-                            if _has_result_files(p):
-                                seen_dirs.add(str(p.resolve()))
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-
-            # 정렬: 최근 수정 시각이 최신인 순으로
-            dirs = []
-            for s in seen_dirs:
-                try:
-                    p = Path(s)
-                    mtime = p.stat().st_mtime if p.exists() else 0
-                    dirs.append((mtime, p))
-                except Exception:
-                    continue
-            for _, p in sorted(dirs, key=lambda x: x[0], reverse=True):
-                _add_dir(p)
+        # (디버그 출력 제거됨) 개발/디버그 중에만 필요한 사이드바 로그는
+        # 실제 운영 모드에서는 불필요해 import 시 워닝을 유발하므로 제거합니다.
 
         return out
 
 if "_has_result_files" not in globals():
     # 결과 폴더 판정 유틸
-    # - report.parquet 또는 report.csv와 images_summary.csv가 존재하면 결과 폴더로 간주
+    # 설명(한국어): 결과 폴더로 판단하기 위한 여러 기준을 적용합니다.
+    # 1) 우선 report.parquet 또는 report.csv 가 있어야합니다.
+    # 2) images_summary.csv 가 있으면 더 확실하게 결과로 판단합니다.
+    # 3) images_summary가 없더라도 grouped, artifacts/ordered_paths.txt, thumbnails, 또는
+    #    이미지 파일들이 존재하면 보조 증거로 결과로 판단합니다.
     def _has_result_files(output_dir: Path) -> bool:
         try:
             p = Path(output_dir)
             if not p.exists() or not p.is_dir():
                 return False
-            has_report = (p / "report.parquet").exists() or (p / "report.csv").exists()
-            has_imgsum = (p / "images_summary.csv").exists()
-            # 과거 파이프라인에서 grouped/ok/artifacts 같은 폴더를 만들었을 수 있으므로
-            # images_summary가 없을 때에도 artifacts/ordered_paths.txt로 보정 허용
+            # 핵심 파일 존재 여부
+            report_parquet = p / "report.parquet"
+            report_csv = p / "report.csv"
+            summary_csv = p / "images_summary.csv"
+
+            has_report = report_parquet.exists() or report_csv.exists()
+            has_imgsum = summary_csv.exists()
+
+            # 확실한 케이스: report + images_summary
+            if has_report and has_imgsum:
+                return True
+
+            # images_summary만 있어도 결과로 간주
+            if has_imgsum:
+                return True
+
+            # report만 있고 보조 증거가 있으면 허용
             if has_report and not has_imgsum:
-                if (p / "artifacts" / "ordered_paths.txt").exists():
+                art = p / "artifacts"
+                if (art / "ordered_paths.txt").exists():
                     return True
-            return bool(has_report and has_imgsum)
+                if (art / "thumbnails").exists():
+                    return True
+                # grouped 또는 ok 폴더 존재도 보조 증거로 인정
+                if (p / "grouped").exists() or (p / "ok").exists():
+                    return True
+                return False
+
+            # 보조 증거만 있는 경우: grouped, artifacts, thumbnails 또는 이미지 파일 존재
+            if (p / "grouped").exists():
+                return True
+            art = p / "artifacts"
+            if (art / "ordered_paths.txt").exists() or (art / "thumbnails").exists():
+                return True
+            # 폴더 내부의 이미지 파일 존재 여부 확인
+            for child in p.iterdir():
+                try:
+                    if child.is_file() and child.suffix.lower() in IMAGE_EXTS:
+                        return True
+                except Exception:
+                    continue
+
+            return False
         except Exception:
             return False
+
+# (자동 초기 스캔 호출 제거)
+# 모듈 import 시점에 자동으로 스캔을 수행하면, 개발환경에서 `streamlit` 관련
+# 경고가 다수 발생하고 불필요한 I/O가 실행될 수 있습니다. 필요 시 UI에서
+# 명시적으로 리스캔을 호출하도록 유지합니다.
 
 if "RESAMPLE" not in globals():
     # Pillow 리샘플링 디폴트: 최근 PIL에서는 Image.Resampling이 제공됩니다.
