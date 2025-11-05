@@ -504,7 +504,12 @@ def _start_analysis_uploaded_cb(dest: str) -> None:
         norm = str(Path(dest).resolve())
         st.session_state["result_base_input"] = norm
         st.session_state["result_base_dir"] = norm
-        st.session_state.pop("selected_result_dir", None)
+        # 업로드로 풀린 폴더를 '선택된 결과 폴더'로 즉시 설정합니다.
+        # 이렇게 하면 사용자가 ZIP을 업로드한 직후 해당 경로가 사이드바의
+        # 선택값(selected_result_dir)으로 반영되어 바로 분석 대상이 됩니다.
+        # 또한 내부적으로 선택 변경 감지를 위해 _last_selected_dir도 갱신합니다.
+        st.session_state["selected_result_dir"] = norm
+        st.session_state["_last_selected_dir"] = norm
         st.session_state["_cli_base_marker"] = norm
         try:
             # 캐시를 비워 새 경로로의 검색이 반영되게 합니다.
@@ -1039,7 +1044,10 @@ if not result_options:
         found = []
         try:
             candidate_path = Path(candidate_base)
-            if candidate_path.is_dir() and re.match(r".*_결과(_\d+)?$", candidate_path.name):
+            # 기존: 이름이 *_결과(_숫자)? 패턴과 정확히 매칭되는 경우만 후보로 삼았습니다.
+            # 변경: 더 유연하게, 디렉터리명에 '결과'라는 단어가 포함되어 있으면 후보로 간주합니다.
+            # (업로드된 폴더명이 패턴과 정확히 일치하지 않아 걸러지는 경우를 방지)
+            if candidate_path.is_dir() and ("결과" in candidate_path.name):
                 if (
                     (candidate_path / "report.parquet").exists()
                     or (candidate_path / "report.csv").exists()
@@ -1052,7 +1060,9 @@ if not result_options:
                 p = Path(candidate_base) / name
                 if not p.is_dir():
                     continue
-                if re.match(r".*_결과(_\d+)?$", name):
+                # 디렉터리명에 '결과'가 포함되어 있으면 후보로 포함합니다.
+                # (예: '11001_결과_1762239574', '결과_2025-11-05' 등 다양한 네이밍을 허용)
+                if ("결과" in name):
                     if (
                         (p / "report.parquet").exists()
                         or (p / "report.csv").exists()

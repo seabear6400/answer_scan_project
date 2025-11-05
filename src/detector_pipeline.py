@@ -734,39 +734,53 @@ def _zippable_files(root: Path) -> Iterable[Path]:
 
 
 def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = None) -> Optional[str]:
-    """단일 결과 폴더 전체를 ZIP 아카이브로 만들고 artifacts 폴더에 저장합니다."""
+    """단일 결과 폴더 전체를 ZIP 아카이브로 생성합니다.
+
+    동작 요약 (한국어):
+    - ZIP 파일은 결과 폴더(`result_dir`)의 부모 디렉터리(=결과 폴더와 동일 레벨)에 생성됩니다.
+      예: `/some/path/11001_결과` -> `/some/path/11001_결과_163... .zip`
+    - ZIP 생성 이력(상태 파일)은 기존처럼 결과 폴더 내부의 `artifacts` 디렉터리에 기록됩니다.
+    """
     try:
         target = Path(result_dir).resolve()
     except Exception:
         target = Path(result_dir)
+
     if not target.exists() or not target.is_dir():
         return None
 
+    # 상태 파일은 기존 동작을 유지: 결과 폴더 내부의 artifacts에 기록
     artifacts_dir = target / "artifacts"
     try:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
+        # artifacts 생성 실패 시에는 상태 기록이 불가하므로 중단
         return None
 
     base_name = zip_basename or target.name
 
-    # 이미 같은 베이스 이름으로 생성된 ZIP이 artifacts에 있으면 재생성하지 않습니다.
-    # 여러 번 압축이 생성되어 파일이 누적되는 문제를 방지하기 위한 안전장치입니다.
+    # ZIP은 결과 폴더의 부모 디렉터리에 생성 (요구사항: 결과 폴더와 동일 레벨)
+    zip_parent = target.parent
     try:
-        existing = sorted(artifacts_dir.glob(f"{base_name}_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        zip_parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    # 이미 동일 베이스명으로 부모 디렉터리에 생성된 ZIP이 있으면 재사용
+    try:
+        existing = sorted(zip_parent.glob(f"{base_name}_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
         if existing:
-            # 가장 최신 ZIP을 재사용합니다.
             return str(existing[0])
     except Exception:
-        # glob/stat에 실패하면 무시하고 새로 생성 시도
         pass
 
     timestamp = int(time.time())
-    zip_path = artifacts_dir / f"{base_name}_{timestamp}.zip"
+    zip_path = zip_parent / f"{base_name}_{timestamp}.zip"
 
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for file_path in _zippable_files(target):
+                # ZIP 파일 자체가 대상 경로에 우연히 포함되는 경우(희박) 스킵
                 if file_path.resolve() == zip_path.resolve():
                     continue
                 try:
@@ -776,13 +790,14 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
                 zf.write(file_path, arcname)
     except Exception:
         logger.warning("결과 ZIP 생성 실패", exc_info=True)
-        if zip_path.exists():
-            try:
+        try:
+            if zip_path.exists():
                 zip_path.unlink()
-            except Exception:
-                pass
+        except Exception:
+            pass
         return None
 
+    # ZIP 생성 이력은 결과 폴더의 artifacts에 남겨 운영자가 확인할 수 있게 함
     _write_zip_status(artifacts_dir, base_name, zip_path, [target])
     return str(zip_path)
 
