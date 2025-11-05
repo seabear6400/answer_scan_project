@@ -76,32 +76,138 @@ if "SELECTION_ROOT" not in globals():
     SELECTION_ROOT = None
 
 if "_normalize_base_dir" not in globals():
-    # 기본적인 정규화 함수: 인자로 받은 Path를 그대로 반환합니다.
+    # 기본적인 정규화 함수: 전달된 경로를 안전하게 절대경로로 변환합니다.
+    # selection_root는 향후 확장용으로 남겨두며, 현재는 무시합니다.
     def _normalize_base_dir(p: Path, selection_root=None) -> Path:
         try:
+            p = Path(p)
+            # expanduser를 적용해 ~/ 같은 표현을 처리
+            p = p.expanduser()
             return p.resolve()
         except Exception:
-            return p
+            # resolve가 실패하면 가능한 한 Path 객체를 반환
+            try:
+                return Path(str(p))
+            except Exception:
+                return Path.cwd()
 
 if "_build_result_meta" not in globals():
-    # 기본 메타 생성기: 빈 메타를 반환합니다.
+    # 결과 메타 생성기
+    # - 입력으로는 (1) RESULT_DIRS처럼 미리 수집된 경로 리스트 또는
+    #   (2) 단일 베이스 경로(Path/str) 또는 빈 값을 받을 수 있습니다.
+    # - 반환값은 {str(path): {"has_report":bool, "needs_rescan":bool}} 형태입니다.
     def _build_result_meta(result_dirs):
-        return {}
+        out: Dict[str, Dict[str, bool]] = {}
+
+        def _add_dir(d: Path):
+            try:
+                d = Path(d).resolve()
+            except Exception:
+                return
+            if not d.exists() or not d.is_dir():
+                return
+            key = str(d)
+            has = _has_result_files(d)
+            out[key] = {"has_report": has, "needs_rescan": False}
+
+        # 1) 만약 호출자가 리스트를 전달했다면 해당 항목들을 우선 처리
+        if isinstance(result_dirs, (list, tuple)) and result_dirs:
+            for r in result_dirs:
+                try:
+                    _add_dir(Path(r))
+                except Exception:
+                    continue
+
+        # 2) 비어있거나 리스트가 아닐 경우, 가능한 베이스 경로들을 추론해 재귀 스캔
+        if not out:
+            # 우선순위: 세션에 설정된 result_base_dir, artifacts/uploaded_inputs, BASE_OUTPUT_DIR
+            candidates = []
+            try:
+                if isinstance(st.session_state.get("result_base_dir"), str):
+                    candidates.append(Path(st.session_state.get("result_base_dir")))
+            except Exception:
+                pass
+            # artifacts/uploaded_inputs 경로
+            try:
+                candidates.append(Path.cwd() / "artifacts" / "uploaded_inputs")
+            except Exception:
+                pass
+            try:
+                candidates.append(Path(BASE_OUTPUT_DIR))
+            except Exception:
+                pass
+
+            seen_dirs = set()
+            for base in candidates:
+                try:
+                    base = _normalize_base_dir(base)
+                    if not base.exists() or not base.is_dir():
+                        continue
+                except Exception:
+                    continue
+
+                # 베이스 자체가 결과 폴더인지 확인
+                if _has_result_files(base):
+                    seen_dirs.add(str(base.resolve()))
+
+                # 재귀적으로 검색: 성능 고려해 디렉터리 깊이 제한을 둡니다.
+                try:
+                    for p in base.rglob("*"):
+                        if not p.is_dir():
+                            continue
+                        # 성능: 너무 깊거나 임시 디렉터리는 건너뜀
+                        if any(part in (".venv", "__pycache__", "localpycs", "disp_cache") for part in p.parts):
+                            continue
+                        try:
+                            if _has_result_files(p):
+                                seen_dirs.add(str(p.resolve()))
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # 정렬: 최근 수정 시각이 최신인 순으로
+            dirs = []
+            for s in seen_dirs:
+                try:
+                    p = Path(s)
+                    mtime = p.stat().st_mtime if p.exists() else 0
+                    dirs.append((mtime, p))
+                except Exception:
+                    continue
+            for _, p in sorted(dirs, key=lambda x: x[0], reverse=True):
+                _add_dir(p)
+
+        return out
 
 if "_has_result_files" not in globals():
-    # 결과 파일 검사 기본 구현: 항상 False를 반환하여 경고만 발생시키지 않도록 합니다.
+    # 결과 폴더 판정 유틸
+    # - report.parquet 또는 report.csv와 images_summary.csv가 존재하면 결과 폴더로 간주
     def _has_result_files(output_dir: Path) -> bool:
         try:
-            return any((output_dir / "report.csv").exists(), (output_dir / "report.parquet").exists())
+            p = Path(output_dir)
+            if not p.exists() or not p.is_dir():
+                return False
+            has_report = (p / "report.parquet").exists() or (p / "report.csv").exists()
+            has_imgsum = (p / "images_summary.csv").exists()
+            # 과거 파이프라인에서 grouped/ok/artifacts 같은 폴더를 만들었을 수 있으므로
+            # images_summary가 없을 때에도 artifacts/ordered_paths.txt로 보정 허용
+            if has_report and not has_imgsum:
+                if (p / "artifacts" / "ordered_paths.txt").exists():
+                    return True
+            return bool(has_report and has_imgsum)
         except Exception:
             return False
 
 if "RESAMPLE" not in globals():
-    # Pillow 리샘플링 디폴트
+    # Pillow 리샘플링 디폴트: 최근 PIL에서는 Image.Resampling이 제공됩니다.
     try:
-        RESAMPLE = Image.LANCZOS
+        RESAMPLE = Image.Resampling.LANCZOS
     except Exception:
-        RESAMPLE = Image.BICUBIC
+        try:
+            RESAMPLE = Image.LANCZOS
+        except Exception:
+            RESAMPLE = Image.BICUBIC
 
 try:
     import stat
@@ -1001,7 +1107,18 @@ with settings_tab:
         }
         st.slider(value=gallery_grid_default, **gallery_slider_args)
 
-RESULT_META = _build_result_meta(RESULT_DIRS)
+# 세션에 이미 스캔 결과가 있으면 우선 사용하고, 그렇지 않으면 모듈 레벨 RESULT_DIRS로 스캔
+if "scan_result_meta" in st.session_state:
+    RESULT_META = st.session_state.get("scan_result_meta") or {}
+else:
+    RESULT_META = _build_result_meta(RESULT_DIRS)
+    # _build_result_meta가 스캔을 통해 메타를 찾았을 경우
+    # 기존 RESULT_DIRS가 비어있다면 메타의 키들로 RESULT_DIRS를 채웁니다.
+    try:
+        if not RESULT_DIRS and isinstance(RESULT_META, dict):
+            RESULT_DIRS = list(RESULT_META.keys())
+    except Exception:
+        pass
 
 # ===== 페이지 설정 =====
 

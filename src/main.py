@@ -958,7 +958,8 @@ def main():
 
                     try:
                         # 한 번만 aggregate 생성 요청을 보냅니다. 내부에서 동일 이름이 이미 있으면 재사용합니다.
-                        create_aggregate_result_zip(str(base_path), target_dir=target_parent)
+                        # 생성 파일명에 분석 폴더명을 접두사로 추가합니다. 예: '1교시_총_결과_*.zip'
+                        create_aggregate_result_zip(str(base_path), target_dir=target_parent, prefix=base_path.name)
                     except Exception:
                         # 실패 시 무시하고 넘어갑니다.
                         pass
