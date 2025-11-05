@@ -18,7 +18,6 @@ import polars as pl
 
 import stat
 import time
-# `threading` 모듈은 이 파일 내부에서 사용되지 않으므로 제거했습니다.
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -802,38 +801,46 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
     return str(zip_path)
 
 
-def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None) -> Optional[str]:
-    """여러 결과 폴더를 하나의 ZIP으로 묶어 대시보드 업로드를 단순화합니다."""
-    base_path = Path(base_dir).resolve()
+def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None, prefix: Optional[str] = None) -> Optional[str]:
+    """
+    여러 결과 폴더를 하나의 ZIP으로 묶어 대시보드 업로드를 단순화합니다.
+
+    추가 기능(한국어):
+    - `prefix` 매개변수를 통해 ZIP 파일명 앞에 분석 대상의 폴더명을 붙일 수 있습니다.
+      예: prefix='1교시' -> '1교시_총_결과_{timestamp}.zip'
+    - 기본 동작은 기존과 동일하며, `prefix`를 제공하지 않으면 '총_결과_{timestamp}.zip' 형식을 사용합니다.
+    """
+    try:
+        base_path = Path(base_dir).resolve()
+    except Exception:
+        base_path = Path(base_dir)
+
     if not base_path.exists() or not base_path.is_dir():
         return None
 
-    result_dirs = [
-        p for p in base_path.iterdir()
-        if p.is_dir() and p.name.endswith("_결과")
-    ]
+    result_dirs = [p for p in base_path.iterdir() if p.is_dir() and p.name.endswith("_결과")]
     if not result_dirs:
         return None
 
-    if target_dir:
-        zip_parent = Path(target_dir)
-    else:
-        zip_parent = base_path
+    zip_parent = Path(target_dir) if target_dir else base_path
     try:
         zip_parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         return None
 
-    # 이미 동일한 목적지에 생성된 '총_결과' ZIP이 있으면 재생성하지 않습니다.
+    # 이미 동일한 목적지에 생성된 ZIP이 있으면 재사용
     try:
-        existing_total = sorted(zip_parent.glob("총_결과_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        pattern = f"{str(prefix).replace(os.sep, '_')}_총_결과_*.zip" if prefix else "총_결과_*.zip"
+        existing_total = sorted(zip_parent.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
         if existing_total:
             return str(existing_total[0])
     except Exception:
         pass
 
     timestamp = int(time.time())
-    zip_path = zip_parent / f"총_결과_{timestamp}.zip"
+    safe_prefix = str(prefix).replace(os.sep, "_") if prefix else None
+    zip_name = f"{safe_prefix + '_' if safe_prefix else ''}총_결과_{timestamp}.zip"
+    zip_path = zip_parent / zip_name
 
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -845,11 +852,11 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None)
                     zf.write(file_path, arcname)
     except Exception:
         logger.warning("총 결과 ZIP 생성 실패", exc_info=True)
-        if zip_path.exists():
-            try:
+        try:
+            if zip_path.exists():
                 zip_path.unlink()
-            except Exception:
-                pass
+        except Exception:
+            pass
         return None
 
     _write_zip_status(zip_parent, "총_결과", zip_path, result_dirs)

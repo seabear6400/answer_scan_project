@@ -922,13 +922,45 @@ def main():
                             create_result_zip_for_dir(str(p))
                         except Exception:
                             pass
-                # aggregate zip across result_paths' common parent
+                # aggregate ZIP 생성 처리
+                # 동작 요약(한국어):
+                # - 목적: 사용자의 요구대로 "분석한 폴더의 상위 폴더"에 단 하나의 '총_결과_*.zip'을 생성합니다.
+                #   예: 결과 폴더들이 'C:\\answer - 복사본\\인문계\\1교시\\11001_결과' 등이라면,
+                #   공통 부모(base) = 'C:\\answer - 복사본\\인문계\\1교시'이며,
+                #   이 블록은 그 상위 폴더인 'C:\\answer - 복사본\\인문계'에 ZIP을 생성합니다.
+                # - 설계 이유: 대시보드 업로드나 사용자가 폴더 구조를 유지한 채 총 결과를 상위 레벨에서 일괄 확인할 수 있도록.
+                # - 구현 세부: `rp` 목록에서 공통 부모(base)를 계산하고, 그 부모의 상위 폴더를 target으로 지정하여
+                #   create_aggregate_result_zip(base, target_dir=target_parent) 한 번만 호출합니다.
                 if create_aggregate_result_zip and rp:
                     try:
-                        common_parent = os.path.commonpath(rp)
-                        target_artifacts = os.path.join(rp[0], "artifacts")
-                        create_aggregate_result_zip(common_parent, target_dir=target_artifacts)
+                        # *_결과 폴더들이 모여 있는 분석 폴더(예: ...\\1교시)
+                        base_dir = os.path.commonpath(rp)
                     except Exception:
+                        # 공통 경로 계산 실패 시 폴백: 현재의 출력 디렉터리 사용
+                        base_dir = effective_output_dir
+
+                    try:
+                        base_path = Path(base_dir).resolve()
+                    except Exception:
+                        base_path = Path(base_dir)
+
+                    # 목표 생성 위치: 분석 폴더(base_path)의 상위 폴더 (예: ...\\인문계)
+                    try:
+                        target_parent = str(base_path.parent)
+                    except Exception:
+                        target_parent = os.path.dirname(str(base_path))
+
+                    try:
+                        os.makedirs(target_parent, exist_ok=True)
+                    except Exception:
+                        # 디렉터리 생성 실패 시에도 계속 진행 (create_aggregate_result_zip 내부에서 다시 시도함)
+                        pass
+
+                    try:
+                        # 한 번만 aggregate 생성 요청을 보냅니다. 내부에서 동일 이름이 이미 있으면 재사용합니다.
+                        create_aggregate_result_zip(str(base_path), target_dir=target_parent)
+                    except Exception:
+                        # 실패 시 무시하고 넘어갑니다.
                         pass
         except Exception:
             pass
