@@ -77,28 +77,348 @@ if "CLI_DEFAULT_RESULT" not in globals():
 if "SELECTION_ROOT" not in globals():
     SELECTION_ROOT = None
 
+# ===== 테마 및 CSS 주입 =====
+DEFAULT_THEME_KEY = 'Light (기본)'
+THEMES = {
+    'Light (기본)': {
+        'palette': {
+            'bg': '#FBFDFF',
+            'sidebar_bg': '#FFFFFF',
+            'text': '#091223',
+            'sidebar_text': '#091223',
+            'secondary': '#475569',
+            'accent': '#1EA3A1',
+            'card_bg': '#FBFDFF',
+            'card_border': '#e6eef8',
+            'shadow': '0 6px 18px rgba(10,20,40,0.04)'
+        },
+    },
+    'Warm Sepia': {
+        'palette': {
+            'bg': '#f4efe6',
+            'sidebar_bg': '#efe6d9',
+            'text': '#2d2a26',
+            'sidebar_text': '#2d2a26',
+            'secondary': '#6e5a4a',
+            'accent': '#1EA3A1',
+            'card_bg': '#fbf6ee',
+            'card_border': '#e6dccf',
+            'shadow': '0 6px 18px rgba(30,20,10,0.08)'
+        },
+    },
+    'Gentle Mint': {
+        'palette': {
+            'bg': '#f3faf6',
+            'sidebar_bg': '#eaf7ef',
+            'text': '#082724',
+            'sidebar_text': '#082724',
+            'secondary': '#4b6b64',
+            'accent': '#1EA3A1',
+            'card_bg': '#ffffff',
+            'card_border': '#e6f0ec',
+            'shadow': '0 6px 18px rgba(5,30,25,0.06)'
+        },
+    },
+}
+
+if 'theme' not in st.session_state:
+    st.session_state['theme'] = DEFAULT_THEME_KEY
+
+
+def _get_theme_palette(mode: Optional[str] = None) -> Dict[str, str]:
+    """선택된 테마 팔레트를 반환합니다. mode가 없으면 세션 상태를 기본으로 사용합니다."""
+    target = mode or st.session_state.get('theme') or DEFAULT_THEME_KEY
+    theme = THEMES.get(target, THEMES[DEFAULT_THEME_KEY])
+    return theme['palette']
+
+
+def _inject_theme_css(mode: Optional[str] = None):
+    """테마 색상을 기반으로 전역 CSS를 주입합니다."""
+    pal = _get_theme_palette(mode)
+    sidebar_width = int(st.session_state.get('sidebar_width_px', 350))
+
+    bg = pal.get('bg', '#F7F9FB')
+    sidebar_bg = pal.get('sidebar_bg', '#FFFFFF')
+    text = pal.get('text', '#0B1726')
+    sidebar_text = pal.get('sidebar_text', text)
+    secondary_text = pal.get('secondary', '#41515F')
+    accent = pal.get('accent', '#1EA3A1')
+    card_bg = pal.get('card_bg', '#FFFFFF')
+    card_border = pal.get('card_border', '#e6e9ee')
+    shadow = pal.get('shadow', 'none')
+
+    css = f"""
+    <style>
+    .stApp {{ background-color: {bg} !important; color: {text} !important; }}
+    [data-testid="stSidebar"] {{ background: linear-gradient(180deg, rgba(30,163,161,0.04), {sidebar_bg}) !important; box-shadow: none !important; color: {sidebar_text} !important; border-left: 6px solid rgba(30,163,161,0.08) !important; }}
+    [data-testid="stSidebar"][aria-expanded="true"] {{ width: {sidebar_width}px !important; min-width: {sidebar_width}px !important; }}
+    [data-testid="stSidebar"][aria-expanded="false"] {{ width: 0 !important; min-width: 0 !important; }}
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stHeader, [data-testid="stSidebar"] .stMarkdown {{ color: {sidebar_text} !important; opacity: 0.98 !important; }}
+    .stBlock, .stCard {{ background-color: {card_bg} !important; border: 1px solid {card_border}; border-radius: 10px; box-shadow: {shadow}; padding: 12px; }}
+    .stMetric, .stMetric * {{ color: {text} !important; opacity: 0.98 !important; }}
+    .stMetric p, .stMetric span, .stMetric small {{ color: {secondary_text} !important; opacity: 0.95 !important; }}
+    input, textarea, select, button {{ color: {text} !important; background-color: transparent !important; border-radius: 8px; }}
+    .stApp p, .stApp span, label {{ color: {secondary_text} !important; }}
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {{ color: {sidebar_text} !important; }}
+    a, .stButton>button {{ color: {accent} !important; }}
+    .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
+    img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
+    input[type="text"], .stTextInput>div>div>input {{
+        background-color: rgba(255,255,255,0.9) !important;
+        border: 1.5px solid {accent} !important;
+        box-shadow: 0 4px 10px rgba(30,163,161,0.08) !important;
+        padding: 10px 12px !important;
+        border-radius: 10px !important;
+        font-size: 14px !important;
+        color: {text} !important;
+    }}
+    [data-testid="stSidebar"] input[type="text"] {{
+        background-color: rgba(30,163,161,0.03) !important;
+        border: 1px solid rgba(30,163,161,0.12) !important;
+        color: {text} !important;
+        box-shadow: 0 2px 6px rgba(30,163,161,0.04) !important;
+    }}
+    input::placeholder, textarea::placeholder {{ color: rgba(0,0,0,0.38) !important; font-weight: 500 !important; }}
+    hr, .stMarkdown hr {{
+        border: none !important;
+        height: 4px !important;
+        background: linear-gradient(90deg, rgba(30,163,161,0.08), {accent}, rgba(30,163,161,0.08)) !important;
+        border-radius: 6px !important;
+        margin: 18px 0 !important;
+        box-shadow: 0 4px 12px rgba(30,163,161,0.06) inset;
+    }}
+    [data-testid="stSidebar"] .stSelectbox>div>div {{
+        background-color: rgba(255,255,255,0.98) !important;
+        border: 1px solid rgba(30,163,161,0.3) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
+        transition: border-color 0.2s ease !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox>div>div:hover {{
+        border-color: {accent} !important;
+        box-shadow: 0 2px 8px rgba(30,163,161,0.12) !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox>div>div>div {{
+        color: {text} !important;
+        font-weight: 500 !important;
+        padding: 10px 12px !important;
+        font-size: 14px !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox svg {{ color: {accent} !important; opacity: 0.7 !important; }}
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
+        background-color: white !important;
+        border: 1px solid rgba(30,163,161,0.2) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
+        margin-top: 2px !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
+        color: {text} !important;
+        padding: 8px 12px !important;
+        margin: 2px 4px !important;
+        border-radius: 4px !important;
+        font-size: 14px !important;
+        transition: background-color 0.15s ease !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"]:hover {{
+        background-color: rgba(30,163,161,0.05) !important;
+        color: {accent} !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [aria-selected="true"] {{
+        background-color: {accent} !important;
+        color: white !important;
+        font-weight: 500 !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"] {{
+        color: #d62839 !important;
+        font-weight: 600 !important;
+        background-color: rgba(214,40,57,0.08) !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"][aria-label^="[재스캔]"] {{
+        background-color: rgba(214,40,57,0.14) !important;
+        color: #d62839 !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"]::before {{
+        content: "⚠ ";
+        font-weight: 700;
+    }}
+    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"] {{
+        color: #d62839 !important;
+        font-weight: 600 !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"]::before {{
+        content: "⚠ ";
+        margin-right: 4px;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"] {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        border-radius: 0 0 6px 6px !important;
+        position: relative !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
+        position: relative !important;
+        overflow: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-current="true"] {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"] {{
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 10 !important;
+        margin-top: 0 !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"]:hover {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+    }}
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"],
+    .baseweb-portal [role="listbox"] [role="option"][data-selected="true"],
+    body > [role="listbox"] [role="option"][aria-selected="true"] {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 9999 !important;
+    }}
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"]:hover {{
+        background-color: rgba(0,0,0,0.12) !important;
+        color: {sidebar_text} !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
+        background-color: rgba(0,0,0,0.12) !important;
+        display: block !important;
+        padding: 8px 12px !important;
+        margin: -8px -12px !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        border-radius: 4px !important;
+    }}
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1,
+    body > [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
+    body > [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
+        background-color: rgba(0,0,0,0.12) !important;
+        display: block !important;
+        padding: 8px 12px !important;
+        margin: -8px -12px !important;
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+        border-radius: 4px !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::after {{
+        content: "✔";
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: {sidebar_text} !important;
+        font-weight: 700;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::before {{
+        content: "";
+        position: absolute;
+        left: 6px;
+        top: 8px;
+        bottom: 8px;
+        width: 4px;
+        background: rgba(0,0,0,0.25) !important;
+        border-radius: 2px;
+    }}
+    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
+        padding-left: 18px !important;
+    }}
+    </style>
+    """
+
+    extra = f"""
+    <style>
+    .float-compare {{
+        position: sticky;
+        top: 78px;
+        z-index: 9999;
+        background: transparent !important;
+        padding: 0 !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        margin-bottom: 0 !important;
+    }}
+    .kpi-row {{ display:flex; gap:18px; align-items:stretch; margin:18px 0 22px; }}
+    .kpi-card {{ flex:1; background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:12px; padding:16px; box-shadow:{shadow}; display:flex; flex-direction:column; gap:6px; justify-content:center; min-height:92px; }}
+    .kpi-card .kpi-label {{ color:{secondary_text}; font-size:13px; }}
+    .kpi-card .kpi-value {{ color:{text}; font-size:22px; font-weight:700; }}
+    .kpi-card .kpi-icon {{ font-size:20px; opacity:0.9; }}
+    .kpi-card {{ position: relative; }}
+    .kpi-card .kpi-delta {{
+        position: absolute;
+        top: 10px;
+        right: 12px;
+        font-size:12px;
+        padding:4px 8px;
+        border-radius:999px;
+        background: rgba(34,197,94,0.12);
+        color: #16a34a;
+        font-weight:700;
+        box-shadow: 0 4px 12px rgba(2,8,12,0.06);
+        display: inline-block;
+    }}
+    .kpi-card .kpi-delta.down {{ background: rgba(239,68,68,0.12); color:#ef4444; }}
+    .primary-action-btn {{
+        background: linear-gradient(180deg, {accent}, #157271) !important;
+        color: #fff !important;
+        border: none !important;
+        padding: 12px 18px !important;
+        border-radius: 12px !important;
+        font-size: 16px !important;
+        font-weight: 700 !important;
+        box-shadow: 0 8px 28px rgba(30,163,161,0.14) !important;
+        cursor: pointer;
+    }}
+    .group-card {{ background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:14px; padding:14px; box-shadow:{shadow}; margin-bottom:18px; }}
+    .group-title {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; font-weight:700; color:{text}; }}
+    .thumb-grid {{ display:flex; gap:12px; flex-wrap:wrap; }}
+    .thumb-card {{ width:180px; border-radius:10px; overflow:hidden; background:linear-gradient(180deg, rgba(255,255,255,0.98), {card_bg}); border:1px solid rgba(15,23,42,0.04); box-shadow: 0 8px 20px rgba(2,8,12,0.06); padding:8px; position:relative; }}
+    .thumb-card img {{ display:block; width:100%; height:140px; object-fit:contain; background: #fff; }}
+    .thumb-caption {{ text-align:center; font-size:13px; color:{secondary_text}; margin-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .thumb-badge {{ position:absolute; top:8px; left:8px; background: rgba(255,255,255,0.95); color:{text}; padding:4px 8px; border-radius:999px; font-weight:600; font-size:12px; box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
+    .thumb-check {{ position:absolute; top:8px; right:8px; width:32px; height:32px; border-radius:8px; display:flex; align-items:center; justify-content:center; background: rgba(255,255,255,0.95); box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
+    .thumb-card.selected {{ box-shadow: 0 12px 36px rgba(30,163,161,0.12); border:1px solid rgba(30,163,161,0.12); }}
+    @media (max-width: 900px) {{ .thumb-card {{ width: calc(50% - 12px); }} .kpi-row {{ flex-direction:column; gap:10px; }} }}
+    @media (max-width: 600px) {{ .thumb-card {{ width: calc(100% - 12px); }} }}
+    </style>
+    """
+
+    try:
+        st.markdown(css + extra, unsafe_allow_html=True)
+    except Exception:
+        # CSS 주입 실패는 UI에만 영향을 주므로 조용히 넘어갑니다.
+        pass
+
 if "_normalize_base_dir" not in globals():
     # 기본적인 정규화 함수: 전달된 경로를 안전하게 절대경로로 변환합니다.
-    # selection_root는 향후 확장용으로 남겨두며, 현재는 무시합니다.
     def _normalize_base_dir(p: Path, selection_root=None) -> Path:
         try:
             p = Path(p)
-            # expanduser를 적용해 ~/ 같은 표현을 처리
             p = p.expanduser()
             return p.resolve()
         except Exception:
-            # resolve가 실패하면 가능한 한 Path 객체를 반환
             try:
                 return Path(str(p))
             except Exception:
                 return Path.cwd()
 
 if "_build_result_meta" not in globals():
-    # 결과 메타 생성기 (디버그 출력 포함)
-    # 설명(한국어):
-    # - 전달된 경로(result_dirs)가 있으면 우선 검사하고, 없으면 세션/환경/모듈 기본값 및
-    #   artifacts/uploaded_inputs 등을 후보로 삼아 1레벨 하위 디렉터리를 검사합니다.
-    # - Streamlit 사이드바에 검사한 후보와 발견된 결과 메타를 디버그용으로 출력합니다.
+    # 결과 메타 생성기: 후보 경로를 찾아 report 존재 여부를 확인합니다.
     def _build_result_meta(result_dirs=None) -> Dict[str, Dict[str, bool]]:
         out: Dict[str, Dict[str, bool]] = {}
 
@@ -115,7 +435,6 @@ if "_build_result_meta" not in globals():
             has = _has_result_files(target)
             out[key] = {"has_report": bool(has), "needs_rescan": not bool(has)}
 
-        # 1) 호출자가 명시적으로 리스트/튜플을 준 경우 우선 처리
         if isinstance(result_dirs, (list, tuple)) and result_dirs:
             for item in result_dirs:
                 if not item:
@@ -125,7 +444,6 @@ if "_build_result_meta" not in globals():
                 except Exception:
                     continue
 
-        # 2) 후보가 비어있다면 여러 후보 경로를 수집해 검사
         if not out:
             candidates: List[Path] = []
             try:
@@ -137,7 +455,6 @@ if "_build_result_meta" not in globals():
                 pass
 
             try:
-                # 환경변수로 전달되는 경우가 있을 수 있으므로 체크
                 env = os.environ
                 for k in ("ANSWER_SCAN_BASE_DIR", "ANSWER_SCAN_OUTPUT_DIR", "ANSWER_SCAN_DEFAULT_RESULT"):
                     if env.get(k):
@@ -166,27 +483,20 @@ if "_build_result_meta" not in globals():
                     continue
                 if not candp.exists():
                     continue
-                # 후보 자체가 결과일 수 있음
                 _add_dir(candp)
-                # 1레벨 하위 디렉터리 검사
                 try:
                     for child in candp.iterdir():
                         if child.is_dir():
                             _add_dir(child)
-                            # 일부 사용자는 '총_결과'처럼 상위 ZIP에 묶여있는 경우가 있습니다.
-                            # 이런 경우 결과 폴더들이 한 단계 더 들어간(=2레벨) 곳에 존재하므로
-                            # 성능 부담이 적은 범위에서 2레벨 깊이도 검사합니다.
                             try:
                                 for grand in child.iterdir():
                                     if grand.is_dir():
                                         _add_dir(grand)
                             except Exception:
-                                # grand-iteration 실패 시 무시(접근 권한 등 이유)
                                 pass
                 except Exception:
                     pass
 
-        # 정렬: has_report 우선, 수정시각 역순
         try:
             def _sort_key(k):
                 v = out.get(k, {})
@@ -196,6 +506,7 @@ if "_build_result_meta" not in globals():
                 except Exception:
                     m = 0
                 return (0 if has else 1, -m)
+
             ordered = sorted(list(out.keys()), key=_sort_key)
         except Exception:
             ordered = list(out.keys())
@@ -208,24 +519,15 @@ if "_build_result_meta" not in globals():
             except Exception:
                 pass
 
-        # (디버그 출력 제거됨) 개발/디버그 중에만 필요한 사이드바 로그는
-        # 실제 운영 모드에서는 불필요해 import 시 워닝을 유발하므로 제거합니다.
-
         return out
 
 if "_has_result_files" not in globals():
     # 결과 폴더 판정 유틸
-    # 설명(한국어): 결과 폴더로 판단하기 위한 여러 기준을 적용합니다.
-    # 1) 우선 report.parquet 또는 report.csv 가 있어야합니다.
-    # 2) images_summary.csv 가 있으면 더 확실하게 결과로 판단합니다.
-    # 3) images_summary가 없더라도 grouped, artifacts/ordered_paths.txt, thumbnails, 또는
-    #    이미지 파일들이 존재하면 보조 증거로 결과로 판단합니다.
     def _has_result_files(output_dir: Path) -> bool:
         try:
             p = Path(output_dir)
             if not p.exists() or not p.is_dir():
                 return False
-            # 핵심 파일 존재 여부
             report_parquet = p / "report.parquet"
             report_csv = p / "report.csv"
             summary_csv = p / "images_summary.csv"
@@ -233,33 +535,27 @@ if "_has_result_files" not in globals():
             has_report = report_parquet.exists() or report_csv.exists()
             has_imgsum = summary_csv.exists()
 
-            # 확실한 케이스: report + images_summary
             if has_report and has_imgsum:
                 return True
 
-            # images_summary만 있어도 결과로 간주
             if has_imgsum:
                 return True
 
-            # report만 있고 보조 증거가 있으면 허용
             if has_report and not has_imgsum:
                 art = p / "artifacts"
                 if (art / "ordered_paths.txt").exists():
                     return True
                 if (art / "thumbnails").exists():
                     return True
-                # grouped 또는 ok 폴더 존재도 보조 증거로 인정
                 if (p / "grouped").exists() or (p / "ok").exists():
                     return True
                 return False
 
-            # 보조 증거만 있는 경우: grouped, artifacts, thumbnails 또는 이미지 파일 존재
             if (p / "grouped").exists():
                 return True
             art = p / "artifacts"
             if (art / "ordered_paths.txt").exists() or (art / "thumbnails").exists():
                 return True
-            # 폴더 내부의 이미지 파일 존재 여부 확인
             for child in p.iterdir():
                 try:
                     if child.is_file() and child.suffix.lower() in IMAGE_EXTS:
@@ -271,13 +567,7 @@ if "_has_result_files" not in globals():
         except Exception:
             return False
 
-# (자동 초기 스캔 호출 제거)
-# 모듈 import 시점에 자동으로 스캔을 수행하면, 개발환경에서 `streamlit` 관련
-# 경고가 다수 발생하고 불필요한 I/O가 실행될 수 있습니다. 필요 시 UI에서
-# 명시적으로 리스캔을 호출하도록 유지합니다.
-
 if "RESAMPLE" not in globals():
-    # Pillow 리샘플링 디폴트: 최근 PIL에서는 Image.Resampling이 제공됩니다.
     try:
         RESAMPLE = Image.Resampling.LANCZOS
     except Exception:
@@ -292,7 +582,6 @@ except Exception:
     stat = None
 
 if "_request_rerun" not in globals():
-    # Streamlit 재실행을 시도하는 유틸: experimental_rerun -> rerun 순으로 시도
     def _request_rerun():
         try:
             st.experimental_rerun()
@@ -300,371 +589,7 @@ if "_request_rerun" not in globals():
             try:
                 st.rerun()
             except Exception:
-                # 재실행이 불가능하면 무시
                 pass
-
-
-# ===== 테마 선택 =====
-THEMES = {
-    'Light (기본)': {
-        'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','sidebar_text':'#091223','secondary':'#475569','accent':'#1EA3A1','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
-    },
-    'Warm Sepia': {
-        'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','sidebar_text':'#2d2a26','secondary':'#6e5a4a','accent':'#1EA3A1','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
-    },
-    'Gentle Mint': {
-        'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','sidebar_text':'#082724','secondary':'#4b6b64','accent':'#1EA3A1','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
-    }
-}
-
-if 'theme' not in st.session_state:
-    st.session_state['theme'] = 'Light (기본)'
-
-
-def _inject_theme_css(mode: str = 'Light (기본)'):
-    # mode에 따라 팔레트 선택
-    theme = THEMES.get(mode, THEMES['Light (기본)'])
-    pal = theme['palette']
-    sidebar_width = int(st.session_state.get('sidebar_width_px', 350))
-
-    # 기본값 보장
-    bg = pal.get('bg','#F7F9FB')
-    sidebar_bg = pal.get('sidebar_bg', '#FFFFFF')
-    text = pal.get('text', '#0B1726')
-    sidebar_text = pal.get('sidebar_text', text)
-    secondary_text = pal.get('secondary', '#41515F')
-    # Use teal family as default accent (user requested #1EA3A1 series)
-    accent = pal.get('accent', '#1EA3A1')
-    card_bg = pal.get('card_bg', '#FFFFFF')
-    card_border = pal.get('card_border', '#e6e9ee')
-    shadow = pal.get('shadow', 'none')
-
-    css = f"""
-    <style>
-    .stApp {{ background-color: {bg} !important; color: {text} !important; }}
-    /* 사이드바에 포인트 계열(#1EA3A1) 계조를 적용합니다. 부드러운 그라데이션과 좌측 엣지 바를 추가해 시각적 구분을 줍니다. */
-    [data-testid="stSidebar"] {{ background: linear-gradient(180deg, rgba(30,163,161,0.04), {sidebar_bg}) !important; box-shadow: none !important; color: {sidebar_text} !important; border-left: 6px solid rgba(30,163,161,0.08) !important; }}
-    [data-testid="stSidebar"][aria-expanded="true"] {{ width: {sidebar_width}px !important; min-width: {sidebar_width}px !important; }}
-    [data-testid="stSidebar"][aria-expanded="false"] {{ width: 0 !important; min-width: 0 !important; }}
-    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stHeader, [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] .css-1d391kg {{ color: {sidebar_text} !important; opacity: 0.98 !important; }}
-    .stBlock, .stCard {{ background-color: {card_bg} !important; border: 1px solid {card_border}; border-radius: 10px; box-shadow: {shadow}; padding: 12px; }}
-    .stMetric {{ color: {text} !important; }}
-    /* KPI/Metric 내부 텍스트(라벨/서브텍스트)가 다크에서 안보이는 문제 해결: 강제 색상/불투명도 적용 */
-    .stMetric, .stMetric * {{ color: {text} !important; opacity: 0.98 !important; }}
-    .stMetric p, .stMetric span, .stMetric small {{ color: {secondary_text} !important; opacity: 0.95 !important; }}
-    input, textarea, select, button {{ color: {text} !important; background-color: transparent !important; border-radius: 8px; }}
-    .stApp p, .stApp span, label, .css-1v0mbdj p {{ color: {secondary_text} !important; }}
-    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {{ color: {sidebar_text} !important; }}
-    a, .stButton>button, .css-18e3th9 a, .css-18e3th9 button {{ color: {accent} !important; }}
-    .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
-    img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
-    /* 검색 입력 상자 강조: 사용자 요청으로 가독성 향상용 추가 스타일입니다. */
-    input[type="text"], .stTextInput>div>div>input {{
-        background-color: rgba(255,255,255,0.9) !important;
-        border: 1.5px solid {accent} !important;
-    box-shadow: 0 4px 10px rgba(30,163,161,0.08) !important;
-        padding: 10px 12px !important;
-        border-radius: 10px !important;
-        font-size: 14px !important;
-        color: {text} !important;
-    }}
-    /* 사이드바 내 입력과 플레이스홀더 대비 개선 */
-    /* 사이드바 내부 입력은 약간의 포인트 색조를 배경에 줘서 어사이드 영역임을 명확히 합니다. */
-    [data-testid="stSidebar"] input[type="text"] {{ 
-        background-color: rgba(30,163,161,0.03) !important; 
-        border: 1px solid rgba(30,163,161,0.12) !important;
-        color: {text} !important;
-        box-shadow: 0 2px 6px rgba(30,163,161,0.04) !important;
-    }}
-    input::placeholder, textarea::placeholder {{ color: rgba(0,0,0,0.38) !important; font-weight: 500 !important; }}
-    
-    /* HR(가로선) 스타일: 청록(Teal) 계열로 강조합니다. accent 색을 사용하되 필요시 더 진한 변형을 함께 사용합니다. */
-    hr, .stMarkdown hr, .stDivider hr {{
-        border: none !important;
-        height: 4px !important;
-        background: linear-gradient(90deg, rgba(30,163,161,0.08), {accent}, rgba(30,163,161,0.08)) !important;
-        border-radius: 6px !important;
-        margin: 18px 0 !important;
-        box-shadow: 0 4px 12px rgba(30,163,161,0.06) inset;
-    }}
-    /* 사이드바 select 박스 - 심플하고 깔끔한 스타일 */
-    [data-testid="stSidebar"] .stSelectbox>div>div {{
-        background-color: rgba(255,255,255,0.98) !important;
-    border: 1px solid rgba(30,163,161,0.3) !important;
-        border-radius: 8px !important;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
-        transition: border-color 0.2s ease !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox>div>div:hover {{
-        border-color: {accent} !important;
-    box-shadow: 0 2px 8px rgba(30,163,161,0.12) !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox>div>div>div {{
-        color: {text} !important;
-        font-weight: 500 !important;
-        padding: 10px 12px !important;
-        font-size: 14px !important;
-    }}
-
-    /* 닫힌 상태 표시 박스 스타일은 기본으로 유지합니다. (사용자 요청: 하단은 회색 적용 안 함) */
-    
-    /* select 드롭다운 화살표 스타일링 */
-    [data-testid="stSidebar"] .stSelectbox svg {{
-        color: {accent} !important;
-        opacity: 0.7 !important;
-    }}
-    
-    /* 드롭다운 옵션 리스트 스타일링 */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
-        background-color: white !important;
-    border: 1px solid rgba(30,163,161,0.2) !important;
-        border-radius: 8px !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
-        margin-top: 2px !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
-        color: {text} !important;
-        padding: 8px 12px !important;
-        margin: 2px 4px !important;
-        border-radius: 4px !important;
-        font-size: 14px !important;
-        transition: background-color 0.15s ease !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox [role="option"]:hover {{
-    background-color: rgba(30,163,161,0.05) !important;
-        color: {accent} !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox [aria-selected="true"] {{
-        background-color: {accent} !important;
-        color: white !important;
-        font-weight: 500 !important;
-    }}
-
-    /* 재스캔 필요 옵션 강조 표현: BaseWeb(라이브러리) aria-label을 활용해 매칭합니다. */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"] {{
-        color: #d62839 !important;
-        font-weight: 600 !important;
-        background-color: rgba(214,40,57,0.08) !important;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"][aria-label^="[재스캔]"] {{
-        background-color: rgba(214,40,57,0.14) !important;
-        color: #d62839 !important;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"]::before {{
-        content: "⚠ ";
-        font-weight: 700;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"] {{
-        color: #d62839 !important;
-        font-weight: 600 !important;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"]::before {{
-        content: "⚠ ";
-        margin-right: 4px;
-    }}
-
-    /* 드롭다운 목록에서 '선택된 옵션'을 더 시각적으로 강조합니다. */
-    /* 선택된 옵션은 파란색 대신 회색 배경으로 고정하여 '선택 중'을 표시합니다. */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"] {{
-        /* 목록 내부에서 선택된 항목을 더 진한 회색으로 표시 */
-        background-color: rgba(0,0,0,0.12) !important; /* 약간 더 진한 회색 */
-        color: {sidebar_text} !important; /* 진한 텍스트 */
-        font-weight: 700 !important;
-        border-radius: 0 0 6px 6px !important;
-        position: relative !important;
-    }}
-
-    /* 다양한 구현에서 선택 상태를 나타내는 속성에 모두 대응하여 회색 강조를 강제합니다. */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
-        position: relative !important;
-        overflow: auto !important;
-        -webkit-overflow-scrolling: touch !important;
-    }}
-
-    /* 선택 상태에 대한 공통 규칙(목록 내부에서만 적용) */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"],
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-current="true"] {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-    }}
-
-    /* 선택된 항목은 목록에서 상단에 고정(sticky)되도록 함: 이미지2 스타일과 유사하게 보이게 함 */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"] {{
-        position: -webkit-sticky !important;
-        position: sticky !important;
-        top: 0 !important;
-        z-index: 10 !important;
-        margin-top: 0 !important;
-    }}
-
-    /* hover가 선택 스타일을 덮어쓰지 않도록 유지 */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"]:hover {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-    }}
-
-    /* ===== 포털(오버레이)로 렌더되는 BaseWeb(라이브러리)/Select의 드롭다운을 직접 타깃합니다. =====
-       Streamlit은 드롭다운을 sidebar 바깥(포털)으로 렌더할 수 있어 기존 사이드바 내부 선택자로 매칭되지 않을 수 있습니다.
-       아래 규칙은 포털 내부의 listbox/option에 대해 동일한 강조(회색 배경, 진한 텍스트, sticky)를 강제합니다. */
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"],
-    .baseweb-portal [role="listbox"] [role="option"][data-selected="true"],
-    body > [role="listbox"] [role="option"][aria-selected="true"] {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-        position: sticky !important;
-        top: 0 !important;
-        z-index: 9999 !important;
-    }}
-
-    /* 포털 내 선택된 옵션이 hover에 의해 덮어쓰이지 않도록 함 */
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"]:hover {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-    }}
-
-     /* ------------------------------------------------------------------
-         Streamlit이 생성하는 emotion 계열 클래스(예: st-emotion-cache-xxxxx, etx0m6x1 등)
-         을 직접 타깃팅하여 내부 텍스트 컨테이너에도 회색 배경과 패딩을 강제로 적용합니다.
-         - 사이드바 내부 렌더링과 포털(포털 = 오버레이)으로 렌더되는 드롭다운 모두를 포함합니다.
-         - 동적으로 생성되는 클래스명이 바뀔 수 있으므로 etx- 접두사의 클래스도 함께 커버합니다.
-         (이 블록은 설명용 주석이며 스타일 동작에는 영향이 없습니다.)
-     ------------------------------------------------------------------ */
-    /* 사이드바 내부 listbox */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
-        background-color: rgba(0,0,0,0.12) !important;
-        display: block !important;
-        padding: 8px 12px !important;
-        margin: -8px -12px !important; /* 옵션 컨테이너 패딩과 겹치지 않게 보정 */
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-        border-radius: 4px !important;
-    }}
-
-    /* 포털(오버레이)로 렌더된 listbox */
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1,
-    body > [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
-    body > [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
-        background-color: rgba(0,0,0,0.12) !important;
-        display: block !important;
-        padding: 8px 12px !important;
-        margin: -8px -12px !important;
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-        border-radius: 4px !important;
-    }}
-
-    /* 선택된 옵션에 체크 표시를 추가해 사용자가 어떤 항목이 선택됐는지 바로 알 수 있도록 함 */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::after {{
-        content: "✔";
-        position: absolute;
-        right: 10px;
-        top: 50%;
-        transform: translateY(-50%);
-        color: {sidebar_text} !important; /* 회색 배경에 어울리는 진한 색상 */
-        font-weight: 700;
-    }}
-
-    /* 선택된 옵션 왼쪽에 컬러 바 추가하여 '현재 선택'을 시각적으로 강조 */
-    /* 왼쪽 컬러 바는 회색 톤으로 변경하여 전체가 회색 강조로 보이도록 함 */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::before {{
-        content: "";
-        position: absolute;
-        left: 6px;
-        top: 8px;
-        bottom: 8px;
-        width: 4px;
-        background: rgba(0,0,0,0.25) !important; /* 진한 회색 바 */
-        border-radius: 2px;
-    }}
-
-    /* 옵션 텍스트가 왼쪽 컬러 바와 겹치지 않도록 패딩 보정 */
-    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
-        padding-left: 18px !important;
-    }}
-    </style>
-    """
-    # 추가 스타일: KPI 카드, 썸네일 카드, 주요 액션 버튼 등 디자이너 스타일
-    extra = f"""
-    <style>
-        /* 비교 패널을 상단에 고정(floating) */
-        .float-compare {{
-            position: sticky;
-            top: 78px; /* 상단 헤더 및 KPI 높이에 따라 조정 */
-            z-index: 9999;
-            background: rgba(255,255,255,0.92);
-            padding: 10px 12px;
-            border-radius: 10px;
-            box-shadow: 0 8px 20px rgba(2,8,12,0.06);
-            margin-bottom: 12px;
-        }}
-
-    /* KPI 카드 레이아웃 */
-    .kpi-row {{ display:flex; gap:18px; align-items:stretch; margin:18px 0 22px; }}
-    .kpi-card {{ flex:1; background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:12px; padding:16px; box-shadow:{shadow}; display:flex; flex-direction:column; gap:6px; justify-content:center; min-height:92px; }}
-    .kpi-card .kpi-label {{ color:{secondary_text}; font-size:13px; }}
-    .kpi-card .kpi-value {{ color:{text}; font-size:22px; font-weight:700; }}
-    .kpi-card .kpi-icon {{ font-size:20px; opacity:0.9; }}
-    /* KPI 델타 배지: 값이 비어있으면 시각적으로 가려지도록 처리 가능(세션에서 값이 없으면 빈 문자열) */
-    .kpi-card {{ position: relative; }}
-    .kpi-card .kpi-delta {{
-        position: absolute;
-        top: 10px;
-        right: 12px;
-        font-size:12px;
-        padding:4px 8px;
-        border-radius:999px;
-        background: rgba(34,197,94,0.12);
-        color: #16a34a;
-        font-weight:700;
-        box-shadow: 0 4px 12px rgba(2,8,12,0.06);
-        display: inline-block;
-    }}
-    .kpi-card .kpi-delta.down {{ background: rgba(239,68,68,0.12); color:#ef4444; }}
-
-    /* 큰 파란 실행 버튼 (사이드바/상단에서 사용) */
-    .primary-action-btn {{
-    /* darker teal variant for gradient stop */
-    background: linear-gradient(180deg, {accent}, #157271) !important;
-        color: #fff !important; border: none !important; padding: 12px 18px !important;
-        border-radius: 12px !important; font-size: 16px !important; font-weight: 700 !important;
-    box-shadow: 0 8px 28px rgba(30,163,161,0.14) !important; cursor: pointer;
-    }}
-
-    /* 그룹 섹션 카드 및 썸네일 그리드 */
-    .group-card {{ background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:14px; padding:14px; box-shadow:{shadow}; margin-bottom:18px; }}
-    .group-title {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; font-weight:700; color:{text}; }}
-    .thumb-grid {{ display:flex; gap:12px; flex-wrap:wrap; }}
-    .thumb-card {{ width:180px; border-radius:10px; overflow:hidden; background:linear-gradient(180deg, rgba(255,255,255,0.98), {card_bg}); border:1px solid rgba(15,23,42,0.04); box-shadow: 0 8px 20px rgba(2,8,12,0.06); padding:8px; position:relative; }}
-    .thumb-card img {{ display:block; width:100%; height:140px; object-fit:contain; background: #fff; }}
-    .thumb-caption {{ text-align:center; font-size:13px; color:{secondary_text}; margin-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-    .thumb-badge {{ position:absolute; top:8px; left:8px; background: rgba(255,255,255,0.95); color:{text}; padding:4px 8px; border-radius:999px; font-weight:600; font-size:12px; box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
-    .thumb-check {{ position:absolute; top:8px; right:8px; width:32px; height:32px; border-radius:8px; display:flex; align-items:center; justify-content:center; background: rgba(255,255,255,0.95); box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
-    .thumb-card.selected {{ box-shadow: 0 12px 36px rgba(30,163,161,0.12); border:1px solid rgba(30,163,161,0.12); }}
-
-    @media (max-width: 900px) {{ .thumb-card {{ width: calc(50% - 12px); }} .kpi-row {{ flex-direction:column; gap:10px; }} }}
-    @media (max-width: 600px) {{ .thumb-card {{ width: calc(100% - 12px); }} }}
-    </style>
-    """
-    try:
-        st.markdown(css + extra, unsafe_allow_html=True)
-    except Exception:
-        # CSS 주입 실패는 UI만 영향을 주므로 안전하게 무시
-        pass
 
 
 # 사이드바 탭 생성
@@ -1076,41 +1001,7 @@ with settings_tab:
             args=("재스캔 필요",)
         )
 
-        # 삭제 모드 버튼 그룹
-        delete_mode = st.session_state.get("rescan_delete_mode", False)
-        delete_targets = st.session_state.get("rescan_delete_targets", [])
-        waiting_confirm = st.session_state.get("rescan_show_confirm", False)
-
-        if not delete_mode:
-            delete_button_label = "🗑️ 삭제"
-        else:
-            if waiting_confirm:
-                delete_button_label = "🗑️ 삭제 확인 중"
-            elif delete_targets:
-                delete_button_label = f"🗑️ 삭제 ({len(delete_targets)}개)"
-            else:
-                delete_button_label = "🗑️ 삭제 실행"
-
-        btn_cols = st.columns([1, 1, 1])
-        with btn_cols[0]:
-            if st.button(delete_button_label, key="rescan_delete_button"):
-                if not delete_mode:
-                    st.session_state.rescan_delete_mode = True
-                    st.session_state.rescan_delete_targets = []
-                    st.session_state.rescan_show_confirm = False
-                    st.session_state.rescan_delete_feedback = None
-                else:
-                    if delete_targets:
-                        st.session_state.rescan_show_confirm = True
-                    else:
-                        st.session_state.rescan_delete_feedback = ("warn", "삭제할 이미지를 먼저 선택하세요.")
-        with btn_cols[1]:
-            if delete_mode and not waiting_confirm:
-                if st.button("취소", key="rescan_delete_cancel"):
-                    st.session_state.rescan_delete_mode = False
-                    st.session_state.rescan_delete_targets = []
-                    st.session_state.rescan_delete_feedback = None
-                    st.rerun()
+        # (삭제) 재스캔 워크플로의 파일 삭제 버튼 및 관련 상태 제어는 제거되었습니다.
 
     # 2) 정상 / 공백 보기
     with st.expander("정상·공백 답안", expanded=True):
@@ -1374,17 +1265,7 @@ if "group_view_mode" not in st.session_state:
 if "ok_view_mode" not in st.session_state:
     st.session_state.ok_view_mode = "모두 보기"
 
-# 재스캔 탭 삭제 워크플로 상태
-if "rescan_delete_mode" not in st.session_state:
-    st.session_state.rescan_delete_mode = False
-if "rescan_delete_targets" not in st.session_state:
-    st.session_state.rescan_delete_targets = []
-if "rescan_show_confirm" not in st.session_state:
-    st.session_state.rescan_show_confirm = False
-if "rescan_delete_feedback" not in st.session_state:
-    st.session_state.rescan_delete_feedback = None
-
-
+# (삭제) 재스캔 탭의 삭제 워크플로 관련 세션 키 초기화 코드는 제거되었습니다.
 # ===== 공용 헬퍼 =====
 def _file_mtime(path: str) -> float:
     try: return os.path.getmtime(path)
@@ -2071,368 +1952,7 @@ def _render_sidebar_checks():
         # UI 보조 정보 실패는 무시
         pass
 
-
-# ===== 테마 선택 =====
-THEMES = {
-    'Light (기본)': {
-        'palette': { 'bg':'#FBFDFF','sidebar_bg':'#FFFFFF','text':'#091223','sidebar_text':'#091223','secondary':'#475569','accent':'#1EA3A1','card_bg':'#FBFDFF','card_border':'#e6eef8','shadow':'0 6px 18px rgba(10,20,40,0.04)'},
-    },
-    'Warm Sepia': {
-        'palette': { 'bg':'#f4efe6','sidebar_bg':'#efe6d9','text':'#2d2a26','sidebar_text':'#2d2a26','secondary':'#6e5a4a','accent':'#1EA3A1','card_bg':'#fbf6ee','card_border':'#e6dccf','shadow':'0 6px 18px rgba(30,20,10,0.08)'},
-    },
-    'Gentle Mint': {
-        'palette': { 'bg':'#f3faf6','sidebar_bg':'#eaf7ef','text':'#082724','sidebar_text':'#082724','secondary':'#4b6b64','accent':'#1EA3A1','card_bg':'#ffffff','card_border':'#e6f0ec','shadow':'0 6px 18px rgba(5,30,25,0.06)'} ,
-    }
-}
-
-if 'theme' not in st.session_state:
-    st.session_state['theme'] = 'Light (기본)'
-def _inject_theme_css(mode: str = 'Light (기본)'):
-    # mode에 따라 팔레트 선택
-    theme = THEMES.get(mode, THEMES['Light (기본)'])
-    pal = theme['palette']
-    sidebar_width = int(st.session_state.get('sidebar_width_px', 350))
-
-    # 기본값 보장
-    bg = pal.get('bg','#F7F9FB')
-    sidebar_bg = pal.get('sidebar_bg', '#FFFFFF')
-    text = pal.get('text', '#0B1726')
-    sidebar_text = pal.get('sidebar_text', text)
-    secondary_text = pal.get('secondary', '#41515F')
-    # Use teal family as default accent (user requested #1EA3A1 series)
-    accent = pal.get('accent', '#1EA3A1')
-    card_bg = pal.get('card_bg', '#FFFFFF')
-    card_border = pal.get('card_border', '#e6e9ee')
-    shadow = pal.get('shadow', 'none')
-
-    css = f"""
-    <style>
-    .stApp {{ background-color: {bg} !important; color: {text} !important; }}
-    /* 사이드바에 포인트 계열(#1EA3A1) 계조를 적용합니다. 부드러운 그라데이션과 좌측 엣지 바를 추가해 시각적 구분을 줍니다. */
-    [data-testid="stSidebar"] {{ background: linear-gradient(180deg, rgba(30,163,161,0.04), {sidebar_bg}) !important; box-shadow: none !important; color: {sidebar_text} !important; border-left: 6px solid rgba(30,163,161,0.08) !important; }}
-    [data-testid="stSidebar"][aria-expanded="true"] {{ width: {sidebar_width}px !important; min-width: {sidebar_width}px !important; }}
-    [data-testid="stSidebar"][aria-expanded="false"] {{ width: 0 !important; min-width: 0 !important; }}
-    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stHeader, [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] .css-1d391kg {{ color: {sidebar_text} !important; opacity: 0.98 !important; }}
-    .stBlock, .stCard {{ background-color: {card_bg} !important; border: 1px solid {card_border}; border-radius: 10px; box-shadow: {shadow}; padding: 12px; }}
-    .stMetric {{ color: {text} !important; }}
-    /* KPI/Metric 내부 텍스트(라벨/서브텍스트)가 다크에서 안보이는 문제 해결: 강제 색상/불투명도 적용 */
-    .stMetric, .stMetric * {{ color: {text} !important; opacity: 0.98 !important; }}
-    .stMetric p, .stMetric span, .stMetric small {{ color: {secondary_text} !important; opacity: 0.95 !important; }}
-    input, textarea, select, button {{ color: {text} !important; background-color: transparent !important; border-radius: 8px; }}
-    .stApp p, .stApp span, label, .css-1v0mbdj p {{ color: {secondary_text} !important; }}
-    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {{ color: {sidebar_text} !important; }}
-    a, .stButton>button, .css-18e3th9 a, .css-18e3th9 button {{ color: {accent} !important; }}
-    .stDataFrame table {{ border-collapse: separate; border-spacing: 0 8px; }}
-    img {{ border-radius: 8px; box-shadow: 0 8px 24px rgba(2,8,12,0.15); }}
-    /* 검색 입력 상자 강조: 사용자 요청으로 가독성 향상용 추가 스타일입니다. */
-    input[type="text"], .stTextInput>div>div>input {{
-        background-color: rgba(255,255,255,0.9) !important;
-        border: 1.5px solid {accent} !important;
-    box-shadow: 0 4px 10px rgba(30,163,161,0.08) !important;
-        padding: 10px 12px !important;
-        border-radius: 10px !important;
-        font-size: 14px !important;
-        color: {text} !important;
-    }}
-    /* 사이드바 내 입력과 플레이스홀더 대비 개선 */
-    /* 사이드바 내부 입력은 약간의 포인트 색조를 배경에 줘서 어사이드 영역임을 명확히 합니다. */
-    [data-testid="stSidebar"] input[type="text"] {{ 
-        background-color: rgba(30,163,161,0.03) !important; 
-        border: 1px solid rgba(30,163,161,0.12) !important;
-        color: {text} !important;
-        box-shadow: 0 2px 6px rgba(30,163,161,0.04) !important;
-    }}
-    input::placeholder, textarea::placeholder {{ color: rgba(0,0,0,0.38) !important; font-weight: 500 !important; }}
-    
-    /* HR(가로선) 스타일: 청록(Teal) 계열로 강조합니다. accent 색을 사용하되 필요시 더 진한 변형을 함께 사용합니다. */
-    hr, .stMarkdown hr, .stDivider hr {{
-        border: none !important;
-        height: 4px !important;
-        background: linear-gradient(90deg, rgba(30,163,161,0.08), {accent}, rgba(30,163,161,0.08)) !important;
-        border-radius: 6px !important;
-        margin: 18px 0 !important;
-        box-shadow: 0 4px 12px rgba(30,163,161,0.06) inset;
-    }}
-    /* 사이드바 select 박스 - 심플하고 깔끔한 스타일 */
-    [data-testid="stSidebar"] .stSelectbox>div>div {{
-        background-color: rgba(255,255,255,0.98) !important;
-    border: 1px solid rgba(30,163,161,0.3) !important;
-        border-radius: 8px !important;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
-        transition: border-color 0.2s ease !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox>div>div:hover {{
-        border-color: {accent} !important;
-    box-shadow: 0 2px 8px rgba(30,163,161,0.12) !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox>div>div>div {{
-        color: {text} !important;
-        font-weight: 500 !important;
-        padding: 10px 12px !important;
-        font-size: 14px !important;
-    }}
-
-    /* 닫힌 상태 표시 박스 스타일은 기본으로 유지합니다. (사용자 요청: 하단은 회색 적용 안 함) */
-    
-    /* select 드롭다운 화살표 스타일링 */
-    [data-testid="stSidebar"] .stSelectbox svg {{
-        color: {accent} !important;
-        opacity: 0.7 !important;
-    }}
-    
-    /* 드롭다운 옵션 리스트 스타일링 */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
-        background-color: white !important;
-    border: 1px solid rgba(30,163,161,0.2) !important;
-        border-radius: 8px !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
-        margin-top: 2px !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
-        color: {text} !important;
-        padding: 8px 12px !important;
-        margin: 2px 4px !important;
-        border-radius: 4px !important;
-        font-size: 14px !important;
-        transition: background-color 0.15s ease !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox [role="option"]:hover {{
-    background-color: rgba(30,163,161,0.05) !important;
-        color: {accent} !important;
-    }}
-    
-    [data-testid="stSidebar"] .stSelectbox [aria-selected="true"] {{
-        background-color: {accent} !important;
-        color: white !important;
-        font-weight: 500 !important;
-    }}
-
-    /* 재스캔 필요 옵션 강조 표현: BaseWeb(라이브러리) aria-label을 활용해 매칭합니다. */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"] {{
-        color: #d62839 !important;
-        font-weight: 600 !important;
-        background-color: rgba(214,40,57,0.08) !important;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"][aria-label^="[재스캔]"] {{
-        background-color: rgba(214,40,57,0.14) !important;
-        color: #d62839 !important;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-label^="[재스캔]"]::before {{
-        content: "⚠ ";
-        font-weight: 700;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"] {{
-        color: #d62839 !important;
-        font-weight: 600 !important;
-    }}
-
-    [data-testid="stSidebar"] .stSelectbox>div>div>div[aria-label^="[재스캔]"]::before {{
-        content: "⚠ ";
-        margin-right: 4px;
-    }}
-
-    /* 드롭다운 목록에서 '선택된 옵션'을 더 시각적으로 강조합니다. */
-    /* 선택된 옵션은 파란색 대신 회색 배경으로 고정하여 '선택 중'을 표시합니다. */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"] {{
-        /* 목록 내부에서 선택된 항목을 더 진한 회색으로 표시 */
-        background-color: rgba(0,0,0,0.12) !important; /* 약간 더 진한 회색 */
-        color: {sidebar_text} !important; /* 진한 텍스트 */
-        font-weight: 700 !important;
-        border-radius: 0 0 6px 6px !important;
-        position: relative !important;
-    }}
-
-    /* 다양한 구현에서 선택 상태를 나타내는 속성에 모두 대응하여 회색 강조를 강제합니다. */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] {{
-        position: relative !important;
-        overflow: auto !important;
-        -webkit-overflow-scrolling: touch !important;
-    }}
-
-    /* 선택 상태에 대한 공통 규칙(목록 내부에서만 적용) */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"],
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-current="true"] {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-    }}
-
-    /* 선택된 항목은 목록에서 상단에 고정(sticky)되도록 함: 이미지2 스타일과 유사하게 보이게 함 */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"],
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][data-selected="true"] {{
-        position: -webkit-sticky !important;
-        position: sticky !important;
-        top: 0 !important;
-        z-index: 10 !important;
-        margin-top: 0 !important;
-    }}
-
-    /* hover가 선택 스타일을 덮어쓰지 않도록 유지 */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"]:hover {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-    }}
-
-    /* ===== 포털(오버레이)로 렌더되는 BaseWeb(라이브러리)/Select의 드롭다운을 직접 타깃합니다. =====
-       Streamlit은 드롭다운을 sidebar 바깥(포털)으로 렌더할 수 있어 기존 사이드바 내부 선택자로 매칭되지 않을 수 있습니다.
-       아래 규칙은 포털 내부의 listbox/option에 대해 동일한 강조(회색 배경, 진한 텍스트, sticky)를 강제합니다. */
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"],
-    .baseweb-portal [role="listbox"] [role="option"][data-selected="true"],
-    body > [role="listbox"] [role="option"][aria-selected="true"] {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-        position: sticky !important;
-        top: 0 !important;
-        z-index: 9999 !important;
-    }}
-
-    /* 포털 내 선택된 옵션이 hover에 의해 덮어쓰이지 않도록 함 */
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"]:hover {{
-        background-color: rgba(0,0,0,0.12) !important;
-        color: {sidebar_text} !important;
-    }}
-
-     /* ------------------------------------------------------------------
-         Streamlit이 생성하는 emotion 계열 클래스(예: st-emotion-cache-xxxxx, etx0m6x1 등)
-         을 직접 타깃팅하여 내부 텍스트 컨테이너에도 회색 배경과 패딩을 강제로 적용합니다.
-         - 사이드바 내부 렌더링과 포털(포털 = 오버레이)으로 렌더되는 드롭다운 모두를 포함합니다.
-         - 동적으로 생성되는 클래스명이 바뀔 수 있으므로 etx- 접두사의 클래스도 함께 커버합니다.
-         (이 블록은 설명용 주석이며 스타일 동작에는 영향이 없습니다.)
-     ------------------------------------------------------------------ */
-    /* 사이드바 내부 listbox */
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
-    [data-testid="stSidebar"] .stSelectbox [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
-        background-color: rgba(0,0,0,0.12) !important;
-        display: block !important;
-        padding: 8px 12px !important;
-        margin: -8px -12px !important; /* 옵션 컨테이너 패딩과 겹치지 않게 보정 */
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-        border-radius: 4px !important;
-    }}
-
-    /* 포털(오버레이)로 렌더된 listbox */
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
-    .baseweb-portal [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1,
-    body > [role="listbox"] [role="option"][aria-selected="true"] .st-emotion-cache-qiev7j,
-    body > [role="listbox"] [role="option"][aria-selected="true"] .etx0m6x1 {{
-        background-color: rgba(0,0,0,0.12) !important;
-        display: block !important;
-        padding: 8px 12px !important;
-        margin: -8px -12px !important;
-        color: {sidebar_text} !important;
-        font-weight: 700 !important;
-        border-radius: 4px !important;
-    }}
-
-    /* 선택된 옵션에 체크 표시를 추가해 사용자가 어떤 항목이 선택됐는지 바로 알 수 있도록 함 */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::after {{
-        content: "✔";
-        position: absolute;
-        right: 10px;
-        top: 50%;
-        transform: translateY(-50%);
-        color: {sidebar_text} !important; /* 회색 배경에 어울리는 진한 색상 */
-        font-weight: 700;
-    }}
-
-    /* 선택된 옵션 왼쪽에 컬러 바 추가하여 '현재 선택'을 시각적으로 강조 */
-    /* 왼쪽 컬러 바는 회색 톤으로 변경하여 전체가 회색 강조로 보이도록 함 */
-    [data-testid="stSidebar"] .stSelectbox [role="option"][aria-selected="true"]::before {{
-        content: "";
-        position: absolute;
-        left: 6px;
-        top: 8px;
-        bottom: 8px;
-        width: 4px;
-        background: rgba(0,0,0,0.25) !important; /* 진한 회색 바 */
-        border-radius: 2px;
-    }}
-
-    /* 옵션 텍스트가 왼쪽 컬러 바와 겹치지 않도록 패딩 보정 */
-    [data-testid="stSidebar"] .stSelectbox [role="option"] {{
-        padding-left: 18px !important;
-    }}
-    </style>
-    """
-    # 추가 스타일: KPI 카드, 썸네일 카드, 주요 액션 버튼 등 디자이너 스타일
-    extra = f"""
-    <style>
-        /* 비교 패널을 상단에 고정(floating) */
-        .float-compare {{
-            position: sticky;
-            top: 78px; /* 상단 헤더 및 KPI 높이에 따라 조정 */
-            z-index: 9999;
-            background: rgba(255,255,255,0.92);
-            padding: 10px 12px;
-            border-radius: 10px;
-            box-shadow: 0 8px 20px rgba(2,8,12,0.06);
-            margin-bottom: 12px;
-        }}
-
-    /* KPI 카드 레이아웃 */
-    .kpi-row {{ display:flex; gap:18px; align-items:stretch; margin:18px 0 22px; }}
-    .kpi-card {{ flex:1; background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:12px; padding:16px; box-shadow:{shadow}; display:flex; flex-direction:column; gap:6px; justify-content:center; min-height:92px; }}
-    .kpi-card .kpi-label {{ color:{secondary_text}; font-size:13px; }}
-    .kpi-card .kpi-value {{ color:{text}; font-size:22px; font-weight:700; }}
-    .kpi-card .kpi-icon {{ font-size:20px; opacity:0.9; }}
-    /* KPI 델타 배지: 값이 비어있으면 시각적으로 가려지도록 처리 가능(세션에서 값이 없으면 빈 문자열) */
-    .kpi-card {{ position: relative; }}
-    .kpi-card .kpi-delta {{
-        position: absolute;
-        top: 10px;
-        right: 12px;
-        font-size:12px;
-        padding:4px 8px;
-        border-radius:999px;
-        background: rgba(34,197,94,0.12);
-        color: #16a34a;
-        font-weight:700;
-        box-shadow: 0 4px 12px rgba(2,8,12,0.06);
-        display: inline-block;
-    }}
-    .kpi-card .kpi-delta.down {{ background: rgba(239,68,68,0.12); color:#ef4444; }}
-
-    /* 큰 파란 실행 버튼 (사이드바/상단에서 사용) */
-    .primary-action-btn {{
-    /* darker teal variant for gradient stop */
-    background: linear-gradient(180deg, {accent}, #157271) !important;
-        color: #fff !important; border: none !important; padding: 12px 18px !important;
-        border-radius: 12px !important; font-size: 16px !important; font-weight: 700 !important;
-    box-shadow: 0 8px 28px rgba(30,163,161,0.14) !important; cursor: pointer;
-    }}
-
-    /* 그룹 섹션 카드 및 썸네일 그리드 */
-    .group-card {{ background:{card_bg} !important; border:1px solid {card_border} !important; border-radius:14px; padding:14px; box-shadow:{shadow}; margin-bottom:18px; }}
-    .group-title {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; font-weight:700; color:{text}; }}
-    .thumb-grid {{ display:flex; gap:12px; flex-wrap:wrap; }}
-    .thumb-card {{ width:180px; border-radius:10px; overflow:hidden; background:linear-gradient(180deg, rgba(255,255,255,0.98), {card_bg}); border:1px solid rgba(15,23,42,0.04); box-shadow: 0 8px 20px rgba(2,8,12,0.06); padding:8px; position:relative; }}
-    .thumb-card img {{ display:block; width:100%; height:140px; object-fit:contain; background: #fff; }}
-    .thumb-caption {{ text-align:center; font-size:13px; color:{secondary_text}; margin-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-    .thumb-badge {{ position:absolute; top:8px; left:8px; background: rgba(255,255,255,0.95); color:{text}; padding:4px 8px; border-radius:999px; font-weight:600; font-size:12px; box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
-    .thumb-check {{ position:absolute; top:8px; right:8px; width:32px; height:32px; border-radius:8px; display:flex; align-items:center; justify-content:center; background: rgba(255,255,255,0.95); box-shadow:0 4px 12px rgba(2,8,12,0.06); }}
-    .thumb-card.selected {{ box-shadow: 0 12px 36px rgba(30,163,161,0.12); border:1px solid rgba(30,163,161,0.12); }}
-
-    @media (max-width: 900px) {{ .thumb-card {{ width: calc(50% - 12px); }} .kpi-row {{ flex-direction:column; gap:10px; }} }}
-    @media (max-width: 600px) {{ .thumb-card {{ width: calc(100% - 12px); }} }}
-    </style>
-    """
-    try:
-        st.markdown(css + extra, unsafe_allow_html=True)
-    except Exception:
-        # CSS 주입 실패는 UI만 영향을 주므로 안전하게 무시
-        pass
-
-_inject_theme_css(st.session_state.get('theme','Light (기본)'))
+_inject_theme_css(st.session_state.get('theme', DEFAULT_THEME_KEY))
 
 group_filter = st.session_state.get("group_filter", "전체")
 grid_cols = int(st.session_state.get("grid_cols", 5))
@@ -2651,20 +2171,6 @@ def toggle_compare(img_path: str):
         st.session_state["gallery_selected"] = st.session_state["gallery_selected"][1:] + [path]
     else:
         st.session_state["gallery_selected"].append(path)
-
-
-def toggle_delete_target(img_path: str):
-    """재스캔 탭 삭제 모드에서 선택 대상을 토글합니다."""
-    if not img_path:
-        return
-    targets = st.session_state.get("rescan_delete_targets", [])
-    if img_path in targets:
-        st.session_state.rescan_delete_targets = [p for p in targets if p != img_path]
-    else:
-        st.session_state.rescan_delete_targets = targets + [img_path]
-    st.session_state.rescan_delete_feedback = None
-
-
 def refresh_image_caches():
     """파일 삭제 후 이미지 관련 캐시와 경로 맵을 새로고침합니다."""
     global BASENAME_MAP
@@ -2732,94 +2238,7 @@ def _all_output_paths_by_basename(bn_lower: str) -> List[str]:
         return []
 
 
-def _remove_file_force(path: str) -> Optional[str]:
-    """파일 삭제를 시도합니다. 읽기 전용/권한 문제를 처리하며, 성공 시 None, 실패 시 에러메시지 반환."""
-    try:
-        if not os.path.isfile(path):
-            return "파일이 존재하지 않습니다."
-        try:
-            os.remove(path)
-            return None
-        except PermissionError:
-            try:
-                # 읽기 전용 해제 후 재시도 (Windows 대응)
-                os.chmod(path, stat.S_IWRITE)
-                os.remove(path)
-                return None
-            except Exception as exc:
-                return f"권한 문제: {exc}"
-        except Exception as exc:
-            return str(exc)
-    except Exception as exc:
-        return str(exc)
-
-
-def _clear_thumbnail_caches():
-    """썸네일/비교 이미지 캐시를 깨끗이 비웁니다."""
-    try:
-        if os.path.isdir(THUMB_DIR):
-            shutil.rmtree(THUMB_DIR, ignore_errors=True)
-    except Exception as exc:
-        logger.debug(f"썸네일 캐시 삭제 실패: {exc}")
-    try:
-        os.makedirs(os.path.join(THUMB_DIR, "disp_cache"), exist_ok=True)
-    except Exception:
-        pass
-
-
-def delete_selected_images(target_paths: List[str], also_delete_input: bool = False) -> Tuple[List[str], List[Tuple[str, str]]]:
-    """선택된 경로들을 기준으로 다음을 삭제합니다.
-    - OUTPUT_DIR 하위의 동일 베이스네임 파일들(예: grouped/, ok/, blank_answers/ 등)
-    - (옵션) artifacts/ordered_paths.txt에 기록된 원본 입력 폴더의 동일 베이스네임 파일들
-
-    Returns:
-        (성공 목록, 실패 (경로, 사유) 목록)
-    """
-    successes: List[str] = []
-    failures: List[Tuple[str, str]] = []
-
-    # 기준 베이스네임 집합 구성
-    base_names = set()
-    for p in target_paths:
-        if p:
-            base_names.add(os.path.basename(p).lower())
-
-    # OUTPUT에서 모든 매칭 파일 수집
-    to_delete: List[str] = []
-    for bn in base_names:
-        to_delete.extend(_all_output_paths_by_basename(bn))
-
-    # 원본 입력 경로 매칭 (선택적)
-    if also_delete_input:
-        input_map = load_input_basename_map()
-        for bn in base_names:
-            for src in input_map.get(bn, []):
-                to_delete.append(src)
-
-    # 중복 제거 및 존재 확인
-    unique_delete = []
-    seen = set()
-    for p in to_delete:
-        if not p or p in seen:
-            continue
-        seen.add(p)
-        if os.path.exists(p):
-            unique_delete.append(p)
-
-    # 실제 삭제 수행
-    for p in unique_delete:
-        err = _remove_file_force(p)
-        if err is None:
-            successes.append(p)
-        else:
-            failures.append((p, err))
-
-    # 캐시 및 맵 갱신
-    _clear_thumbnail_caches()
-    refresh_image_caches()
-
-    return successes, failures
-
+# (삭제) 파일 강제 삭제 헬퍼는 삭제 워크플로 제거로 더 이상 사용되지 않습니다.
 
 # 이미지를 base64로 인코딩하거나 카드 스타일을 생성하는 헬퍼들은
 # 대시보드 UI의 특정 동적 기능을 위해 존재했습니다. 소규모 파이프라인용으로는
@@ -2849,50 +2268,21 @@ def render_rescan_image_card(img_path: str, caption: str, key_suffix: str, targe
         return
 
     display_path = make_display_image(img_path, size=target_px, fmt=disp_fmt, quality=quality)
-    delete_mode = st.session_state.get("rescan_delete_mode", False)
-    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
-    selected = img_path in st.session_state.get("rescan_delete_targets", [])
-
-    # 공용 래퍼 클래스: CSS로 일관된 카드 스타일을 적용할 수 있도록 합니다.
+    # 공용 래퍼 클래스: 간단한 카드 스타일 적용
+    selected = img_path in st.session_state.get("gallery_selected", [])
     wrapper_class = f"thumb-card{' selected' if selected else ''}"
 
-    if delete_mode:
-        # 삭제 모드: 래퍼를 사용해 선택 상태를 시각적으로 표시
-        container_key = f"img_container_{key_suffix}"
-        button_key = f"select_btn_{key_suffix}"
+    st.markdown(f'<div class="{wrapper_class}" style="padding:8px; border-radius:12px;">', unsafe_allow_html=True)
+    st.image(_safe_image_open(display_path), caption=caption, use_container_width=True)
 
-        border_style = "border: 4px solid #ef4444; box-shadow: 0 0 0 6px rgba(239,68,68,0.18);" if selected else "border: 2px solid rgba(148,163,184,0.12);"
-        badge_text = "✓ 삭제 대상" if selected else "클릭하여 선택"
+    # 비교 선택 버튼 (삭제 기능 제거)
+    button_label = "선택됨" if selected else "선택"
+    button_key = f"cmp_rescan_card_{key_suffix}"
+    if st.button(button_label, key=button_key, use_container_width=True, type=("primary" if selected else "secondary")):
+        toggle_compare(img_path)
+        st.rerun()
 
-        # 카드 시작
-        st.markdown(f'<div class="{wrapper_class}" style="{border_style} padding:8px; border-radius:12px;">', unsafe_allow_html=True)
-
-        # 이미지 표시
-        st.image(_safe_image_open(display_path), use_container_width=True)
-
-        # 우측 상단 체크(시각적) 표시
-        st.markdown(f'<div class="thumb-check">{"✔" if selected else ""}</div>', unsafe_allow_html=True)
-
-        # 하단 캡션
-        st.markdown(f'<div style="position:relative; margin-top:8px;"><small style="color: rgba(80,80,80,0.9);">{caption}</small></div>', unsafe_allow_html=True)
-
-        # 카드 닫기
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        # 선택 토글 버튼(기능은 기존과 동일)
-        if st.button("🗑️ 선택" if not selected else "✓ 선택됨",
-                    key=button_key,
-                    disabled=waiting_confirm,
-                    on_click=toggle_delete_target,
-                    args=(img_path,),
-                    type="primary" if selected else "secondary",
-                    use_container_width=True):
-            pass
-    else:
-        # 일반 모드: 카드형 썸네일로 표시
-        st.markdown(f'<div class="{wrapper_class}" style="padding:8px; border-radius:12px;">', unsafe_allow_html=True)
-        st.image(_safe_image_open(display_path), caption=caption, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def on_image_click(img_path: str):
     """이미지를 클릭했을 때 비교 선택을 처리합니다."""
@@ -2981,79 +2371,7 @@ cmp_pair = _render_global_compare()
 
 # === Tab: 재스캔 필요 ===
 if st.session_state["main_tab"] == "재스캔 필요":
-    delete_mode = st.session_state.get("rescan_delete_mode", False)
-    delete_targets = st.session_state.get("rescan_delete_targets", [])
-    waiting_confirm = st.session_state.get("rescan_show_confirm", False)
-
-    feedback = st.session_state.get("rescan_delete_feedback")
-    if feedback:
-        level, message = feedback
-        if level == "success":
-            st.success(message)
-        elif level == "error":
-            st.error(message)
-        else:
-            st.warning(message)
-        st.session_state.rescan_delete_feedback = None
-
-    if delete_mode and not waiting_confirm:
-        if delete_targets:
-            st.info(f"삭제 대상 {len(delete_targets)}개 선택됨: {', '.join(os.path.basename(p) for p in delete_targets)}")
-        else:
-            st.info("삭제할 이미지를 선택하세요. 이미지 아래의 '🗑️ 선택' 버튼을 눌러 토글할 수 있습니다.")
-
-    if waiting_confirm:
-        st.warning("선택한 이미지를 삭제하시겠습니까?")
-        if delete_targets:
-            grid_cols_confirm = min(4, max(1, len(delete_targets)))
-            confirm_grid = st.columns(grid_cols_confirm)
-            for idx, pth in enumerate(delete_targets):
-                with confirm_grid[idx % grid_cols_confirm]:
-                    if pth and os.path.isfile(pth):
-                        # 최종 확인 단계에서는 썸네일 대신 고해상도 미리보기 사용
-                        confirm_preview = make_display_image(
-                            pth,
-                            size=max(rescan_large_px, 1400),
-                            fmt=disp_fmt,
-                            quality=rescan_disp_quality,
-                        )
-                        st.image(_safe_image_open(confirm_preview), caption=os.path.basename(pth), use_container_width=True)
-                    else:
-                        st.info(f"파일을 찾을 수 없음: {os.path.basename(pth) if pth else '알 수 없음'}")
-        # 옵션: 원본 입력 폴더에서도 같은 파일명을 삭제
-        also_del_input = st.checkbox("입력 폴더에서도 같은 이름의 파일 삭제", value=False, help="파이프라인 입력으로 사용된 원본 폴더(artifacts/ordered_paths.txt 기준)에서도 동일한 파일명을 찾아 함께 삭제합니다.")
-        confirm_cols = st.columns([1, 1, 6])
-        with confirm_cols[0]:
-            if st.button("네, 삭제합니다", key="rescan_delete_confirm_yes"):
-                successes, failures = delete_selected_images(delete_targets, also_delete_input=also_del_input)
-
-                # 성공한 경우 비교 선택 상태에서 제거합니다.
-                if successes and "gallery_selected" in st.session_state:
-                    st.session_state.gallery_selected = [p for p in st.session_state.gallery_selected if p not in successes]
-
-                if failures and successes:
-                    msg = "일부 파일만 삭제되었습니다: " + ", ".join(os.path.basename(p) for p, _ in failures)
-                    st.session_state.rescan_delete_feedback = ("error", msg)
-                elif failures and not successes:
-                    detail = "; ".join(f"{os.path.basename(p)}: {err}" for p, err in failures)
-                    st.session_state.rescan_delete_feedback = ("error", f"삭제 실패: {detail}")
-                elif successes:
-                    st.session_state.rescan_delete_feedback = ("success", f"{len(successes)}개 파일을 삭제했습니다.")
-                else:
-                    st.session_state.rescan_delete_feedback = ("warn", "삭제할 파일이 없습니다.")
-
-                st.session_state.rescan_delete_targets = []
-                st.session_state.rescan_delete_mode = False
-                st.session_state.rescan_show_confirm = False
-
-                _request_rerun()
-
-        with confirm_cols[1]:
-            if st.button("취소", key="rescan_delete_confirm_no"):
-                st.session_state.rescan_show_confirm = False
-                st.session_state.rescan_delete_mode = False
-                st.session_state.rescan_delete_targets = []
-                st.session_state.rescan_delete_feedback = None
+    # (삭제) 재스캔 탭의 파일 삭제/확인 UI는 제거되어 단순한 후보 표시 및 비교만 제공합니다.
 
     try:
         import imagehash
@@ -3142,187 +2460,61 @@ if st.session_state["main_tab"] == "재스캔 필요":
     # rescan 탭의 상단에 바로 비교 옵션과 결과가 표시되도록 함
     # 통합된 gallery_selected(경로 리스트) 사용
     sel_exist_top = [p for p in st.session_state.get("gallery_selected", []) if p and os.path.isfile(p)]
-    if sel_exist_top:
-        # 비교 패널을 상단에 고정하기 위해 float-compare 래퍼에 넣습니다.
-        st.markdown('<div class="float-compare">', unsafe_allow_html=True)
-        st.markdown("---")
-        st.markdown("### 🔍 즉시 비교 (재스캔 탭)")
-        
-        # 현재 선택된 이미지 정보 표시
-        if len(sel_exist_top) == 1:
-            st.info(f"📁 선택된 이미지: **{os.path.basename(sel_exist_top[0])}**")
-        elif len(sel_exist_top) >= 2:
-            a_name, b_name = os.path.basename(sel_exist_top[0]), os.path.basename(sel_exist_top[1])
-            st.info(f"📁 비교 대상: **A**: {a_name} ↔ **B**: {b_name}")
-            if len(sel_exist_top) > 2:
-                st.caption(f" 추가로 {len(sel_exist_top)-2}개 이미지가 더 선택되어 있습니다. (최대 2개까지 비교)")
-    
-    # 공통: 모드 선택 + 도움말 옆에 배치
-        colm1, colm2 = st.columns([3, 7])
-        with colm1:
-            # 내부 값(key)은 변경하지 않되, 사용자에게 보이는 라벨은 한국어로 제공합니다.
-            cmp_mode_top = st.radio("보기 표시 (재스캔)", ["비교(좌우)","페이드(겹침)", "차이(Heatmap)", "하이라이터(오버레이)"], index=0, horizontal=True, key="cmp_mode_top")
-        with colm2:
-            # 선택된 비교 모드에 해당하는 설명만 표시
-            # cmp_mode_top 내부값은 라디오의 label로 들어가므로 위젯의 라벨에 따라 분기합니다.
-            if cmp_mode_top == "비교(좌우)":
-                st.markdown(
-                    "**비교(좌우)**\n"
-                    "- 선택한 두 이미지를 좌우로 나란히 크게 보여줍니다. 빠르게 원본 대비를 확인할 때 사용하세요.\n"
-                )
-            elif cmp_mode_top == "페이드(겹침)":
-                st.markdown(
-                    "**페이드(겹침)**\n"
-                    "- 두 이미지를 위아래로 겹쳐 보여줍니다. A 이미지의 투명도(alpha)를 조절해 미세한 변화 위치를 문맥과 함께 확인하세요.\n"
-                    "- 권장: A alpha = 0.4–0.6\n"
-                    "- 팁: 전체 레이아웃을 보존하므로 레이아웃 변화 식별에 유리합니다.\n"
-                )
-            elif cmp_mode_top == "차이(Heatmap)":
-                st.markdown(
-                    "**차이(Heatmap)**\n"
-                    "- 그레이스케일 절대 차이를 계산해 heatmap으로 표시합니다. 픽셀 단위 변경을 강조합니다.\n"
-                    "- 권장: Blur = 3, Threshold = 10\n"
-                    "- 팁: 노이즈에 민감하므로 Blur/Threshold 조정으로 노이즈를 억제하세요.\n"
-                )
-            else:
-                st.markdown(
-                    "**하이라이터(오버레이)**\n"
-                    "- 차이 마스크를 색상으로 원본 이미지에 오버레이합니다. 글자 추가/삭제 같은 의미 있는 변경을 빠르게 파악할 때 유용합니다.\n"
-                    "- 권장: Threshold = 15, 색상 = Yellow\n"
-                )
+    # 단순화된 즉시 비교: 복잡한 모드(페이드/하이라이터/Heatmap 등)를 제거하고
+    # 항상 좌우 비교(또는 단일 이미지 대형 표시)만 제공합니다.
+    st.markdown('<div class="float-compare">', unsafe_allow_html=True)
+    # (제거됨) 재스캔 탭 내부에 중복으로 들어가던 그라데이션 선은 전역 위치에서만 렌더됩니다.
+    st.markdown("### 🔍 즉시 비교 (재스캔 탭)")
 
-        # 모드별 파라미터 제어. '비교'는 추가 컨트롤이 없습니다.
-        # 위젯이 렌더되지 않더라도 해당 변수가 존재하도록 보장(재실행 시 NameError 방지)
-        # 기본값을 제공; 실제 위젯 선택 시 Streamlit이 세션 상태를 갱신합니다.
-        if 'diff_blur_top' not in st.session_state:
-            st.session_state['diff_blur_top'] = 3
-        if 'diff_thresh_top' not in st.session_state:
-            st.session_state['diff_thresh_top'] = 10
-        if 'hl_color_top' not in st.session_state:
-            st.session_state['hl_color_top'] = 'Yellow'
-        if 'hl_thresh_top' not in st.session_state:
-            st.session_state['hl_thresh_top'] = 20
-        # 페이드(블렌드) 기본값
-        if 'fade_alpha_top' not in st.session_state:
-            st.session_state['fade_alpha_top'] = 0.5
+    # 현재 선택된 이미지 정보 표시
+    if len(sel_exist_top) == 1:
+        st.info(f"📁 선택된 이미지: **{os.path.basename(sel_exist_top[0])}**")
+    elif len(sel_exist_top) >= 2:
+        a_name, b_name = os.path.basename(sel_exist_top[0]), os.path.basename(sel_exist_top[1])
+        st.info(f"📁 비교 대상: **A**: {a_name} ↔ **B**: {b_name}")
+        if len(sel_exist_top) > 2:
+            st.caption(f" 추가로 {len(sel_exist_top)-2}개 이미지가 더 선택되어 있습니다. (최대 2개까지 비교)")
 
-        # 모드별 파라미터 위젯 (세션 상태를 갱신함)
-        param_cols = st.columns([2, 2, 6])
-        if cmp_mode_top == "비교(좌우)":
-            # 단순 좌우 비교는 별도의 파라미터 없음
-            pass
-        elif cmp_mode_top == "페이드(겹침)":
-            with param_cols[0]:
-                fade_alpha_top = st.slider("A 이미지 알파", 0.0, 1.0, float(st.session_state.get('fade_alpha_top', 0.5)), 0.05, key='fade_alpha_top')
-        elif cmp_mode_top == "차이(Heatmap)":
-            with param_cols[0]:
-                diff_blur_top = st.slider("블러", 1, 9, st.session_state.get('diff_blur_top', 3), 2, key='diff_blur_top')
-            with param_cols[1]:
-                diff_thresh_top = st.slider("임계값", 1, 50, st.session_state.get('diff_thresh_top', 10), 1, key='diff_thresh_top')
-        elif cmp_mode_top == "하이라이터(오버레이)":
-            with param_cols[0]:
-                hl_color_top = st.selectbox("하이라이터 색상", ["Yellow", "Red", "Lime", "Cyan"], index=["Yellow", "Red", "Lime", "Cyan"].index(st.session_state.get('hl_color_top', 'Yellow')), key="hl_color_top")
-            with param_cols[1]:
-                hl_thresh_top = st.slider("임계값", 1, 100, st.session_state.get('hl_thresh_top', 20), 1, key="hl_thresh_top")
+    # 간단한 클리어/해제 버튼
+    if len(sel_exist_top) == 1:
+        clear_single_col = st.columns([1, 9])
+        with clear_single_col[0]:
+            if st.button("🗑️ 해제", key="clear_single_top", help="선택한 이미지 해제"):
+                st.session_state["gallery_selected"] = []
+                st.rerun()
 
-        if len(sel_exist_top) == 1:
-            # 1개 선택 시에도 해제 버튼 제공
-            clear_single_col = st.columns([1, 9])
-            with clear_single_col[0]:
-                if st.button("🗑️ 해제", key="clear_single_top", help="선택한 이미지 해제"):
-                    st.session_state["gallery_selected"] = []
+        bigp = make_display_image(sel_exist_top[0], size=max(1400, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
+        st.image(_safe_image_open(bigp), caption=os.path.basename(sel_exist_top[0]), use_container_width=True)
+    elif len(sel_exist_top) >= 2:
+        a_path, b_path = sel_exist_top[:2]
+        # 선택 해제 버튼들
+        clear_cols = st.columns([1, 1, 1, 7])
+        with clear_cols[0]:
+            if st.button("🗑️ A 해제", key="clear_a_top", help="첫 번째 선택 이미지 해제"):
+                if a_path in st.session_state["gallery_selected"]:
+                    st.session_state["gallery_selected"].remove(a_path)
                     st.rerun()
-            
-            bigp = make_display_image(sel_exist_top[0], size=max(1400, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
-            st.image(_safe_image_open(bigp), caption=os.path.basename(sel_exist_top[0]), use_container_width=True)
-        elif len(sel_exist_top) >= 2:
-            a_path, b_path = sel_exist_top[:2]
-            
-            # 선택 해제 버튼들
-            clear_cols = st.columns([1, 1, 1, 7])
-            with clear_cols[0]:
-                if st.button("🗑️ A 해제", key="clear_a_top", help="첫 번째 선택 이미지 해제"):
-                    if a_path in st.session_state["gallery_selected"]:
-                        st.session_state["gallery_selected"].remove(a_path)
-                        st.rerun()
-            with clear_cols[1]:
-                if st.button("🗑️ B 해제", key="clear_b_top", help="두 번째 선택 이미지 해제"):
-                    if b_path in st.session_state["gallery_selected"]:
-                        st.session_state["gallery_selected"].remove(b_path)
-                        st.rerun()
-            with clear_cols[2]:
-                if st.button("🗑️ 전체 해제", key="clear_all_top", help="모든 선택 이미지 해제"):
-                    st.session_state["gallery_selected"] = []
+        with clear_cols[1]:
+            if st.button("🗑️ B 해제", key="clear_b_top", help="두 번째 선택 이미지 해제"):
+                if b_path in st.session_state["gallery_selected"]:
+                    st.session_state["gallery_selected"].remove(b_path)
                     st.rerun()
-            
-            # 사용자가 단순 비교(좌우)를 선택하면 두 이미지를 나란히 표시; 그렇지 않으면 병합/처리된 단일 이미지를 표시
-            if cmp_mode_top == "비교(좌우)":
-                big_a = make_display_image(a_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
-                big_b = make_display_image(b_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
-                c1t, c2t = st.columns(2)
-                with c1t:
-                    st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
-                with c2t:
-                    st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
-            else:
-                try:
-                    if cmp_mode_top == "페이드(겹침)":
-                        fade_alpha_val = float(st.session_state.get('fade_alpha_top', 0.5))
-                        blendp = _cached_blend_path(a_path, b_path, alpha=fade_alpha_val)
-                        if blendp and os.path.exists(blendp):
-                            st.image(blendp, caption=f"페이드 블렌드 (A 알파={fade_alpha_val:.2f})", use_container_width=True)
-                        else:
-                            arr = _blend_images_rgb(a_path, b_path, alpha=fade_alpha_val)
-                            st.image(arr, caption=f"페이드 블렌드 (A 알파={fade_alpha_val:.2f})", use_container_width=True)
-                    elif cmp_mode_top == "차이(Heatmap)":
-                        blur_val = st.session_state.get('diff_blur_top', 3)
-                        thresh_val = st.session_state.get('diff_thresh_top', 10)
-                        try:
-                            # 캐시된 heatmap 사용
-                            cached_heatmap = _cached_heatmap_path(a_path, b_path, blur_size=blur_val, threshold=thresh_val)
-                            if cached_heatmap and os.path.exists(cached_heatmap):
-                                st.image(cached_heatmap, caption=f"차이 Heatmap (블러={blur_val}, 임계={thresh_val})", use_container_width=True)
-                            else:
-                                # 캐시 실패 시 직접 생성
-                                a_gray, b_gray = _read_gray_same_size(a_path, b_path)
-                                heatmap = _absdiff_heatmap(a_gray, b_gray, blur_size=blur_val, threshold=thresh_val)
-                                st.image(heatmap, caption=f"차이 Heatmap (블러={blur_val}, 임계={thresh_val})", use_container_width=True)
-                        except Exception as he:
-                            st.error(f"Heatmap 생성 실패: {he}")
-                            # 폴백: 기본 좌우 비교
-                            big_a = make_display_image(a_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
-                            big_b = make_display_image(b_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
-                            c1t, c2t = st.columns(2)
-                            with c1t:
-                                st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
-                            with c2t:
-                                st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
-                    elif cmp_mode_top == "하이라이터(오버레이)":
-                        color_map = {"Yellow": (0, 255, 255), "Red": (0, 0, 255), "Lime": (0, 255, 0), "Cyan": (255, 255, 0)}
-                        # session_state에서 값을 읽되, NameError 방지를 위해 기본값을 사용
-                        hl_color = st.session_state.get('hl_color_top', 'Yellow')
-                        hl_thresh = st.session_state.get('hl_thresh_top', 20)
-                        col_bgr = color_map.get(hl_color, (0, 255, 255))
-                        cached = _cached_highlight_path(a_path, b_path, color=col_bgr, thresh=hl_thresh)
-                        if cached and os.path.exists(cached):
-                            st.image(cached, caption=f"하이라이터 오버레이 ({hl_color}, 임계={hl_thresh})", use_container_width=True)
-                        else:
-                            highlighted = _highlight_differences_rgb(a_path, b_path, color=col_bgr, thresh=hl_thresh)
-                            st.image(highlighted, caption=f"하이라이터 오버레이 ({hl_color}, 임계={hl_thresh})", use_container_width=True)
-                except Exception as e:
-                    st.error(f"비교 렌더링 실패: {e}")
-                    # 오류 발생 시 기본 좌우 비교로 폴백
-                    st.info("기본 좌우 비교로 표시합니다.")
-                    big_a = make_display_image(a_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
-                    big_b = make_display_image(b_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
-                    c1t, c2t = st.columns(2)
-                    with c1t:
-                        st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
-                    with c2t:
-                        st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
+        with clear_cols[2]:
+            if st.button("🗑️ 전체 해제", key="clear_all_top", help="모든 선택 이미지 해제"):
+                st.session_state["gallery_selected"] = []
+                st.rerun()
 
-        # 비교 패널 래퍼 종료
-        st.markdown('</div>', unsafe_allow_html=True)
+        # 기본 좌우 비교(간단히 이미지 2장 나란히 표시)
+        big_a = make_display_image(a_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
+        big_b = make_display_image(b_path, size=max(1600, rescan_large_px), fmt=disp_fmt, quality=rescan_disp_quality)
+        c1t, c2t = st.columns(2)
+        with c1t:
+            st.image(_safe_image_open(big_a), caption=f"A: {os.path.basename(a_path)}", use_container_width=True)
+        with c2t:
+            st.image(_safe_image_open(big_b), caption=f"B: {os.path.basename(b_path)}", use_container_width=True)
+
+    # 비교 패널 래퍼 종료
+    st.markdown('</div>', unsafe_allow_html=True)
     # 파이프라인이 grouped/ok/blank_answers 폴더를 생성하지 않으므로
     # 파일시스템의 grouped 디렉터리 전용 로직을 제거했습니다.
     # 대신 리포트(df)와 images_summary(img_df)를 기반으로 후보를 렌더링합니다.
@@ -3345,7 +2537,6 @@ if st.session_state["main_tab"] == "재스캔 필요":
         st.info("표시할 재스캔 후보 그룹이 없습니다.")
     else:
         view_mode = st.session_state.get("group_view_mode", "그리드(다중 썸네일)")
-        delete_mode = st.session_state.get("rescan_delete_mode", False)
         per_row = 2 if view_mode == "대형 비교(2열)" else 4
         display_px = rescan_large_px if view_mode == "대형 비교(2열)" else rescan_thumb_px
         card_height = 320 if view_mode == "대형 비교(2열)" else 220
@@ -3394,16 +2585,7 @@ if st.session_state["main_tab"] == "재스캔 필요":
                 label = f"{entry['kind']}: {entry['name']}"
                 path = entry["path"]
 
-                if delete_mode:
-                    render_rescan_image_card(
-                        path,
-                        label,
-                        key_stub,
-                        display_px,
-                        rescan_disp_quality,
-                        card_height=card_height,
-                    )
-                    return
+                # (삭제) 삭제 모드 관련 렌더링 제거: 항상 기본 타일/비교 선택 UI를 사용합니다.
 
                 selected = path in st.session_state.get("gallery_selected", [])
                 # 표시용 배지: 선택된 경우 A/B 순서를 캡션에 추가하여
