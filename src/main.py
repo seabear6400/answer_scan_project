@@ -169,6 +169,8 @@ def parse_args():
     # 이를 무시하도록 parse_known_args를 사용합니다.
     p = argparse.ArgumentParser(description="Answer Sheet QA — pipeline & dashboard (Handwriting-Optimized)")
     p.add_argument("--output_dir", default=None)
+    # 비대화형(헤드리스) 실행을 위한 입력 폴더 인자
+    p.add_argument("--input_dir", default=None, help="대화상자 대신 사용할 입력 폴더 경로")
 
     # ANN 파라미터
     p.add_argument("--k", type=int, default=12)
@@ -203,27 +205,33 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다.
-    try:
-        if _tk_warmed and _tk_mods:
-            tk, filedialog = _tk_mods
-        else:
-            import tkinter as tk
-            from tkinter import filedialog
 
-    # 대화상자를 위한 단기간의 루트를 생성하고 최상위로 표시되도록 합니다.
-        root = tk.Tk()
-        root.attributes('-topmost', True)
-        root.withdraw()
-        print("📁 폴더를 선택하세요...")
-        sel = filedialog.askdirectory(title="분석할 폴더 선택")
+    # --input_dir가 지정된 경우 대화상자 없이 해당 폴더를 사용합니다 (비대화형 실행 지원).
+    sel = None
+    if getattr(args, "input_dir", None):
+        sel = args.input_dir
+    else:
+        # GUI로 폴더 선택: 사용자가 폴더를 선택하면 그 폴더를 분석합니다.
         try:
-            root.destroy()
+            if _tk_warmed and _tk_mods:
+                tk, filedialog = _tk_mods
+            else:
+                import tkinter as tk
+                from tkinter import filedialog
+
+            # 대화상자를 위한 단기간의 루트를 생성하고 최상위로 표시되도록 합니다.
+            root = tk.Tk()
+            root.attributes('-topmost', True)
+            root.withdraw()
+            print("📁 폴더를 선택하세요...")
+            sel = filedialog.askdirectory(title="분석할 폴더 선택")
+            try:
+                root.destroy()
+            except Exception:
+                pass
         except Exception:
-            pass
-    except Exception:
-        print("파일 선택 UI를 초기화하지 못했습니다.")
-        sel = ()
+            print("파일 선택 UI를 초기화하지 못했습니다.")
+            sel = ()
     # 사용자가 폴더를 선택한 직후의 타임스탬프를 기록합니다.
     # (요구사항: "폴더 선택 시점 → 대시보드 준비 완료"의 실제 경과를 측정)
     selection_ts = time.time() if sel else None
