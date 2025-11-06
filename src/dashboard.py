@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Tuple, List, Dict, Optional
 import base64
 import argparse
+from string import Template
 
 import streamlit as st
 import polars as pl
@@ -60,7 +61,10 @@ if "logger" not in globals():
     logger.setLevel(logging.WARNING)
 
 if "BASE_OUTPUT_DIR" not in globals():
-    BASE_OUTPUT_DIR = Path.cwd()
+    # 기본 분석 경로는 명시적으로 설정되지 않았다면 빈 문자열으로 둡니다.
+    # 기존에는 작업 디렉터리(Path.cwd())가 기본이었는데, 이는 리포지토리
+    # 루트가 자동으로 선택되는 원인이 되어 사용자 기대와 달랐습니다.
+    BASE_OUTPUT_DIR = ""
 
 if "CLI_BASE_DIR" not in globals():
     CLI_BASE_DIR = BASE_OUTPUT_DIR
@@ -76,6 +80,29 @@ if "CLI_DEFAULT_RESULT" not in globals():
 
 if "SELECTION_ROOT" not in globals():
     SELECTION_ROOT = None
+
+# 사용자가 이전 세션에서 기본값으로 작업 디렉터리를 저장해 둔 경우,
+# 앱 시작 시 자동으로 그 값을 기본으로 사용하지 않도록 정리합니다.
+try:
+    if hasattr(st, 'session_state'):
+        cwd_str = str(Path.cwd())
+        try:
+            if st.session_state.get("result_base_dir") == cwd_str:
+                st.session_state["result_base_dir"] = ""
+        except Exception:
+            pass
+        try:
+            if st.session_state.get("result_base_input") == cwd_str:
+                st.session_state["result_base_input"] = ""
+        except Exception:
+            pass
+        try:
+            if st.session_state.get("_cli_base_marker") == cwd_str:
+                st.session_state.pop("_cli_base_marker", None)
+        except Exception:
+            pass
+except Exception:
+    pass
 
 # ===== 테마 및 CSS 주입 =====
 DEFAULT_THEME_KEY = 'Light (기본)'
@@ -404,6 +431,56 @@ def _inject_theme_css(mode: Optional[str] = None):
         # CSS 주입 실패는 UI에만 영향을 주므로 조용히 넘어갑니다.
         pass
 
+
+# ===== 결과 옵션 라벨 포맷 유틸 (사이드바의 selectbox에서 사용되므로
+# 이 정의는 `path_tab` 블록보다 먼저 있어야 합니다.)
+def _format_result_option(path_str: str) -> str:
+    """결과 폴더 옵션을 사람이 읽기 좋은 라벨로 변환합니다.
+
+    - 입력은 문자열 또는 Path처럼 보이는 값입니다.
+    - 가능한 경우 `BASE_OUTPUT_DIR`에 상대 경로로 표시합니다.
+    - RESULT_META의 상태에 따라 접두사(예: [재스캔])를 붙입니다.
+    이 함수는 사이드바에서 바로 호출되므로 파일 상단(또는 path_tab 앞)에
+    정의되어 있어야 합니다.
+    """
+    try:
+        p = Path(path_str)
+    except Exception:
+        p = Path(str(path_str))
+
+    # BASE_OUTPUT_DIR은 전역에서 Path 또는 문자열일 수 있으므로 안전하게 처리
+    try:
+        base = Path(BASE_OUTPUT_DIR) if BASE_OUTPUT_DIR is not None else None
+    except Exception:
+        try:
+            base = Path(str(BASE_OUTPUT_DIR))
+        except Exception:
+            base = None
+
+    # 상대 경로로 표현이 가능하면 더 짧은 라벨 사용
+    try:
+        if base is not None:
+            rel = p.relative_to(base)
+            label = str(rel) if rel.parts else str(p)
+        else:
+            label = str(p)
+    except Exception:
+        label = str(p)
+
+    # 메타 정보에서 상태를 읽어 접두사 추가
+    meta = globals().get('RESULT_META', {}) or {}
+    meta_for_path = meta.get(str(p), {})
+    prefix = ""
+    try:
+        if meta_for_path.get("needs_rescan"):
+            prefix = "[재스캔] "
+        elif not meta_for_path.get("has_report"):
+            prefix = "[결과 대기] "
+    except Exception:
+        prefix = ""
+
+    return f"{prefix}{label}" if prefix else label
+
 if "_normalize_base_dir" not in globals():
     # 기본적인 정규화 함수: 전달된 경로를 안전하게 절대경로로 변환합니다.
     def _normalize_base_dir(p: Path, selection_root=None) -> Path:
@@ -649,35 +726,55 @@ def _handle_uploaded_zip(uploaded_zip, source_tag: str = "sidebar") -> None:
     """
     if uploaded_zip is None:
         return
+
     try:
         import zipfile
-        import io
         import time
+        import tempfile
     except Exception as exc:
         st.error(f"ZIP 처리를 위한 모듈을 불러오지 못했습니다: {exc}")
         return
 
-    # 1) 업로드 바이트를 확보해 토큰(SHA1) 생성: 동일 파일 중복 업로드 방지용입니다.
-    upload_bytes = None
-    try:
-        upload_bytes = uploaded_zip.getvalue()
-    except Exception:
-        try:
-            uploaded_zip.seek(0)
-        except Exception:
-            pass
-        try:
-            upload_bytes = uploaded_zip.read()
-        except Exception:
-            upload_bytes = None
+    # 안전 상한값: 압축 파일 업로드 크기/압축 해제 용량/파일 개수/단일 파일 크기를 제한합니다.
+    MAX_UPLOAD_SIZE = 512 * 1024 * 1024  # 512MB 이상이면 거부
+    MAX_TOTAL_EXTRACT = 1_500 * 1024 * 1024  # 1.5GB 이상 해제하지 않음
+    MAX_MEMBER_COUNT = 4000  # 비정상적으로 많은 파일은 압축 폭탄 가능성
+    MAX_SINGLE_FILE = 300 * 1024 * 1024  # 단일 파일 300MB 제한
 
-    if upload_bytes is not None:
-        upload_token = hashlib.sha1(upload_bytes).hexdigest()
-    else:
-        name = getattr(uploaded_zip, "name", "") or ""
-        size = getattr(uploaded_zip, "size", 0) or 0
-        seed = f"{name}:{size}"
-        upload_token = hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()
+    # 1) 업로드 스트림을 임시 파일로 복사하며 SHA1 해시를 계산합니다.
+    #    메모리에 전체를 올리지 않고 순차적으로 처리해 대용량에서도 안전합니다.
+    sha1 = hashlib.sha1()
+    total_read = 0
+    temp_path = None
+    chunk_size = 4 * 1024 * 1024  # 4MB씩 처리
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+            temp_path = tmp.name
+            try:
+                uploaded_zip.seek(0)
+            except Exception:
+                pass
+
+            while True:
+                chunk = uploaded_zip.read(chunk_size)
+                if not chunk:
+                    break
+                total_read += len(chunk)
+                if total_read > MAX_UPLOAD_SIZE:
+                    raise ValueError("업로드한 ZIP이 허용 용량(512MB)을 초과했습니다.")
+                sha1.update(chunk)
+                tmp.write(chunk)
+
+        upload_token = sha1.hexdigest()
+    except Exception as exc:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        st.error(f"ZIP 업로드를 처리하는 중 오류가 발생했습니다: {exc}")
+        return
 
     # 2) 기존에 동일 ZIP이 적용된 경우 안내 후 재분석 버튼만 노출합니다.
     if upload_token in st.session_state["auto_applied_zip_tokens"]:
@@ -689,6 +786,15 @@ def _handle_uploaded_zip(uploaded_zip, source_tag: str = "sidebar") -> None:
                 _start_analysis_uploaded_cb(prev_dest)
         else:
             st.info("다른 파일을 업로드해 주세요.")
+        try:
+            uploaded_zip.seek(0)
+        except Exception:
+            pass
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         return
 
     # 3) ZIP을 추출할 루트를 준비합니다.
@@ -711,47 +817,115 @@ def _handle_uploaded_zip(uploaded_zip, source_tag: str = "sidebar") -> None:
     else:
         dest_dir = os.path.join(extract_root, f"upload_{ts}")
 
-    # 4) ZIP 추출: 경로 탈출을 막으며 파일만 안전하게 기록합니다.
+    # 4) ZIP을 검사 및 추출: 경로 탈출, 압축 폭탄, 심볼릭 링크 등을 방지합니다.
+    extracted_any = False
     try:
-        if upload_bytes is not None:
-            zf = zipfile.ZipFile(io.BytesIO(upload_bytes))
-        else:
-            try:
-                uploaded_zip.seek(0)
-            except Exception:
-                pass
-            zf = zipfile.ZipFile(uploaded_zip)
+        with zipfile.ZipFile(temp_path, "r") as zf:
+            members = zf.infolist()
 
-        for member in zf.infolist():
-            member_name = member.filename
-            normalized = os.path.normpath(member_name)
-            if normalized.startswith("..") or os.path.isabs(normalized):
-                logger.warning(f"ZIP 내부 위험 경로 건너뜀: {member_name}")
-                continue
-            target_path = os.path.join(dest_dir, *Path(normalized).parts)
-            try:
-                target_resolved = Path(target_path).resolve()
-                if str(target_resolved).startswith(str(Path(dest_dir).resolve())):
+            if len(members) > MAX_MEMBER_COUNT:
+                raise ValueError("ZIP에 포함된 파일 수가 비정상적으로 많습니다.")
+
+            total_uncompressed = 0
+            for member in members:
+                if member.flag_bits & 0x1:
+                    raise ValueError("암호화된 ZIP 파일은 지원하지 않습니다.")
+                if member.file_size > MAX_SINGLE_FILE:
+                    raise ValueError("ZIP 내부에 허용 크기를 초과하는 파일이 있습니다.")
+                total_uncompressed += member.file_size
+                if total_uncompressed > MAX_TOTAL_EXTRACT:
+                    raise ValueError("압축 해제 예상 용량이 허용치를 초과했습니다.")
+
+            for member in members:
+                member_name = member.filename
+                normalized = os.path.normpath(member_name)
+                if normalized.startswith("..") or os.path.isabs(normalized):
+                    logger.warning(f"ZIP 내부 위험 경로 건너뜀: {member_name}")
+                    continue
+
+                # 심볼릭 링크/하드 링크는 추출하지 않습니다.
+                is_symlink = False
+                try:
+                    ext_attr = member.external_attr >> 16
+                    is_symlink = stat and stat.S_ISLNK(ext_attr)
+                except Exception:
+                    is_symlink = False
+                if is_symlink:
+                    logger.warning(f"ZIP 내부 심볼릭 링크 건너뜀: {member_name}")
+                    continue
+
+                target_path = os.path.join(dest_dir, *Path(normalized).parts)
+                try:
+                    dest_root = Path(dest_dir).resolve()
+                    target_resolved = Path(target_path).resolve()
+                    if not str(target_resolved).startswith(str(dest_root)):
+                        logger.warning(f"ZIP 멤버가 허용된 경로 밖에 있어 건너뜀: {member_name}")
+                        continue
+
+                    if member.is_dir():
+                        target_resolved.mkdir(parents=True, exist_ok=True)
+                        continue
+
                     target_resolved.parent.mkdir(parents=True, exist_ok=True)
-                    if not member.is_dir():
-                        with zf.open(member) as src, open(target_resolved, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                else:
-                    logger.warning(f"ZIP 멤버가 허용된 경로 밖에 있어 건너뜀: {member_name}")
-            except Exception:
-                logger.exception("멤버 추출 중 예외 발생")
-        zf.close()
+                    with zf.open(member) as src, open(target_resolved, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    extracted_any = True
+                except Exception:
+                    logger.exception("멤버 추출 중 예외 발생")
     except Exception as exc:
         try:
             if os.path.exists(dest_dir):
                 shutil.rmtree(dest_dir)
         except Exception:
             pass
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         st.error(f"압축 해제 실패: {exc}")
-        raise
+        return
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
-    # 5) 세션 상태 갱신 후 바로 분석을 재시작합니다.
+    if not extracted_any:
+        try:
+            if os.path.exists(dest_dir):
+                shutil.rmtree(dest_dir)
+        except Exception:
+            pass
+        st.error("ZIP 안에서 추출 가능한 파일을 찾지 못했습니다.")
+        return
+
+    # 5) 세션 상태 및 전역 메타를 갱신 후 바로 분석을 재시작합니다.
     st.session_state["auto_applied_zip_tokens"][upload_token] = dest_dir
+
+    try:
+        resolved_dest = str(Path(dest_dir).resolve())
+        meta = globals().get("RESULT_META") or {}
+        meta.setdefault(resolved_dest, {"has_report": False, "needs_rescan": True})
+        globals()["RESULT_META"] = meta
+
+        result_dirs_global = globals().get("RESULT_DIRS")
+        if isinstance(result_dirs_global, list):
+            found = False
+            for existing in result_dirs_global:
+                try:
+                    if Path(existing).resolve() == Path(resolved_dest):
+                        found = True
+                        break
+                except Exception:
+                    continue
+            if not found:
+                result_dirs_global.append(Path(resolved_dest))
+                globals()["RESULT_DIRS"] = result_dirs_global
+    except Exception:
+        pass
+
     st.success(f"압축 해제 완료: {dest_dir}")
     st.info("업로드된 폴더로 바로 분석을 시작합니다.")
     _start_analysis_uploaded_cb(dest_dir)
@@ -835,16 +1009,13 @@ with path_tab:
     st.markdown("**분석 경로 설정**")
     # result_base_dir 기본값을 초기화하고 업로드된 폴더 경로가 있으면 그대로 보여줍니다.
     if "result_base_dir" not in st.session_state:
-        try:
-            default_base = str(BASE_OUTPUT_DIR)
-        except Exception:
-            default_base = str(Path.cwd())
+        # 기본값으로 현재 작업 디렉터리 대신 빈 문자열을 사용합니다.
+        # 사용자가 명시적으로 경로를 입력하거나 ZIP을 업로드할 때까지
+        # 분석 경로가 비어있도록 유지합니다.
+        default_base = ""
         st.session_state["result_base_dir"] = st.session_state.get("result_base_input", default_base)
     else:
-        try:
-            default_base = str(BASE_OUTPUT_DIR)
-        except Exception:
-            default_base = str(Path.cwd())
+        default_base = ""
 
     current_base_dir = str(st.session_state.get("result_base_dir", default_base))
     st.session_state["result_base_input"] = current_base_dir
@@ -917,13 +1088,58 @@ with path_tab:
 
     # result_options나 _format_result_option이 아직 정의되지 않았을 수 있어 안전하게 처리
     # 전역 심볼을 직접 참조하지 않고 안전하게 조회합니다.
-    result_dirs_val = globals().get("RESULT_DIRS") or []
+    result_dirs_val = list(globals().get("RESULT_DIRS") or [])
+
+    if not result_dirs_val:
+        try:
+            refreshed_meta = _build_result_meta()
+        except Exception:
+            refreshed_meta = {}
+        if refreshed_meta:
+            try:
+                globals()["RESULT_META"] = refreshed_meta
+            except Exception:
+                pass
+            try:
+                result_dirs_val = [Path(k) for k in refreshed_meta.keys()]
+                globals()["RESULT_DIRS"] = list(result_dirs_val)
+            except Exception:
+                result_dirs_val = []
+
+    selected_from_state = st.session_state.get("selected_result_dir")
+    if selected_from_state:
+        try:
+            resolved_state = Path(selected_from_state).expanduser().resolve()
+        except Exception:
+            resolved_state = Path(str(selected_from_state))
+        try:
+            if all(Path(p).resolve() != resolved_state for p in result_dirs_val):
+                result_dirs_val.append(resolved_state)
+        except Exception:
+            try:
+                if str(resolved_state) not in [str(p) for p in result_dirs_val]:
+                    result_dirs_val.append(resolved_state)
+            except Exception:
+                pass
+
     try:
-        result_options_local = [str(p) for p in result_dirs_val]
+        result_options_local = []
+        seen = set()
+        for p in result_dirs_val:
+            s = str(p)
+            if s in seen:
+                continue
+            seen.add(s)
+            result_options_local.append(s)
     except Exception:
         result_options_local = []
 
-    fmt = globals().get("_format_result_option", lambda x: x)
+    # 포맷 함수는 파일 상단에서 정의된 `_format_result_option`을 사용합니다.
+    # 안전을 위해 예외 발생 시에는 identity 함수를 폴백합니다.
+    try:
+        fmt = _format_result_option
+    except Exception:
+        fmt = lambda x: x
 
     st.selectbox(
         "분석 결과 폴더",
@@ -1104,61 +1320,63 @@ if CLI_DEFAULT_RESULT:
 if "selected_result_dir" not in st.session_state and result_options:
     preferred = next((opt for opt in result_options if RESULT_META.get(opt, {}).get("has_report")), None)
     st.session_state["selected_result_dir"] = preferred or result_options[0]
-
-def _format_result_option(path_str: str) -> str:
-    p = Path(path_str)
-    try:
-        rel = p.relative_to(BASE_OUTPUT_DIR)
-        label = str(rel) if rel.parts else str(p)
-    except ValueError:
-        label = str(p)
-    meta = RESULT_META.get(path_str, {})
-    prefix = ""
-    if meta.get("needs_rescan"):
-        prefix = "[재스캔] "
-    elif not meta.get("has_report"):
-        prefix = "[결과 대기] "
-    return f"{prefix}{label}" if prefix else label
+# `_format_result_option`은 파일 상단(사이드바 렌더링 이전)에 정의되어 있습니다.
+# 중복 정의를 제거하고 위에서 재사용하도록 변경했습니다.
 
 if not result_options:
     # 사용자가 좌측 입력 대신 ZIP 업로드를 통해 경로를 지정할 수 있도록 안내합니다.
     need_upload_gate = False
     try:
-        candidate_base = st.session_state.get("result_base_dir") or st.session_state.get("result_base_input") or str(BASE_OUTPUT_DIR)
-        candidate_base = str(Path(candidate_base).expanduser())
+        # 사용자가 경로를 비워뒀을 경우에는 기본(BASE_OUTPUT_DIR)으로 바로 폴백하지
+        # 않고 업로드 게이트를 보여주도록 합니다. 빈값이면 스캔을 건너뜁니다.
+        candidate_base = st.session_state.get("result_base_dir") or st.session_state.get("result_base_input") or ""
+        candidate_base = str(Path(candidate_base).expanduser()) if candidate_base else ""
         found = []
-        try:
-            candidate_path = Path(candidate_base)
-            # 기존: 이름이 *_결과(_숫자)? 패턴과 정확히 매칭되는 경우만 후보로 삼았습니다.
-            # 변경: 더 유연하게, 디렉터리명에 '결과'라는 단어가 포함되어 있으면 후보로 간주합니다.
-            # (업로드된 폴더명이 패턴과 정확히 일치하지 않아 걸러지는 경우를 방지)
-            if candidate_path.is_dir() and ("결과" in candidate_path.name):
-                if (
-                    (candidate_path / "report.parquet").exists()
-                    or (candidate_path / "report.csv").exists()
-                    or (candidate_path / "images_summary.csv").exists()
-                    or (candidate_path / "grouped").exists()
-                ):
-                    found.append(str(candidate_path.resolve()))
 
-            for name in os.listdir(candidate_base):
-                p = Path(candidate_base) / name
-                if not p.is_dir():
-                    continue
-                # 디렉터리명에 '결과'가 포함되어 있으면 후보로 포함합니다.
-                # (예: '11001_결과_1762239574', '결과_2025-11-05' 등 다양한 네이밍을 허용)
-                if ("결과" in name):
-                    if (
-                        (p / "report.parquet").exists()
-                        or (p / "report.csv").exists()
-                        or (p / "images_summary.csv").exists()
-                        or (p / "grouped").exists()
-                    ):
-                        resolved = str(p.resolve())
-                        if resolved not in found:
-                            found.append(resolved)
-        except Exception:
+        if not candidate_base:
+            # 빈 경로는 스캔하지 않음
             found = []
+        else:
+            # 오직 '숫자_결과' 패턴(예: 11001_결과, 11001_결과_1)인 디렉터리만 후보로 허용합니다.
+            numeric_result_re = re.compile(r'^\d+_결과(?:_\d+)?$')
+            candidate_path = Path(candidate_base)
+
+            # candidate_base 자체가 숫자_결과 패턴이면 결과 유무를 확인하여 추가
+            try:
+                if candidate_path.is_dir() and numeric_result_re.match(candidate_path.name):
+                    if (
+                        (candidate_path / "report.parquet").exists()
+                        or (candidate_path / "report.csv").exists()
+                        or (candidate_path / "images_summary.csv").exists()
+                        or (candidate_path / "grouped").exists()
+                    ):
+                        found.append(str(candidate_path.resolve()))
+            except Exception:
+                # 후보 경로 확인 중 에러가 발생해도 전체 흐름을 멈추지 않도록 통과
+                pass
+
+                # candidate_base의 직계 자식만 검사합니다. 자식의 하위(손자)는 검사하지 않습니다.
+                for name in os.listdir(candidate_base):
+                    p = Path(candidate_base) / name
+                    if not p.is_dir():
+                        continue
+                    try:
+                        # 이름이 숫자_결과 패턴과 정확히 매칭되는 경우에만 후보로 추가
+                        if numeric_result_re.match(p.name):
+                            if (
+                                (p / "report.parquet").exists()
+                                or (p / "report.csv").exists()
+                                or (p / "images_summary.csv").exists()
+                                or (p / "grouped").exists()
+                            ):
+                                resolved = str(p.resolve())
+                                if resolved not in found:
+                                    found.append(resolved)
+                    except Exception:
+                        # 개별 항목 검사 실패는 무시하고 다음 항목으로 진행
+                        continue
+    except Exception:
+        found = []
 
         if found:
             result_options = sorted(found)
@@ -2710,7 +2928,22 @@ elif st.session_state["main_tab"] == "전체 보기":
         )
     except Exception:
         cache_buster_tuple = (0, 0)
-    all_imgs = list_all_images(OUTPUT_DIR, cache_buster=hash(cache_buster_tuple))
+    # 결과 아티팩트가 존재하지 않으면(파이프라인 미실행 또는 잘못된 출력 폴더)
+    # 이전에 디스크에 남아있는 파일들을 그대로 전체보기에서 표시하지 않도록
+    # 빈 목록으로 처리합니다. 사용자에게 안내 메시지를 보여줍니다.
+    artifacts_present = (
+        os.path.exists(IMG_SUMMARY)
+        or os.path.exists(REPORT_PARQUET)
+        or os.path.exists(REPORT_CSV)
+        or os.path.isdir(os.path.join(OUTPUT_DIR, "ok"))
+        or os.path.isdir(os.path.join(OUTPUT_DIR, "grouped"))
+    )
+    if not artifacts_present:
+        # 결과가 아예 없을 때는 전체보기 탭을 비워 혼동을 줄입니다.
+        st.info("결과 아티팩트가 없습니다. 먼저 파이프라인을 실행하거나 올바른 출력 폴더를 지정하세요.")
+        all_imgs = []
+    else:
+        all_imgs = list_all_images(OUTPUT_DIR, cache_buster=hash(cache_buster_tuple))
     # 검색/확장자 필터
     if q:
         all_imgs = [p for p in all_imgs if q.lower() in p.lower()]

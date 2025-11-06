@@ -996,8 +996,53 @@ def main():
     dashboard_base_dir = _resolve_top_level_base(str(base_candidate))
     if summary:
         raw_paths = summary.get("result_paths") or []
-        paths = [Path(p).resolve() for p in raw_paths]
-        usable_paths = [p for p in paths if _result_dir_has_payload(p)]
+        # 안전하게 경로 해석: 전달된 문자열을 Path로 변환하되 실패 시 원본 Path 객체를 사용
+        paths: List[Path] = []
+        for p in raw_paths:
+            try:
+                paths.append(Path(p).resolve())
+            except Exception:
+                try:
+                    paths.append(Path(p))
+                except Exception:
+                    # 무시
+                    continue
+
+        # 정책: 상위의 '*_결과' 폴더만 선택하도록 필터링합니다.
+        # - 전달된 경로가 하위 폴더(예: artifacts/, ok/, grouped/)라면
+        #   해당 경로의 조상들 중 이름이 '_결과'로 끝나는 최상위 조상(루트에 더 가까운 것)을 찾아 사용합니다.
+        # - 후보 폴더가 실제로 결과 페이로드(report.csv 등)를 포함하는지 _result_dir_has_payload로 확인합니다.
+        def _find_top_result_dir(p: Path) -> Optional[Path]:
+            try:
+                cur = p
+                candidate: Optional[Path] = None
+                # 자기 자신부터 루트까지 올라가며 '*_결과'인 항목을 기록합니다.
+                while True:
+                    if cur.name.endswith("_결과"):
+                        candidate = cur
+                    if cur.parent == cur:
+                        break
+                    cur = cur.parent
+                return candidate
+            except Exception:
+                return None
+
+        usable_paths: List[Path] = []
+        for p in paths:
+            if not p.exists() or not p.is_dir():
+                # 존재하지 않거나 폴더가 아니면 무시
+                continue
+            top = _find_top_result_dir(p)
+            candidate = top if top is not None else p
+            # 중복 추가 방지 및 실제 페이로드 존재 확인
+            try:
+                if candidate not in usable_paths and _result_dir_has_payload(candidate):
+                    usable_paths.append(candidate)
+            except Exception:
+                # 검사 실패 시 안전하게 무시
+                continue
+
+        # usable_paths 우선 선택, 없으면 원래 paths에서 첫 항목으로 폴백
         if usable_paths:
             dashboard_output_dir = str(usable_paths[0])
             default_result_path = str(usable_paths[0])
@@ -1005,14 +1050,18 @@ def main():
             dashboard_output_dir = str(paths[0])
             default_result_path = str(paths[0])
             print("ℹ️ 결과 폴더가 생성되었지만 주요 리포트 파일이 보이지 않습니다. 대시보드에서 확인 후 적절한 폴더를 선택하세요.")
+
+        # dashboard_base_dir 결정: 모든 경로의 공통 경로를 사용
         if paths:
             try:
                 common = Path(os.path.commonpath([str(p) for p in paths])).resolve()
                 dashboard_base_dir = _resolve_top_level_base(str(common))
             except Exception:
                 dashboard_base_dir = _resolve_top_level_base(str(sel_path))
+
         if not raw_paths and summary.get("mode") != "scoped" and default_result_path:
             dashboard_output_dir = default_result_path
+
         # 요약에 포함된 결과 폴더에 대해 ZIP 생성이 누락되었다면 보강합니다.
         ensured = _ensure_result_zips(raw_paths)
         if ensured:
