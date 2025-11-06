@@ -793,10 +793,11 @@ def _handle_uploaded_zip(uploaded_zip, source_tag: str = "sidebar") -> None:
         return
 
     # 안전 상한값: 압축 파일 업로드 크기/압축 해제 용량/파일 개수/단일 파일 크기를 제한합니다.
-    MAX_UPLOAD_SIZE = 512 * 1024 * 1024  # 512MB 이상이면 거부
-    MAX_TOTAL_EXTRACT = 1_500 * 1024 * 1024  # 1.5GB 이상 해제하지 않음
-    MAX_MEMBER_COUNT = 4000  # 비정상적으로 많은 파일은 압축 폭탄 가능성
-    MAX_SINGLE_FILE = 300 * 1024 * 1024  # 단일 파일 300MB 제한
+    # 변경: 전체 업로드 허용치를 10 GiB로 상향합니다.
+    MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024        # 10 GiB
+    MAX_TOTAL_EXTRACT = 12 * 1024 * 1024 * 1024      # 전체 추출 상한 12 GiB
+    MAX_MEMBER_COUNT = 20000                          # 멤버 수 상한 (필요시 더 조정)
+    MAX_SINGLE_FILE = 10 * 1024 * 1024 * 1024        # 단일 파일 10 GiB
 
     # 1) 업로드 스트림을 임시 파일로 복사하며 SHA1 해시를 계산합니다.
     #    메모리에 전체를 올리지 않고 순차적으로 처리해 대용량에서도 안전합니다.
@@ -819,7 +820,7 @@ def _handle_uploaded_zip(uploaded_zip, source_tag: str = "sidebar") -> None:
                     break
                 total_read += len(chunk)
                 if total_read > MAX_UPLOAD_SIZE:
-                    raise ValueError("업로드한 ZIP이 허용 용량(512MB)을 초과했습니다.")
+                    raise ValueError("업로드한 ZIP이 허용 용량(10GiB)을 초과했습니다.")
                 sha1.update(chunk)
                 tmp.write(chunk)
 

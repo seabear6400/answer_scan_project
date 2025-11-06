@@ -6,3 +6,6 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6"
 textColor = "#31333F"
 font = "sans serif"
+
+# 최대 업로드 크기 (MB). 10240 MB = 약 10 GiB
+server.maxUploadSize = 10240

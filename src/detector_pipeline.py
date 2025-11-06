@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import zipfile
+import re
 
 import numpy as np
 from PIL import Image
@@ -802,14 +803,15 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
 
 
 def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None, prefix: Optional[str] = None) -> Optional[str]:
-    """
-    여러 결과 폴더를 하나의 ZIP으로 묶어 대시보드 업로드를 단순화합니다.
+    """여러 결과 폴더를 하나의 압축 파일로 통합해 총괄 ZIP을 생성합니다.
 
-    추가 기능(한국어):
-    - `prefix` 매개변수를 통해 ZIP 파일명 앞에 분석 대상의 폴더명을 붙일 수 있습니다.
-      예: prefix='1교시' -> '1교시_총_결과_{timestamp}.zip'
-    - 기본 동작은 기존과 동일하며, `prefix`를 제공하지 않으면 '총_결과_{timestamp}.zip' 형식을 사용합니다.
+    한국어 요약:
+    - `base_dir` 아래에서 `*_결과` 패턴을 만족하는 폴더들을 찾아 하나의 묶음으로 압축합니다.
+    - `target_dir`를 지정하면 해당 경로(예: 상위 폴더)에 ZIP을 생성하며, 지정하지 않으면 `base_dir`에 생성합니다.
+    - `prefix`를 전달하면 ZIP 파일명 및 내부 루트 폴더명에 접두사로 사용합니다.
+      예: prefix='인문계' → `인문계_총_결과_<timestamp>.zip`
     """
+
     try:
         base_path = Path(base_dir).resolve()
     except Exception:
@@ -818,40 +820,103 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None,
     if not base_path.exists() or not base_path.is_dir():
         return None
 
-    result_dirs = [p for p in base_path.iterdir() if p.is_dir() and p.name.endswith("_결과")]
+    # 1) 묶을 결과 폴더 탐색: 기본 정책은 `숫자_결과(_번호)` 패턴만 포함
+    result_pattern = re.compile(r"^\d+_결과(?:_\d+)?$")
+    result_dirs: List[Path] = []
+    seen: set[str] = set()
+
+    if result_pattern.match(base_path.name):
+        key = str(base_path)
+        seen.add(key)
+        result_dirs.append(base_path)
+
+    try:
+        for root, dirnames, _ in os.walk(base_path):
+            for dirname in dirnames:
+                if not result_pattern.match(dirname):
+                    continue
+                candidate = Path(root) / dirname
+                try:
+                    resolved = candidate.resolve()
+                except Exception:
+                    resolved = candidate
+                key = str(resolved)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result_dirs.append(resolved)
+    except Exception:
+        return None
+
     if not result_dirs:
         return None
 
-    zip_parent = Path(target_dir) if target_dir else base_path
+    # 2) ZIP 생성 위치 결정 (예: 인문계를 분석하면 상위 폴더에 생성)
+    if target_dir:
+        try:
+            target_root = Path(target_dir).resolve()
+        except Exception:
+            target_root = Path(target_dir)
+    else:
+        target_root = base_path
+
     try:
-        zip_parent.mkdir(parents=True, exist_ok=True)
+        target_root.mkdir(parents=True, exist_ok=True)
     except Exception:
         return None
 
-    # 이미 동일한 목적지에 생성된 ZIP이 있으면 재사용
+    bundle_prefix = (prefix or base_path.name or "aggregate").strip()
+    if not bundle_prefix:
+        bundle_prefix = "aggregate"
+    zip_base_name = f"{bundle_prefix}_총_결과"
+
+    # 3) 기존 ZIP이 최신이라면 재사용 (결과 폴더보다 새로우면 그대로 반환)
+    latest_source_mtime = 0.0
     try:
-        pattern = f"{str(prefix).replace(os.sep, '_')}_총_결과_*.zip" if prefix else "총_결과_*.zip"
-        existing_total = sorted(zip_parent.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-        if existing_total:
-            return str(existing_total[0])
+        latest_source_mtime = max(
+            os.path.getmtime(str(p))
+            for p in result_dirs
+            if p.exists()
+        )
+    except Exception:
+        latest_source_mtime = 0.0
+
+    try:
+        existing = sorted(
+            target_root.glob(f"{zip_base_name}_*.zip"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if existing:
+            latest_zip = existing[0]
+            try:
+                if latest_zip.stat().st_mtime >= latest_source_mtime:
+                    return str(latest_zip)
+            except Exception:
+                pass
     except Exception:
         pass
 
+    # 4) 새 ZIP 생성
     timestamp = int(time.time())
-    safe_prefix = str(prefix).replace(os.sep, "_") if prefix else None
-    zip_name = f"{safe_prefix + '_' if safe_prefix else ''}총_결과_{timestamp}.zip"
-    zip_path = zip_parent / zip_name
+    bundle_dir_name = f"{zip_base_name}_{timestamp}"
+    zip_path = target_root / f"{bundle_dir_name}.zip"
 
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for result_dir in result_dirs:
-                for file_path in _zippable_files(result_dir):
-                    if file_path.resolve() == zip_path.resolve():
-                        continue
-                    arcname = Path(result_dir.name) / file_path.relative_to(result_dir)
-                    zf.write(file_path, arcname)
+            for res_dir in result_dirs:
+                rel_root = Path(bundle_dir_name) / res_dir.name
+                try:
+                    for file_path in _zippable_files(res_dir):
+                        try:
+                            arcname = rel_root / file_path.relative_to(res_dir)
+                        except ValueError:
+                            arcname = rel_root / file_path.name
+                        zf.write(file_path, arcname.as_posix())
+                except Exception:
+                    logger.warning("총괄 ZIP 생성 중 일부 폴더를 건너뜀: %s", res_dir, exc_info=True)
+                    continue
     except Exception:
-        logger.warning("총 결과 ZIP 생성 실패", exc_info=True)
         try:
             if zip_path.exists():
                 zip_path.unlink()
@@ -859,7 +924,14 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None,
             pass
         return None
 
-    _write_zip_status(zip_parent, "총_결과", zip_path, result_dirs)
+    # 5) 상태 기록: base_dir 하위 artifacts에 간단히 로그를 남겨 추후 추적
+    status_dir = base_path / "artifacts"
+    try:
+        _write_zip_status(status_dir, zip_base_name, zip_path, result_dirs)
+    except Exception:
+        # 상태 파일 기록 실패는 치명적이지 않으므로 무시
+        pass
+
     return str(zip_path)
 
 
