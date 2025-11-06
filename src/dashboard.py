@@ -2,14 +2,10 @@ import os
 import sys
 import hashlib
 import re
-import importlib
 import shutil
 import time
 from pathlib import Path
 from typing import Tuple, List, Dict, Optional
-import base64
-import argparse
-from string import Template
 
 import streamlit as st
 import polars as pl
@@ -17,6 +13,9 @@ from PIL import Image, ImageDraw
 import numpy as np
 import pandas as pd
 quality_options_common = ["빠름", "균형", "선명"]
+
+# 결과 폴더 이름은 반드시 '숫자_결과' 패턴을 따라야 합니다.
+RESULT_DIR_NAME_PATTERN = re.compile(r"^\d+_결과(?:_\d+)?$")
 
 # Streamlit 페이지 설정: 레이아웃을 와이드로 고정합니다.
 # - 이미 페이지 설정이 되어 있거나 이 호출 시점이 맞지 않으면 예외가 발생할 수 있으므로
@@ -74,9 +73,6 @@ if "CLI_OUTPUT_DIR" not in globals():
 
 if "RESULT_DIRS" not in globals():
     RESULT_DIRS = []
-
-if "CLI_DEFAULT_RESULT" not in globals():
-    CLI_DEFAULT_RESULT = None
 
 if "SELECTION_ROOT" not in globals():
     SELECTION_ROOT = None
@@ -448,34 +444,15 @@ def _format_result_option(path_str: str) -> str:
     except Exception:
         p = Path(str(path_str))
 
-    # BASE_OUTPUT_DIR은 전역에서 Path 또는 문자열일 수 있으므로 안전하게 처리
-    try:
-        base = Path(BASE_OUTPUT_DIR) if BASE_OUTPUT_DIR is not None else None
-    except Exception:
-        try:
-            base = Path(str(BASE_OUTPUT_DIR))
-        except Exception:
-            base = None
-
-    # 상대 경로로 표현이 가능하면 더 짧은 라벨 사용
-    try:
-        if base is not None:
-            rel = p.relative_to(base)
-            label = str(rel) if rel.parts else str(p)
-        else:
-            label = str(p)
-    except Exception:
-        label = str(p)
+    label = p.name
 
     # 메타 정보에서 상태를 읽어 접두사 추가
     meta = globals().get('RESULT_META', {}) or {}
     meta_for_path = meta.get(str(p), {})
     prefix = ""
     try:
-        if meta_for_path.get("needs_rescan"):
+        if meta_for_path.get("needs_rescan") and not meta_for_path.get("has_report"):
             prefix = "[재스캔] "
-        elif not meta_for_path.get("has_report"):
-            prefix = "[결과 대기] "
     except Exception:
         prefix = ""
 
@@ -598,6 +575,71 @@ if "_build_result_meta" not in globals():
 
         return out
 
+if "_register_result_dir" not in globals():
+    def _register_result_dir(path: str) -> List[str]:
+        """ZIP 추출 루트에서 실제 결과 폴더들만 추려 세션과 전역 상태에 등록합니다."""
+        registered: List[str] = []
+
+        try:
+            base_path = Path(path).expanduser().resolve()
+        except Exception:
+            return registered
+
+        candidates: List[Path] = []
+        if base_path.is_dir():
+            if RESULT_DIR_NAME_PATTERN.match(base_path.name):
+                candidates.append(base_path)
+            else:
+                try:
+                    for child in sorted(base_path.iterdir()):
+                        if child.is_dir() and RESULT_DIR_NAME_PATTERN.match(child.name):
+                            candidates.append(child.resolve())
+                except Exception:
+                    pass
+
+        dirs_state = st.session_state.setdefault("available_result_dirs", [])
+
+        base_str = str(base_path)
+        if base_str in dirs_state and base_str not in [str(c) for c in candidates]:
+            dirs_state.remove(base_str)
+
+        meta = globals().get("RESULT_META") or {}
+
+        for cand in candidates:
+            try:
+                resolved = str(cand.resolve())
+            except Exception:
+                resolved = str(cand)
+
+            has_result = False
+            try:
+                has_result = _has_result_files(cand)
+            except Exception:
+                has_result = False
+
+            meta[resolved] = {
+                "has_report": bool(has_result),
+                "needs_rescan": not bool(has_result),
+            }
+
+            if resolved not in dirs_state:
+                dirs_state.append(resolved)
+            registered.append(resolved)
+
+        # 중복을 제거하면서 입력 순서를 유지합니다.
+        unique_dirs = list(dict.fromkeys(dirs_state))
+        st.session_state["available_result_dirs"] = unique_dirs
+
+        try:
+            globals()["RESULT_DIRS"] = [Path(p) for p in unique_dirs]
+        except Exception:
+            globals()["RESULT_DIRS"] = []
+
+        globals()["RESULT_META"] = meta
+        st.session_state["scan_result_meta"] = meta
+
+        return registered
+
 if "_has_result_files" not in globals():
     # 결과 폴더 판정 유틸
     def _has_result_files(output_dir: Path) -> bool:
@@ -678,8 +720,12 @@ if "auto_applied_zip_tokens" not in st.session_state:
     # token -> dest_dir 매핑을 저장합니다 (중복 업로드 방지 및 재실행 지원)
     st.session_state["auto_applied_zip_tokens"] = {}
 
+if "available_result_dirs" not in st.session_state:
+    # ZIP 업로드로 등록된 결과 폴더 경로 목록을 보관합니다.
+    st.session_state["available_result_dirs"] = []
 
-def _start_analysis_uploaded_cb(dest: str) -> None:
+
+def _start_analysis_uploaded_cb(dest: str, preferred_result_dir: Optional[str] = None) -> None:
     """업로드된 폴더를 분석 대상으로 세션에 적용하고 Streamlit 재실행을 시도합니다.
 
     dest: 압축이 풀린 디렉터리의 절대 경로
@@ -687,14 +733,25 @@ def _start_analysis_uploaded_cb(dest: str) -> None:
     try:
         # 절대 경로로 정규화하여 세션에 기록
         norm = str(Path(dest).resolve())
+        try:
+            if preferred_result_dir:
+                _register_result_dir(preferred_result_dir)
+            else:
+                _register_result_dir(norm)
+        except Exception:
+            pass
         st.session_state["result_base_input"] = norm
         st.session_state["result_base_dir"] = norm
         # 업로드로 풀린 폴더를 '선택된 결과 폴더'로 즉시 설정합니다.
         # 이렇게 하면 사용자가 ZIP을 업로드한 직후 해당 경로가 사이드바의
         # 선택값(selected_result_dir)으로 반영되어 바로 분석 대상이 됩니다.
         # 또한 내부적으로 선택 변경 감지를 위해 _last_selected_dir도 갱신합니다.
-        st.session_state["selected_result_dir"] = norm
-        st.session_state["_last_selected_dir"] = norm
+        if preferred_result_dir:
+            st.session_state["selected_result_dir"] = preferred_result_dir
+            st.session_state["_last_selected_dir"] = preferred_result_dir
+        else:
+            st.session_state.pop("selected_result_dir", None)
+            st.session_state.pop("_last_selected_dir", None)
         st.session_state["_cli_base_marker"] = norm
         try:
             # 캐시를 비워 새 경로로의 검색이 반영되게 합니다.
@@ -902,33 +959,22 @@ def _handle_uploaded_zip(uploaded_zip, source_tag: str = "sidebar") -> None:
         return
 
     # 5) 세션 상태 및 전역 메타를 갱신 후 바로 분석을 재시작합니다.
-    st.session_state["auto_applied_zip_tokens"][upload_token] = dest_dir
-
     try:
         resolved_dest = str(Path(dest_dir).resolve())
-        meta = globals().get("RESULT_META") or {}
-        meta.setdefault(resolved_dest, {"has_report": False, "needs_rescan": True})
-        globals()["RESULT_META"] = meta
-
-        result_dirs_global = globals().get("RESULT_DIRS")
-        if isinstance(result_dirs_global, list):
-            found = False
-            for existing in result_dirs_global:
-                try:
-                    if Path(existing).resolve() == Path(resolved_dest):
-                        found = True
-                        break
-                except Exception:
-                    continue
-            if not found:
-                result_dirs_global.append(Path(resolved_dest))
-                globals()["RESULT_DIRS"] = result_dirs_global
     except Exception:
-        pass
+        resolved_dest = dest_dir
+
+    st.session_state["auto_applied_zip_tokens"][upload_token] = resolved_dest
+    registered_dirs = _register_result_dir(resolved_dest)
+
+    preferred = registered_dirs[0] if registered_dirs else None
+
+    if not registered_dirs:
+        st.warning("ZIP 내부에서 분석 가능한 `_결과` 폴더를 찾지 못했습니다. 추후 직접 경로를 선택해 주세요.")
 
     st.success(f"압축 해제 완료: {dest_dir}")
     st.info("업로드된 폴더로 바로 분석을 시작합니다.")
-    _start_analysis_uploaded_cb(dest_dir)
+    _start_analysis_uploaded_cb(dest_dir, preferred_result_dir=preferred)
 
 
 def _render_initial_upload_gate() -> None:
@@ -1086,25 +1132,13 @@ with path_tab:
             # 세션 상태 접근이 실패하면 무시합니다.
             pass
 
-    # result_options나 _format_result_option이 아직 정의되지 않았을 수 있어 안전하게 처리
-    # 전역 심볼을 직접 참조하지 않고 안전하게 조회합니다.
-    result_dirs_val = list(globals().get("RESULT_DIRS") or [])
-
-    if not result_dirs_val:
+    # 세션에서 결과 폴더 목록을 읽어와 셀렉트 박스를 구성합니다.
+    result_dirs_val: List[Path] = []
+    for item in st.session_state.get("available_result_dirs", []):
         try:
-            refreshed_meta = _build_result_meta()
+            result_dirs_val.append(Path(item))
         except Exception:
-            refreshed_meta = {}
-        if refreshed_meta:
-            try:
-                globals()["RESULT_META"] = refreshed_meta
-            except Exception:
-                pass
-            try:
-                result_dirs_val = [Path(k) for k in refreshed_meta.keys()]
-                globals()["RESULT_DIRS"] = list(result_dirs_val)
-            except Exception:
-                result_dirs_val = []
+            continue
 
     selected_from_state = st.session_state.get("selected_result_dir")
     if selected_from_state:
@@ -1112,15 +1146,18 @@ with path_tab:
             resolved_state = Path(selected_from_state).expanduser().resolve()
         except Exception:
             resolved_state = Path(str(selected_from_state))
-        try:
-            if all(Path(p).resolve() != resolved_state for p in result_dirs_val):
-                result_dirs_val.append(resolved_state)
-        except Exception:
+        already_registered = False
+        for existing in result_dirs_val:
             try:
-                if str(resolved_state) not in [str(p) for p in result_dirs_val]:
-                    result_dirs_val.append(resolved_state)
+                if Path(existing).resolve() == resolved_state:
+                    already_registered = True
+                    break
             except Exception:
-                pass
+                if str(existing) == str(resolved_state):
+                    already_registered = True
+                    break
+        if not already_registered:
+            result_dirs_val.append(resolved_state)
 
     try:
         result_options_local = []
@@ -1134,19 +1171,20 @@ with path_tab:
     except Exception:
         result_options_local = []
 
-    # 포맷 함수는 파일 상단에서 정의된 `_format_result_option`을 사용합니다.
-    # 안전을 위해 예외 발생 시에는 identity 함수를 폴백합니다.
     try:
         fmt = _format_result_option
     except Exception:
         fmt = lambda x: x
 
-    st.selectbox(
-        "분석 결과 폴더",
-        options=result_options_local,
-        format_func=fmt,
-        key="selected_result_dir",
-    )
+    if result_options_local:
+        st.selectbox(
+            "분석 결과 폴더",
+            options=result_options_local,
+            format_func=fmt,
+            key="selected_result_dir",
+        )
+    else:
+        st.info("ZIP을 업로드하면 분석 결과 폴더가 여기에 표시됩니다.")
 
 with theme_tab:
     st.markdown("**대시보드 테마**")
@@ -1291,116 +1329,47 @@ with settings_tab:
         }
         st.slider(value=gallery_grid_default, **gallery_slider_args)
 
-# 세션에 이미 스캔 결과가 있으면 우선 사용하고, 그렇지 않으면 모듈 레벨 RESULT_DIRS로 스캔
+# 세션에 저장된 결과 폴더 목록을 기반으로 메타 데이터를 초기화합니다.
+available_dirs_raw = st.session_state.get("available_result_dirs", [])
+filtered_dirs: List[str] = []
+for item in available_dirs_raw:
+    try:
+        p = Path(item).expanduser().resolve()
+        if p.is_dir() and RESULT_DIR_NAME_PATTERN.match(p.name):
+            filtered_dirs.append(str(p))
+    except Exception:
+        continue
+
+st.session_state["available_result_dirs"] = filtered_dirs
+
+try:
+    RESULT_DIRS = [Path(p) for p in filtered_dirs]
+except Exception:
+    RESULT_DIRS = []
+
 if "scan_result_meta" in st.session_state:
     RESULT_META = st.session_state.get("scan_result_meta") or {}
 else:
-    RESULT_META = _build_result_meta(RESULT_DIRS)
-    # _build_result_meta가 스캔을 통해 메타를 찾았을 경우
-    # 기존 RESULT_DIRS가 비어있다면 메타의 키들로 RESULT_DIRS를 채웁니다.
-    try:
-        if not RESULT_DIRS and isinstance(RESULT_META, dict):
-            RESULT_DIRS = list(RESULT_META.keys())
-    except Exception:
-        pass
+    RESULT_META = _build_result_meta(filtered_dirs) if filtered_dirs else {}
 
 # ===== 페이지 설정 =====
 
 
-if "selected_result_dir" in st.session_state and st.session_state["selected_result_dir"] not in [str(p) for p in RESULT_DIRS]:
-    st.session_state.pop("selected_result_dir", None)
-
 result_options = [str(p) for p in RESULT_DIRS]
 
-if CLI_DEFAULT_RESULT:
-    default_str = str(CLI_DEFAULT_RESULT)
-    if default_str in result_options and "selected_result_dir" not in st.session_state:
-        st.session_state["selected_result_dir"] = default_str
+if "selected_result_dir" in st.session_state and st.session_state["selected_result_dir"] not in result_options:
+    st.session_state.pop("selected_result_dir", None)
 
-if "selected_result_dir" not in st.session_state and result_options:
-    preferred = next((opt for opt in result_options if RESULT_META.get(opt, {}).get("has_report")), None)
-    st.session_state["selected_result_dir"] = preferred or result_options[0]
-# `_format_result_option`은 파일 상단(사이드바 렌더링 이전)에 정의되어 있습니다.
-# 중복 정의를 제거하고 위에서 재사용하도록 변경했습니다.
-
+# 등록된 결과 폴더가 없으면 초기 업로드 게이트를 보여줍니다.
 if not result_options:
-    # 사용자가 좌측 입력 대신 ZIP 업로드를 통해 경로를 지정할 수 있도록 안내합니다.
-    need_upload_gate = False
-    try:
-        # 사용자가 경로를 비워뒀을 경우에는 기본(BASE_OUTPUT_DIR)으로 바로 폴백하지
-        # 않고 업로드 게이트를 보여주도록 합니다. 빈값이면 스캔을 건너뜁니다.
-        candidate_base = st.session_state.get("result_base_dir") or st.session_state.get("result_base_input") or ""
-        candidate_base = str(Path(candidate_base).expanduser()) if candidate_base else ""
-        found = []
+    st.session_state.pop("selected_result_dir", None)
+    _render_initial_upload_gate()
+    st.stop()
 
-        if not candidate_base:
-            # 빈 경로는 스캔하지 않음
-            found = []
-        else:
-            # 오직 '숫자_결과' 패턴(예: 11001_결과, 11001_결과_1)인 디렉터리만 후보로 허용합니다.
-            numeric_result_re = re.compile(r'^\d+_결과(?:_\d+)?$')
-            candidate_path = Path(candidate_base)
-
-            # candidate_base 자체가 숫자_결과 패턴이면 결과 유무를 확인하여 추가
-            try:
-                if candidate_path.is_dir() and numeric_result_re.match(candidate_path.name):
-                    if (
-                        (candidate_path / "report.parquet").exists()
-                        or (candidate_path / "report.csv").exists()
-                        or (candidate_path / "images_summary.csv").exists()
-                        or (candidate_path / "grouped").exists()
-                    ):
-                        found.append(str(candidate_path.resolve()))
-            except Exception:
-                # 후보 경로 확인 중 에러가 발생해도 전체 흐름을 멈추지 않도록 통과
-                pass
-
-                # candidate_base의 직계 자식만 검사합니다. 자식의 하위(손자)는 검사하지 않습니다.
-                for name in os.listdir(candidate_base):
-                    p = Path(candidate_base) / name
-                    if not p.is_dir():
-                        continue
-                    try:
-                        # 이름이 숫자_결과 패턴과 정확히 매칭되는 경우에만 후보로 추가
-                        if numeric_result_re.match(p.name):
-                            if (
-                                (p / "report.parquet").exists()
-                                or (p / "report.csv").exists()
-                                or (p / "images_summary.csv").exists()
-                                or (p / "grouped").exists()
-                            ):
-                                resolved = str(p.resolve())
-                                if resolved not in found:
-                                    found.append(resolved)
-                    except Exception:
-                        # 개별 항목 검사 실패는 무시하고 다음 항목으로 진행
-                        continue
-    except Exception:
-        found = []
-
-        if found:
-            result_options = sorted(found)
-            if "selected_result_dir" not in st.session_state:
-                st.session_state["selected_result_dir"] = result_options[0]
-        else:
-            need_upload_gate = True
-    except Exception:
-        need_upload_gate = True
-
-    if need_upload_gate:
-        st.sidebar.info("결과 폴더를 찾지 못했습니다. ZIP을 업로드하면 자동으로 분석이 시작됩니다.")
-        _render_initial_upload_gate()
-        st.stop()
-
-if "selected_result_dir" not in st.session_state and result_options:
-    st.session_state["selected_result_dir"] = result_options[0]
-
-# 선택값이 없을 경우 result_options가 비어있을 수 있으므로 안전한 기본값을 사용합니다.
-# 기본값으로는 BASE_OUTPUT_DIR를 사용하여 이후 경로 연산이 실패하지 않도록 합니다.
-selected_dir_str = st.session_state.get(
-    "selected_result_dir",
-    result_options[0] if result_options else str(BASE_OUTPUT_DIR),
-)
+selected_dir_str = st.session_state.get("selected_result_dir")
+if not selected_dir_str and result_options:
+    selected_dir_str = result_options[0]
+    st.session_state["selected_result_dir"] = selected_dir_str
 prev_selected_dir = st.session_state.get("_last_selected_dir")
 dir_changed = prev_selected_dir is not None and prev_selected_dir != selected_dir_str
 st.session_state["_last_selected_dir"] = selected_dir_str

@@ -505,7 +505,11 @@ def main():
 
         resolved_base = _resolve_top_level_base(resolved_base)
 
-        resolved_default = default_result or resolved_output
+        # 기본 결과(default_result)는 명시적으로 전달된 경우에만 사용합니다.
+        # 이전 구현은 기본값으로 output_dir를 자동으로 사용했는데,
+        # 클라우드 배포시 불필요한 경로가 자동으로 채워지는 문제를 일으켰습니다.
+        # 따라서 None이면 --default_result/환경변수를 전달하지 않습니다.
+        resolved_default = default_result
 
         if getattr(sys, "frozen", False):
             # frozen 상태에서는 _MEIPASS(임시 추출 폴더)와 exe 옆 폴더를 후보로 검사합니다.
@@ -692,8 +696,9 @@ def main():
         except Exception:
             resolved_destination = str(destination)
         base_dir_resolved = _resolve_top_level_base(str(scope.source_dir.parent))
+        # 출력 디렉터리 및 베이스만 기록합니다. 기본 결과는 자동으로 설정하지 않습니다.
+        # (사용자가 ZIP을 업로드하거나 ZIP이 생성되었을 때만 default_result를 설정할 것입니다.)
         first_scope_info["output_dir"] = resolved_destination
-        first_scope_info["default_result"] = resolved_destination
         first_scope_info["base_dir"] = base_dir_resolved
         first_scope_event.set()
 
@@ -719,7 +724,9 @@ def main():
         if not output_dir:
             return
         base_dir = info.get("base_dir")
-        default_result = info.get("default_result") or output_dir
+        # first_scope에서 전달된 default_result가 명시적으로 있는 경우에만 사용합니다.
+        # output_dir로 자동 대체하지 않습니다.
+        default_result = info.get("default_result")
         _maybe_launch_dashboard("first-scope", output_dir, base_dir, default_result)
 
     threading.Thread(target=_dashboard_waiter, daemon=True).start()
@@ -881,8 +888,9 @@ def main():
 
         # 즉시 대시보드를 띄워 진행상황을 실시간으로 확인할 수 있게 합니다.
         try:
-            # 가능한 한 안전한 기본값을 넘깁니다. 실제 결과는 나중에 갱신될 수 있습니다.
-            _maybe_launch_dashboard("start", effective_output_dir, str(sel_path), effective_output_dir)
+            # 대시보드 초기 실행 시에는 default_result를 자동으로 채우지 않습니다.
+            # (클라우드 환경에서 /mount/... 같은 경로가 자동으로 들어가는 현상 방지)
+            _maybe_launch_dashboard("start", effective_output_dir, str(sel_path), None)
         except Exception:
             # 실패해도 진행은 계속됩니다.
             pass
@@ -1044,11 +1052,11 @@ def main():
 
         # usable_paths 우선 선택, 없으면 원래 paths에서 첫 항목으로 폴백
         if usable_paths:
+            # 결과가 포함된 상위 *_결과 폴더를 보여주되, 기본 선택(default_result_path)은 자동으로 설정하지 않습니다.
             dashboard_output_dir = str(usable_paths[0])
-            default_result_path = str(usable_paths[0])
         elif paths:
+            # 하위 경로만 주어진 경우에도 사용자가 결과 폴더를 확인할 수 있도록 표시합니다.
             dashboard_output_dir = str(paths[0])
-            default_result_path = str(paths[0])
             print("ℹ️ 결과 폴더가 생성되었지만 주요 리포트 파일이 보이지 않습니다. 대시보드에서 확인 후 적절한 폴더를 선택하세요.")
 
         # dashboard_base_dir 결정: 모든 경로의 공통 경로를 사용
@@ -1059,15 +1067,15 @@ def main():
             except Exception:
                 dashboard_base_dir = _resolve_top_level_base(str(sel_path))
 
-        if not raw_paths and summary.get("mode") != "scoped" and default_result_path:
-            dashboard_output_dir = default_result_path
+        # raw_paths가 비어있고 스코프 모드가 아닌 경우에도 자동으로 default_result를 채우지 않습니다.
+        # (사용자가 ZIP을 업로드하거나 ZIP이 생성되었을 때 default_result_path가 설정됩니다.)
 
         # 요약에 포함된 결과 폴더에 대해 ZIP 생성이 누락되었다면 보강합니다.
         ensured = _ensure_result_zips(raw_paths)
         if ensured:
             summary_zip_paths.extend([p for p in ensured if p])
-    if not default_result_path and os.path.isdir(effective_output_dir):
-        default_result_path = effective_output_dir
+    if os.path.isdir(effective_output_dir):
+        # 출력 디렉터리는 보여주되, default_result_path는 자동으로 채우지 않습니다.
         dashboard_output_dir = effective_output_dir
     if not dashboard_base_dir:
         candidate = dashboard_output_dir if os.path.isdir(dashboard_output_dir) else effective_output_dir
@@ -1075,10 +1083,12 @@ def main():
     else:
         dashboard_base_dir = _resolve_top_level_base(dashboard_base_dir)
 
-    if not first_scope_info.get("output_dir") and default_result_path:
+    if not first_scope_info.get("output_dir"):
+        # first_scope_info에는 출력 폴더와 베이스만 채웁니다. 기본 결과는 ZIP이 있을 때만 설정합니다.
         first_scope_info["output_dir"] = dashboard_output_dir
-        first_scope_info["default_result"] = default_result_path
         first_scope_info["base_dir"] = dashboard_base_dir
+        if default_result_path:
+            first_scope_info["default_result"] = default_result_path
 
     # 대시보드/외부 도구가 가장 최근 ZIP 경로를 참조할 수 있도록 환경 변수에 기록합니다.
     if summary_zip_paths:
