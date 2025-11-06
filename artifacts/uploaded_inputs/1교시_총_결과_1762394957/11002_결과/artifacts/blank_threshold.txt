@@ -1,3 +1,0 @@
-base_threshold=0.02
-auto_threshold=0.07104391232132912
-auto_suffix=2

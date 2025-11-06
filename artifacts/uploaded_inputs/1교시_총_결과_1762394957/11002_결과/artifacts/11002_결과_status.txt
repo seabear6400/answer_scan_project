@@ -1,2 +1,0 @@
-zip_created: C:\answer - 복사본\인문계\1교시\11002_결과_1762394948.zip
-candidates: ['C:\\answer - 복사본\\인문계\\1교시\\11002_결과']
