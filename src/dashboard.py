@@ -1047,10 +1047,7 @@ def _render_initial_upload_gate() -> None:
     if uploaded_zip_main is not None:
         _handle_uploaded_zip(uploaded_zip_main, source_tag="main")
 
-    hint_col = st.columns([1, 1, 1])
-    with hint_col[1]:
-        if st.button("사이드바 열기", key="open_sidebar_hint"):
-            st.sidebar.success("좌측 상단의 화살표 아이콘을 클릭하면 사이드바를 펼칠 수 있습니다.")
+
 
 with path_tab:
     st.markdown("**분석 경로 설정**")
