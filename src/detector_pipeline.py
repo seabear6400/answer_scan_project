@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import zipfile
 import re
+import atexit
+import threading
 
 import numpy as np
 from PIL import Image
@@ -38,6 +40,53 @@ import logging
 logger = logging.getLogger(__name__)
 # 로거 비활성화 - 토스트 창에서 진행상황을 보여주므로 콘솔 출력 숨김
 logger.setLevel(logging.CRITICAL)  # CRITICAL만 표시 (거의 없음)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+_PRUNE_RESULTS_AFTER_ZIP = _env_flag("ANSWER_SCAN_PRUNE_RESULTS_AFTER_ZIP", True)
+_PRUNE_IMMEDIATE = _env_flag("ANSWER_SCAN_PRUNE_RESULTS_IMMEDIATE", False)
+_CLEANUP_LOCK = threading.Lock()
+_CLEANUP_QUEUE: List[Path] = []
+_CLEANUP_REGISTERED = False
+
+
+def _flush_cleanup_queue() -> None:
+    if not _PRUNE_RESULTS_AFTER_ZIP:
+        return
+    with _CLEANUP_LOCK:
+        pending = list(_CLEANUP_QUEUE)
+        _CLEANUP_QUEUE.clear()
+    for target in pending:
+        try:
+            if target.exists():
+                shutil.rmtree(target, onerror=_handle_remove_readonly)
+        except Exception:
+            warnings.warn(f"결과 폴더 정리 실패: {target}")
+
+
+def _register_cleanup_hook() -> None:
+    global _CLEANUP_REGISTERED
+    if _CLEANUP_REGISTERED or not _PRUNE_RESULTS_AFTER_ZIP:
+        return
+    atexit.register(_flush_cleanup_queue)
+    _CLEANUP_REGISTERED = True
+
+
+def _schedule_result_dir_cleanup(path: Path) -> None:
+    if not _PRUNE_RESULTS_AFTER_ZIP:
+        return
+    _register_cleanup_hook()
+    with _CLEANUP_LOCK:
+        if path not in _CLEANUP_QUEUE:
+            _CLEANUP_QUEUE.append(path)
+    if _PRUNE_IMMEDIATE:
+        _flush_cleanup_queue()
 
 
 def diagnose_gpu():
@@ -733,13 +782,27 @@ def _zippable_files(root: Path) -> Iterable[Path]:
             yield path
 
 
+def _verify_zip_integrity(zip_path: Path) -> bool:
+    """ZIP 파일 무결성을 빠르게 검증합니다."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            corrupted = zf.testzip()
+            if corrupted:
+                warnings.warn(f"ZIP 무결성 검사 실패: {corrupted}")
+                return False
+    except Exception as exc:
+        warnings.warn(f"ZIP 무결성 검사 중 오류 발생: {exc}")
+        return False
+    return True
+
+
 def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = None) -> Optional[str]:
     """단일 결과 폴더 전체를 ZIP 아카이브로 생성합니다.
 
     동작 요약 (한국어):
     - ZIP 파일은 결과 폴더(`result_dir`)의 부모 디렉터리(=결과 폴더와 동일 레벨)에 생성됩니다.
       예: `/some/path/11001_결과` -> `/some/path/11001_결과_163... .zip`
-    - ZIP 생성 이력(상태 파일)은 기존처럼 결과 폴더 내부의 `artifacts` 디렉터리에 기록됩니다.
+    - ZIP 생성 이력 기록은 생략하여 불필요한 폴더 생성을 방지합니다.
     """
     try:
         target = Path(result_dir).resolve()
@@ -749,14 +812,14 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
     if not target.exists() or not target.is_dir():
         return None
 
-    # 상태 파일은 기존 동작을 유지: 결과 폴더 내부의 artifacts에 기록
-    artifacts_dir = target / "artifacts"
-    try:
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        # artifacts 생성 실패 시에는 상태 기록이 불가하므로 중단
-        return None
-
+    # ZIP 생성 시 불필요한 artifacts 폴더 생성 방지: 상태 파일 기록 제거
+    # artifacts_dir = target / "artifacts"
+    # try:
+    #     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    # except Exception:
+    #     # artifacts 생성 실패 시에는 상태 기록이 불가하므로 중단
+    #     return None
+ 
     base_name = zip_basename or target.name
 
     # ZIP은 결과 폴더의 부모 디렉터리에 생성 (요구사항: 결과 폴더와 동일 레벨)
@@ -770,7 +833,9 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
     try:
         existing = sorted(zip_parent.glob(f"{base_name}_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
         if existing:
-            return str(existing[0])
+            selected = existing[0]
+            _schedule_result_dir_cleanup(target)
+            return str(selected)
     except Exception:
         pass
 
@@ -797,8 +862,22 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
             pass
         return None
 
-    # ZIP 생성 이력은 결과 폴더의 artifacts에 남겨 운영자가 확인할 수 있게 함
-    _write_zip_status(artifacts_dir, base_name, zip_path, [target])
+    if not _verify_zip_integrity(zip_path):
+        try:
+            zip_path.unlink(missing_ok=True)
+        except TypeError:
+            # Python 3.8 호환: missing_ok 인자 미지원
+            try:
+                if zip_path.exists():
+                    zip_path.unlink()
+            except Exception:
+                pass
+        return None
+
+    _schedule_result_dir_cleanup(target)
+
+    # ZIP 생성 시 불필요한 artifacts 폴더 생성 방지: 상태 파일 기록 제거
+    # _write_zip_status(artifacts_dir, base_name, zip_path, [target])
     return str(zip_path)
 
 
@@ -810,6 +889,7 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None,
     - `target_dir`를 지정하면 해당 경로(예: 상위 폴더)에 ZIP을 생성하며, 지정하지 않으면 `base_dir`에 생성합니다.
     - `prefix`를 전달하면 ZIP 파일명 및 내부 루트 폴더명에 접두사로 사용합니다.
       예: prefix='인문계' → `인문계_총_결과_<timestamp>.zip`
+    - ZIP 생성 이력 기록은 생략하여 불필요한 폴더 생성을 방지합니다.
     """
 
     try:
@@ -924,13 +1004,13 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None,
             pass
         return None
 
-    # 5) 상태 기록: base_dir 하위 artifacts에 간단히 로그를 남겨 추후 추적
-    status_dir = base_path / "artifacts"
-    try:
-        _write_zip_status(status_dir, zip_base_name, zip_path, result_dirs)
-    except Exception:
-        # 상태 파일 기록 실패는 치명적이지 않으므로 무시
-        pass
+    # ZIP 생성 시 불필요한 artifacts 폴더 생성 방지: 상태 파일 기록 제거
+    # status_dir = base_path / "artifacts"
+    # try:
+    #     _write_zip_status(status_dir, zip_base_name, zip_path, result_dirs)
+    # except Exception:
+    #     # 상태 파일 기록 실패는 치명적이지 않으므로 무시
+    #     pass
 
     return str(zip_path)
 
