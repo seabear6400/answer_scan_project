@@ -801,7 +801,7 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
 
     동작 요약 (한국어):
     - ZIP 파일은 결과 폴더(`result_dir`)의 부모 디렉터리(=결과 폴더와 동일 레벨)에 생성됩니다.
-      예: `/some/path/11001_결과` -> `/some/path/11001_결과_163... .zip`
+      예: `/some/path/11001_결과` -> `/some/path/11001_결과.zip`
     - ZIP 생성 이력 기록은 생략하여 불필요한 폴더 생성을 방지합니다.
     """
     try:
@@ -829,18 +829,8 @@ def create_result_zip_for_dir(result_dir: str, zip_basename: Optional[str] = Non
     except Exception:
         return None
 
-    # 이미 동일 베이스명으로 부모 디렉터리에 생성된 ZIP이 있으면 재사용
-    try:
-        existing = sorted(zip_parent.glob(f"{base_name}_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if existing:
-            selected = existing[0]
-            _schedule_result_dir_cleanup(target)
-            return str(selected)
-    except Exception:
-        pass
-
-    timestamp = int(time.time())
-    zip_path = zip_parent / f"{base_name}_{timestamp}.zip"
+    # 타임스탬프 제거: 기존 ZIP이 있으면 덮어쓰기 (재사용 로직 제거)
+    zip_path = zip_parent / f"{base_name}.zip"
 
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -887,8 +877,8 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None,
     한국어 요약:
     - `base_dir` 아래에서 `*_결과` 패턴을 만족하는 폴더들을 찾아 하나의 묶음으로 압축합니다.
     - `target_dir`를 지정하면 해당 경로(예: 상위 폴더)에 ZIP을 생성하며, 지정하지 않으면 `base_dir`에 생성합니다.
-    - `prefix`를 전달하면 ZIP 파일명 및 내부 루트 폴더명에 접두사로 사용합니다.
-      예: prefix='인문계' → `인문계_총_결과_<timestamp>.zip`
+        - `prefix`를 전달하면 ZIP 파일명 및 내부 루트 폴더명에 접두사로 사용합니다.
+            예: prefix='인문계' → `인문계_총_결과.zip`
     - ZIP 생성 이력 기록은 생략하여 불필요한 폴더 생성을 방지합니다.
     """
 
@@ -961,26 +951,20 @@ def create_aggregate_result_zip(base_dir: str, target_dir: Optional[str] = None,
     except Exception:
         latest_source_mtime = 0.0
 
+    zip_path = target_root / f"{zip_base_name}.zip"
+
     try:
-        existing = sorted(
-            target_root.glob(f"{zip_base_name}_*.zip"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if existing:
-            latest_zip = existing[0]
+        if zip_path.exists():
             try:
-                if latest_zip.stat().st_mtime >= latest_source_mtime:
-                    return str(latest_zip)
+                if zip_path.stat().st_mtime >= latest_source_mtime:
+                    return str(zip_path)
             except Exception:
                 pass
     except Exception:
         pass
 
     # 4) 새 ZIP 생성
-    timestamp = int(time.time())
-    bundle_dir_name = f"{zip_base_name}_{timestamp}"
-    zip_path = target_root / f"{bundle_dir_name}.zip"
+    bundle_dir_name = zip_base_name
 
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
