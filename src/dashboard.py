@@ -577,7 +577,18 @@ if "_build_result_meta" not in globals():
 
 if "_register_result_dir" not in globals():
     def _register_result_dir(path: str) -> List[str]:
-        """ZIP 추출 루트에서 실제 결과 폴더들만 추려 세션과 전역 상태에 등록합니다."""
+        """지정한 경로에서 '숫자_결과' 패턴에 맞는 결과 폴더들을 찾아 세션/전역 상태에 등록합니다.
+
+        동작 요약:
+        - 전달된 경로 자체가 결과 폴더 패턴에 맞으면 우선 등록합니다.
+        - 그렇지 않으면 그 경로의 직계 하위 폴더들에서 패턴에 맞는 폴더들을 수집합니다.
+        - 직계에 없을 경우(예: 루트/집합 폴더 구조) 2단계 깊이까지 재귀적으로 검색하여 후보를 수집합니다.
+        - 발견된 각 폴더에 대해 `_has_result_files`로 유효성(리포트/요약 존재 여부)를 검사하고
+          `st.session_state["available_result_dirs"]`, `RESULT_DIRS`, `RESULT_META`,
+          `st.session_state["scan_result_meta"]`를 일관되게 갱신합니다.
+
+        반환값: 등록(또는 발견)된 절대 경로 문자열 목록(순서 보장)
+        """
         registered: List[str] = []
 
         try:
@@ -586,47 +597,79 @@ if "_register_result_dir" not in globals():
             return registered
 
         candidates: List[Path] = []
-        if base_path.is_dir():
-            if RESULT_DIR_NAME_PATTERN.match(base_path.name):
+
+        # 1) 전달된 경로 자체가 결과 폴더 패턴에 맞으면 우선 등록
+        try:
+            if base_path.is_dir() and RESULT_DIR_NAME_PATTERN.match(base_path.name):
                 candidates.append(base_path)
-            else:
-                try:
-                    for child in sorted(base_path.iterdir()):
+        except Exception:
+            pass
+
+        # 2) 직계 하위에서 패턴에 맞는 폴더 수집
+        if not candidates and base_path.is_dir():
+            try:
+                for child in sorted(base_path.iterdir()):
+                    try:
                         if child.is_dir() and RESULT_DIR_NAME_PATTERN.match(child.name):
-                            candidates.append(child.resolve())
-                except Exception:
-                    pass
+                            candidates.append(child)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
 
+        # 3) 직계에도 없을 경우 2단계 깊이까지 검색 (보수적 예비 검색)
+        if not candidates and base_path.is_dir():
+            try:
+                for child in sorted(base_path.iterdir()):
+                    try:
+                        if not child.is_dir():
+                            continue
+                        for sub in sorted(child.iterdir()):
+                            try:
+                                if sub.is_dir() and RESULT_DIR_NAME_PATTERN.match(sub.name):
+                                    candidates.append(sub)
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # 세션 상태 및 메타 준비
         dirs_state = st.session_state.setdefault("available_result_dirs", [])
-
-        base_str = str(base_path)
-        if base_str in dirs_state and base_str not in [str(c) for c in candidates]:
-            dirs_state.remove(base_str)
-
         meta = globals().get("RESULT_META") or {}
 
+        # 발견된 후보들을 세션/전역에 반영
         for cand in candidates:
             try:
-                resolved = str(cand.resolve())
+                resolved = str(Path(cand).resolve())
             except Exception:
                 resolved = str(cand)
 
-            has_result = False
+            # 결과 파일 존재 여부 판정
             try:
-                has_result = _has_result_files(cand)
+                has_result = bool(_has_result_files(Path(resolved)))
             except Exception:
                 has_result = False
 
-            meta[resolved] = {
-                "has_report": bool(has_result),
-                "needs_rescan": not bool(has_result),
-            }
+            meta[resolved] = {"has_report": has_result, "needs_rescan": not has_result}
 
             if resolved not in dirs_state:
                 dirs_state.append(resolved)
             registered.append(resolved)
 
-        # 중복을 제거하면서 입력 순서를 유지합니다.
+        # 기존에 등록된 경로 중 현재 베이스(루트) 문자열은 직접 등록 대상이 아니면 제거
+        try:
+            base_str = str(base_path)
+            if base_str in dirs_state and base_str not in registered:
+                try:
+                    dirs_state.remove(base_str)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 중복 제거(입력 순서 유지) 및 상태 업데이트
         unique_dirs = list(dict.fromkeys(dirs_state))
         st.session_state["available_result_dirs"] = unique_dirs
 
